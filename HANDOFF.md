@@ -7,10 +7,13 @@ state and next steps.
 ## Where things stand
 
 **Done.** `pyeki.linalg` is implemented, documented and tested — the three-level
-operator hierarchy, six leaf operators, four composites, and a conformance
-harness. 22 tests pass. Documentation builds: landing page, installation,
+operator hierarchy, six leaf operators, six composites, and a conformance
+harness. 38 tests pass. Documentation builds: landing page, installation,
 quickstart, operator catalogue, a guide to writing an operator, design notes,
 and an API reference.
+
+`Kron` and `KronGeneral` landed on 2026-08-24, with the orientation and
+log-determinant results recorded in `docs/design.md` and in the table below.
 
 **Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design for
 all three is in `docs/design.md`, which is the single most useful thing to read
@@ -23,32 +26,23 @@ pyEKI. Nothing domain-specific should come back across.
 
 ## Next steps, in order
 
-### 1. `Kron` (start here)
+### 1. `KronLMC`, `KronPlusNugget`, `LowRankPlus` (start here)
 
-The one operator whose absence blocks the rest. Two variants, and they are not
-the same code:
+`Kron` and `KronGeneral` are done. The remaining operators, in this order:
 
-- **Square** `Kron(A, B)` representing $A \otimes B$. Convention: the first
-  factor's index is the *slow* one, so block $(i,j)$ of the result is
-  $A_{ij}B$. Implement `matvec` by reshaping the trailing axis to `(n_A, n_B)`,
-  applying `B` then `A`, and flattening back.
-- **Rectangular**, needed because `factor(A ⊗ B) == factor(A) ⊗ factor(B)` and
-  those factors need not be square. The square implementation does **not**
-  generalize: it reshapes input and output to the same shape, whereas a
-  rectangular Kronecker product needs input reshaped to `(k_A, k_B)` and output
-  to `(n_A, n_B)`.
+- **`KronLMC`**, a sum $\sum_q A_q \otimes B_q$. Build on `Kron`; note that a
+  sum of Kronecker products has no shared eigenbasis in general, so `solve` and
+  `logdet` need either the spectral route or no implementation at all.
+- **`KronPlusNugget`**. `docs/design.md` records the simultaneous
+  diagonalization, the $n\log\det C^l$ term that is easy to omit, and the
+  requirement that the nugget be strictly positive definite.
+- **`LowRankPlus`**.
 
-:::{warning}
-A transposed Kronecker orientation is silent — it yields a valid PSD matrix
-with the wrong meaning. Test `matvec` against `np.kron` directly, at leading
-batch rank 0, 1 and 2. Do **not** rely on a `to_dense` comparison: `to_dense`
-is built from `jnp.kron` of the children, a different code path, so it passes
-even when `matvec` is wrong.
-:::
-
-Then `KronLMC` (a sum $\sum_q A_q \otimes B_q$), `KronPlusNugget` and
-`LowRankPlus`, in that order. `docs/design.md` records the closed forms and
-their preconditions, including a log-determinant term that is easy to omit.
+Follow the orientation convention `Kron` establishes — first factor slow,
+matching `numpy.kron` — and pin each new operator's `matvec` *and* `to_dense`
+to `numpy.kron` separately rather than to each other. `docs/design.md` explains
+why the latter constrains nothing, with the mutation result that demonstrates
+it.
 
 ### 2. `pyeki.gauss`
 
@@ -108,7 +102,9 @@ it at class creation from `cls.__dict__` instead.
 **Whitening versus triangularity.** `cholesky()` requires a square triangular
 factor, but whitening only needs a square invertible one. Some structures have
 the latter without the former. If that becomes limiting, decouple `whiten` from
-`cholesky` rather than forcing triangularity.
+`cholesky` rather than forcing triangularity. Now tracked as issue #1, with the
+two instances that exist today — `BlockDiag` and `Kron` — written up there; a
+third is likely when `KronPlusNugget` and `LowRankPlus` land.
 
 ## Things not to rediscover
 
@@ -120,6 +116,9 @@ errors. All are recorded in `docs/design.md`; this is the index.
 | Circulant embedding gives `matvec` and sampling but **not** `solve` or `logdet` on a restricted grid | a spectral log-determinant would be silently wrong |
 | For exponential correlation, the *whitener* is bidiagonal, not the factor | sampling is a sequential recurrence, not a banded solve |
 | A scalar correlation coefficient is wrong for irregular observation times | build the precision from per-interval coefficients |
+| Kronecker orientation is silent: $B \otimes A$ is PSD whenever $A \otimes B$ is, and the same shape when the factors match in size | a valid covariance with the wrong meaning, no error |
+| `Kron` log-determinant pairs each factor with the size of the *other* factor | off by a factor, and invisible to any test with equal-size factors |
+| A self-consistent `matvec`/`to_dense` pair passes the whole conformance suite | orientation must be pinned to `numpy.kron`, not to the other method |
 | `KronPlusNugget` log-determinant needs an $n\log\det C^l$ term | omitting it is off by a factor, silently |
 | Kronecker-plus-nugget needs a strictly positive-definite nugget | a singular one has no simultaneous diagonalization |
 | A tapered covariance is PSD only if the taper is a valid PD function | dimension-dependent; use a known family |

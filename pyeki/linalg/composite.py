@@ -7,16 +7,19 @@ class                         represents
 :class:`HStack`               blocks placed side by side, ``[A_1 ... A_m]``
 :class:`BlockDiag`            a block-diagonal matrix of PSD blocks
 :class:`BlockDiagGeneral`     a block-diagonal matrix of arbitrary blocks
+:class:`Kron`                 a Kronecker product of two PSD factors
+:class:`KronGeneral`          a Kronecker product of two arbitrary factors
 ============================  ==============================================
 
 See :mod:`pyeki.linalg.base` for the shape convention shared by
 all operators.
 
-``Product`` and ``HStack`` are what ``factor()`` returns for composed
-operators, since a square root distributes over composition:
+``Product``, ``HStack`` and ``KronGeneral`` are what ``factor()`` returns for
+composed operators, since a square root distributes over composition:
 
 - the factor of a sum is its factors side by side, an ``HStack``;
-- the factor of ``D A D`` is ``D`` times the factor of ``A``, a ``Product``.
+- the factor of ``D A D`` is ``D`` times the factor of ``A``, a ``Product``;
+- the factor of ``A (x) B`` is ``factor(A) (x) factor(B)``, a ``KronGeneral``.
 
 Notes
 -----
@@ -28,12 +31,21 @@ its own class rather than being expressed as a ``Product``.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import jax.numpy as jnp
 from jax import Array
 
 from .base import LinOp, PSDOperator, operator
 
-__all__ = ["Product", "HStack", "BlockDiag"]
+__all__ = [
+    "Product",
+    "HStack",
+    "BlockDiag",
+    "BlockDiagGeneral",
+    "Kron",
+    "KronGeneral",
+]
 
 
 @operator
@@ -229,11 +241,159 @@ class BlockDiagGeneral(LinOp):
             [b.matvec(c) for b, c in zip(self.blocks, chunks, strict=True)], axis=-1
         )
 
-    def solve(self, b: Array) -> Array:  # pragma: no cover - not a SquareLinOp
-        raise AttributeError("BlockDiagGeneral is not square; use BlockDiag")
-
     def to_dense(self) -> Array:
         return _dense_block_diag([b.to_dense() for b in self.blocks])
+
+
+@operator
+class Kron(PSDOperator):
+    """A Kronecker product of two square PSD factors.
+
+    The entry at row ``i * n_B + k`` and column ``j * n_B + l`` is
+    ``A[i, j] * B[k, l]``, so block ``(i, j)`` of the result is ``A[i, j] * B``
+    and the first factor's index varies most slowly. This is the ordering
+    ``numpy.kron`` uses.
+
+    Every operation is carried out on the two factors separately, so nothing of
+    side ``n_A * n_B`` is ever formed or factorized. Which operations are
+    available depends on the factors: this operator supports ``solve`` only if
+    both factors do. Check with ``op.supports(name)`` before calling.
+
+    Parameters
+    ----------
+    A
+        Square PSD operator, the factor whose index varies most slowly.
+    B
+        Square PSD operator, the factor whose index varies fastest.
+
+    Raises
+    ------
+    TypeError
+        If either factor is not a :class:`~.base.PSDOperator`.
+    ValueError
+        If either factor is not square.
+
+    Notes
+    -----
+    The ordering above is stated explicitly because reversing it is silent
+    rather than loud. ``B (x) A`` is a different matrix, but it is positive
+    definite whenever ``A (x) B`` is, and it has the same shape when the two
+    factors have the same size, so a reversed implementation returns wrong
+    numbers without raising.
+    """
+
+    A: PSDOperator
+    B: PSDOperator
+
+    def __post_init__(self) -> None:
+        for name, f in (("A", self.A), ("B", self.B)):
+            if not isinstance(f, PSDOperator):
+                raise TypeError(
+                    f"Kron factor {name} must be PSDOperator, got {type(f).__name__}"
+                )
+            if f.shape[0] != f.shape[1]:
+                raise ValueError(
+                    f"Kron factor {name} must be square, got shape {f.shape}"
+                )
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        n = self.A.shape[0] * self.B.shape[0]
+        return (n, n)
+
+    @property
+    def _core(self) -> tuple[int, int]:
+        """Core shape the trailing axis is reshaped to, ``(n_A, n_B)``."""
+        return (self.A.shape[0], self.B.shape[0])
+
+    def supports(self, name: str) -> bool:
+        return (
+            super().supports(name)
+            and self.A.supports(name)
+            and self.B.supports(name)
+        )
+
+    def matvec(self, x: Array) -> Array:
+        return _kron_apply(x, self.A.matvec, self.B.matvec, self._core, self._core)
+
+    def solve(self, b: Array) -> Array:
+        # (A (x) B)^-1 == A^-1 (x) B^-1.
+        return _kron_apply(b, self.A.solve, self.B.solve, self._core, self._core)
+
+    def whiten(self, x: Array) -> Array:
+        # (L_A (x) L_B)^-1 == L_A^-1 (x) L_B^-1, applied factor by factor rather
+        # than by solving against the assembled factor.
+        return _kron_apply(x, self.A.whiten, self.B.whiten, self._core, self._core)
+
+    def factor(self) -> LinOp:
+        return KronGeneral(self.A.factor(), self.B.factor())
+
+    def cholesky(self) -> LinOp:
+        return KronGeneral(self.A.cholesky(), self.B.cholesky())
+
+    def diag(self) -> Array:
+        return jnp.kron(self.A.diag(), self.B.diag())
+
+    def logdet(self) -> Array:
+        n_A, n_B = self._core
+        # det(A (x) B) == det(A)^n_B * det(B)^n_A: each factor's contribution is
+        # scaled by the size of the *other* factor. Swapping the two is silent
+        # whenever n_A == n_B.
+        return n_B * self.A.logdet() + n_A * self.B.logdet()
+
+    def to_dense(self) -> Array:
+        return jnp.kron(self.A.to_dense(), self.B.to_dense())
+
+
+@operator
+class KronGeneral(LinOp):
+    """A Kronecker product of two operators, either of which may be rectangular.
+
+    Ordering follows :class:`Kron`: the entry at row ``i * n_B + k`` and column
+    ``j * k_B + l`` is ``A[i, j] * B[k, l]``.
+
+    Returned by :meth:`Kron.factor` and :meth:`Kron.cholesky`, because a square
+    root of a Kronecker product is the Kronecker product of the factors' square
+    roots, and those need not be square. Provides ``matvec``, ``matmat`` and
+    ``to_dense`` only.
+
+    Parameters
+    ----------
+    A
+        The slow factor, of shape ``(n_A, k_A)``.
+    B
+        The fast factor, of shape ``(n_B, k_B)``.
+
+    Notes
+    -----
+    The operand is reshaped to ``(k_A, k_B)`` and the result to
+    ``(n_A, n_B)``. These differ whenever either factor is rectangular, with a
+    mixed intermediate of shape ``(k_A, n_B)``, so an implementation that
+    reshapes operand and result alike is correct only in the square case.
+    """
+
+    A: LinOp
+    B: LinOp
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (
+            self.A.shape[0] * self.B.shape[0],
+            self.A.shape[1] * self.B.shape[1],
+        )
+
+    def matvec(self, x: Array) -> Array:
+        return _kron_apply(
+            x,
+            self.A.matvec,
+            self.B.matvec,
+            (self.A.shape[1], self.B.shape[1]),
+            (self.A.shape[0], self.B.shape[0]),
+        )
+
+    def to_dense(self) -> Array:
+        return jnp.kron(self.A.to_dense(), self.B.to_dense())
+
 
 
 def _dense_block_diag(mats: list[Array]) -> Array:
@@ -246,3 +406,41 @@ def _dense_block_diag(mats: list[Array]) -> Array:
         out = out.at[r : r + m.shape[0], c : c + m.shape[1]].set(m)
         r, c = r + m.shape[0], c + m.shape[1]
     return out
+
+
+def _kron_apply(
+    x: Array,
+    left: Callable[[Array], Array],
+    right: Callable[[Array], Array],
+    in_shape: tuple[int, int],
+    out_shape: tuple[int, int],
+) -> Array:
+    """Apply a Kronecker product to the trailing axis of ``x``.
+
+    Reshapes the trailing axis of ``x`` to ``in_shape``, applies ``right``
+    along the resulting trailing axis and ``left`` along the axis before it,
+    then flattens the ``out_shape`` result back to a single trailing axis.
+
+    Parameters
+    ----------
+    x
+        Operand whose trailing axis has length ``in_shape[0] * in_shape[1]``,
+        preceded by any number of batch axes.
+    left, right
+        Callables applying the slow and fast factors respectively, each
+        contracting the trailing axis of its own argument.
+    in_shape, out_shape
+        Core shapes of the operand and of the result.
+
+    Notes
+    -----
+    The two shapes are separate parameters because a rectangular Kronecker
+    product reshapes its operand and its result differently, passing through a
+    mixed intermediate of shape ``(in_shape[0], out_shape[1])``. Reusing one
+    shape for both is correct only when both factors are square.
+    """
+    batch = x.shape[:-1]
+    X = x.reshape(*batch, *in_shape)
+    Y = right(X)                                     # (..., in_shape[0], out_shape[1])
+    Z = left(Y.swapaxes(-1, -2)).swapaxes(-1, -2)    # (..., out_shape[0], out_shape[1])
+    return Z.reshape(*batch, out_shape[0] * out_shape[1])

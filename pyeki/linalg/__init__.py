@@ -29,7 +29,14 @@ from .base import (
     static_field,
     tri_solve,
 )
-from .composite import BlockDiag, BlockDiagGeneral, HStack, Product
+from .composite import (
+    BlockDiag,
+    BlockDiagGeneral,
+    HStack,
+    Kron,
+    KronGeneral,
+    Product,
+)
 from .leaves import Dense, DensePSD, Diagonal, Identity, ScaledIdentity, Triangular
 
 __all__ = [
@@ -55,4 +62,6 @@ __all__ = [
     "HStack",
     "BlockDiag",
     "BlockDiagGeneral",
+    "Kron",
+    "KronGeneral",
 ]

@@ -42,6 +42,8 @@ new structure.
 .. autoclass:: pyeki.linalg.HStack
 .. autoclass:: pyeki.linalg.BlockDiag
 .. autoclass:: pyeki.linalg.BlockDiagGeneral
+.. autoclass:: pyeki.linalg.Kron
+.. autoclass:: pyeki.linalg.KronGeneral
 ```
 
 ### Helpers for defining operators

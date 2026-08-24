@@ -112,6 +112,56 @@ a validity mask, since variable-size domains cannot be vectorized.
 Results that inform which operators are worth implementing. Each was verified
 numerically against a dense reference.
 
+### Kronecker products
+
+$A \otimes B$ needs no factorization of its own. Every operation reduces to the
+same operation on each factor: `matvec` by reshaping the operand's trailing
+axis to $(n_A, n_B)$ and applying each factor along its own axis, `solve`
+because $(A \otimes B)^{-1} = A^{-1} \otimes B^{-1}$, and `factor` because
+$\mathrm{factor}(A \otimes B) = \mathrm{factor}(A) \otimes \mathrm{factor}(B)$.
+The last of those is why a rectangular Kronecker class is needed as well as a
+square one: the factors' square roots need not be square, so the operand is
+reshaped to $(k_A, k_B)$ while the result is reshaped to $(n_A, n_B)$, with a
+mixed intermediate of shape $(k_A, n_B)$. An implementation that reshapes
+operand and result alike — all the square case requires — cannot express the
+rectangular one.
+
+Three results, each of which produces wrong numbers rather than an error.
+
+**Orientation is silent.** The convention is that the first factor is the slow
+index, matching `numpy.kron`. Reversing it gives $B \otimes A$, which is a
+different matrix but is positive definite whenever $A \otimes B$ is, and has
+the same shape whenever the factors are the same size. So the reversed
+implementation returns a valid covariance with the wrong meaning. Checked: for
+two $3 \times 3$ PSD factors, the reversed product has smallest eigenvalue
+$9.40$ — comfortably definite — while differing from the correct product by
+$17.1$ in the largest entry.
+
+**The log-determinant pairs each factor with the other factor's size.**
+
+$$\log\det(A \otimes B) = n_B \log\det A + n_A \log\det B.$$
+
+Swapping the two coefficients is the natural slip and it is invisible to any
+test whose factors are the same size, since the two expressions then coincide
+identically. With $n_A = 3$ and $n_B = 5$ the correct value is $57.5627$ and
+the swapped pairing gives $70.5677$.
+
+**Consistency is not correctness.** The conformance suite compares `matvec`
+against `to_dense`, so an implementation that reverses the factors in *both*
+agrees with itself and passes. Verified by mutation: reversing the orientation
+throughout `Kron` — `matvec`, `solve`, `whiten`, `factor`, `cholesky`, `diag`
+and `to_dense` together — leaves the whole conformance suite passing for
+equal-size factors. Only comparison against an external `numpy.kron` reference
+detects it. So the orientation of `matvec` *and* of `to_dense` must each be
+pinned to `numpy.kron` directly; pinning them to each other constrains nothing.
+
+The Kronecker product of two lower-triangular matrices is lower triangular and
+equals the Cholesky factor of the product exactly, so a triangular square root
+does exist. It is not exposed as one: `cholesky()` returns the same rectangular
+class as `factor()`, which carries no `solve`, and `whiten` is implemented on
+the factors instead. That is the second operator in this layer to hit the
+mismatch between what `cholesky()` promises and what whitening needs.
+
 ### Kronecker plus nugget
 
 $C = K \otimes B + I_n \otimes C^{l}$ admits a simultaneous diagonalization,
