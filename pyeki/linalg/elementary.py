@@ -1,16 +1,20 @@
 """Operators defined directly by their own arrays.
 
-============================  ==============================================
-class                         represents
-============================  ==============================================
-:class:`Identity`             the identity matrix
-:class:`ScaledIdentity`       a positive multiple of the identity
-:class:`Diagonal`             a diagonal matrix with positive entries
-:class:`Dense`                an explicit array, possibly rectangular
-:class:`DenseSquare`          a dense square matrix, stored with its LU
-:class:`Triangular`           a square triangular matrix
-:class:`DensePSD`             a dense PSD matrix, stored as its Cholesky
-============================  ==============================================
+===========================  ===============================================
+class                        represents
+===========================  ===============================================
+:class:`Identity`            the identity matrix
+:class:`PSDScaledIdentity`   a positive multiple of the identity
+:class:`PSDDiagonal`         a diagonal matrix with positive entries
+:class:`Dense`               an explicit array, possibly rectangular
+:class:`DenseSquare`         a dense square matrix, stored with its LU
+:class:`Triangular`          a square triangular matrix
+:class:`DensePSD`            a dense PSD matrix, stored as its Cholesky
+===========================  ===============================================
+
+Elementary operators at the PSD level whose unrestricted mathematical
+namesake is not PSD carry the ``PSD`` prefix; the generic names stay
+reserved for unrestricted classes, should one ever be needed.
 
 See :mod:`pyeki.linalg.base` for the shape convention shared by all
 operators, and :mod:`pyeki.linalg.composite` for operators built out of
@@ -45,8 +49,8 @@ from .base import (
 
 __all__ = [
     "Identity",
-    "ScaledIdentity",
-    "Diagonal",
+    "PSDScaledIdentity",
+    "PSDDiagonal",
     "Dense",
     "DenseSquare",
     "Triangular",
@@ -127,8 +131,8 @@ class Identity(PSDLinOp):
 
 
 @linop
-class ScaledIdentity(PSDLinOp):
-    """A positive multiple of the identity.
+class PSDScaledIdentity(PSDLinOp):
+    """A strictly positive multiple of the identity.
 
     Parameters
     ----------
@@ -137,17 +141,22 @@ class ScaledIdentity(PSDLinOp):
         traced and differentiated with respect to.
     size
         Side length, a positive int.
+
+    Notes
+    -----
+    The positivity precondition, and hence the ``PSD`` in the name, follow
+    the same reasoning as :class:`PSDDiagonal`.
     """
 
     c: Array
     size: int = static_field()
 
     def __post_init__(self) -> None:
-        _check_size("ScaledIdentity", self.size)
+        _check_size("PSDScaledIdentity", self.size)
         value_check(
             self.c,
             lambda c: bool(jnp.all(c > 0)),
-            "ScaledIdentity.c must be strictly positive",
+            "PSDScaledIdentity.c must be strictly positive",
         )
 
     @property
@@ -167,7 +176,7 @@ class ScaledIdentity(PSDLinOp):
         return jnp.full((self.size,), self.c)
 
     def _factor(self) -> LinOp:
-        return ScaledIdentity(jnp.sqrt(self.c), self.size)
+        return PSDScaledIdentity(jnp.sqrt(self.c), self.size)
 
     def _whiten(self, x: Array) -> Array:
         return x / jnp.sqrt(self.c)
@@ -177,23 +186,32 @@ class ScaledIdentity(PSDLinOp):
 
 
 @linop
-class Diagonal(PSDLinOp):
-    """A diagonal matrix.
+class PSDDiagonal(PSDLinOp):
+    """A diagonal matrix with strictly positive entries.
 
     Parameters
     ----------
     d
         Diagonal entries, strictly positive. Its length sets the size.
+
+    Notes
+    -----
+    The positivity precondition is not a claim about diagonal matrices in
+    general: it is what makes the class's PSD level and its advertised
+    capabilities (``solve``, ``whiten``, ``factor``, ``logdet``) true, and
+    the name says so. A signed diagonal would be a separate
+    :class:`~.base.SquareLinOp`-level class, to be added when a consumer
+    needs it.
     """
 
     d: Array
 
     def __post_init__(self) -> None:
-        _check_rank_floor("Diagonal", "d", self.d, 1)
+        _check_rank_floor("PSDDiagonal", "d", self.d, 1)
         value_check(
             self.d,
             lambda d: bool(jnp.all(d > 0)),
-            "Diagonal entries must be strictly positive",
+            "PSDDiagonal entries must be strictly positive",
         )
 
     @property
@@ -214,7 +232,7 @@ class Diagonal(PSDLinOp):
         return self.d
 
     def _factor(self) -> LinOp:
-        return Diagonal(jnp.sqrt(self.d))
+        return PSDDiagonal(jnp.sqrt(self.d))
 
     def _whiten(self, x: Array) -> Array:
         return x / jnp.sqrt(self.d)

@@ -28,8 +28,8 @@ contract.
 
 ```{eval-rst}
 .. autoclass:: pyeki.linalg.Identity
-.. autoclass:: pyeki.linalg.ScaledIdentity
-.. autoclass:: pyeki.linalg.Diagonal
+.. autoclass:: pyeki.linalg.PSDScaledIdentity
+.. autoclass:: pyeki.linalg.PSDDiagonal
 .. autoclass:: pyeki.linalg.Dense
 .. autoclass:: pyeki.linalg.DenseSquare
    :members: from_matrix

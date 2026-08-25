@@ -45,7 +45,7 @@ from .base import (
     linop,
     value_check,
 )
-from .elementary import Diagonal
+from .elementary import PSDDiagonal
 
 __all__ = [
     "Transposed",
@@ -550,7 +550,7 @@ class DiagCongruence(PSDLinOp):
         return self.s * self.s * self.op._diag()
 
     def _factor(self) -> LinOp:
-        return Product((Diagonal(self.s), self.op._factor()))
+        return Product((PSDDiagonal(self.s), self.op._factor()))
 
     def _whiten(self, x: Array) -> Array:
         return self.op._whiten(x / self.s)

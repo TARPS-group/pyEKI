@@ -56,9 +56,9 @@ from .elementary import (
     Dense,
     DensePSD,
     DenseSquare,
-    Diagonal,
     Identity,
-    ScaledIdentity,
+    PSDDiagonal,
+    PSDScaledIdentity,
     Triangular,
 )
 
@@ -78,8 +78,8 @@ __all__ = [
     "value_check",
     # elementary operators
     "Identity",
-    "ScaledIdentity",
-    "Diagonal",
+    "PSDScaledIdentity",
+    "PSDDiagonal",
     "Dense",
     "DenseSquare",
     "Triangular",

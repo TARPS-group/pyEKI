@@ -83,7 +83,7 @@ then columns, matching the dense array `to_dense()` returns.
 - `SquareLinOp` adds `n`, the side length, equal to both entries of
   `shape`.
 - **Operators are unbatched.** Every stored array has exactly its core
-  rank: a `Dense` stores a 2-D array, a `Diagonal` a 1-D array. The
+  rank: a `Dense` stores a 2-D array, a `PSDDiagonal` a 1-D array. The
   user-facing constructors — classmethods like `from_matrix` and the
   factories — enforce this exactly; the storing constructor enforces only
   a rank *floor*, for reasons the pytree machinery imposes (see
@@ -563,7 +563,7 @@ is impossible on tracers and forces a device sync on concrete arrays.
 
 Tier 3 exists because structured operators otherwise fail *silently*:
 `Identity(6).matvec(ones(3))` would happily return the wrong-shaped array,
-and `Diagonal` would broadcast a length-1 operand. Precisely: the vector
+and `PSDDiagonal` would broadcast a length-1 operand. Precisely: the vector
 methods require `ndim >= 1` and `shape[-1]` equal to the core length; the
 matrix methods require `ndim >= 2` and `shape[-2]` equal to the core
 length, with `shape[-1]` — the `k` axis, possibly 0 — unconstrained.
@@ -601,7 +601,7 @@ reconstruction of a `jit` *output*; under `jit` the call-site checks run
 at trace time only. Both tiers must therefore stay O(#fields) of pure
 Python, with no array work.
 
-Tier 4 covers preconditions that are *values*: `Diagonal` entries strictly
+Tier 4 covers preconditions that are *values*: `PSDDiagonal` entries strictly
 positive, `from_matrix` arguments actually positive definite, factors
 finite. Outside debug mode these are the caller's responsibility, and
 violating them yields `nan` (or `±inf` — `logdet` of a singular operator)
@@ -897,7 +897,7 @@ their structure (block count) but never recurse into children's arrays.
 
 For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
 `LinOp`, `SquareLinOp`, `PSDLinOp`; the elementary operators `Identity`,
-`ScaledIdentity`, `Diagonal`, `Dense`, `DenseSquare`, `Triangular`,
+`PSDScaledIdentity`, `PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
 `DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
 `DiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
@@ -997,7 +997,7 @@ Recorded so their absence reads as a decision, not an oversight.
 ({ref}`contract-arithmetic`); addition is not. A sum is only worth
 representing when its structure survives — the factor of a sum of PSD
 operators is a horizontal stack, but its `solve` and `logdet` require
-either a simplification rule per pair of types (`Diagonal + Diagonal`,
+either a simplification rule per pair of types (two `PSDDiagonal`s,
 low-rank plus diagonal) or a dedicated class per structured sum. A
 registry of such rules is machinery the current type count does not
 justify, and a generic sum class would advertise almost nothing. Structured
@@ -1047,7 +1047,7 @@ specification, and will be deleted afterwards.
 
 | area | implemented today | specified here |
 | ---- | ----------------- | -------------- |
-| naming | `PSDOperator`; `@operator` (shadows the stdlib module) | `PSDLinOp`; `@linop` |
+| naming | `PSDOperator`; `@operator` (shadows the stdlib module); `Diagonal`/`ScaledIdentity` despite their positivity preconditions | `PSDLinOp`; `@linop`; `PSDDiagonal`/`PSDScaledIdentity` — generic mathematical names are reserved for unrestricted classes |
 | implementation surface | subclasses override public methods; base classes hold raising defaults, detected by comparing against a snapshot | subclasses implement `_`-prefixed hooks; public methods validate, gate on `supports`, and dispatch |
 | transpose | none; `factor()`'s result cannot be transposed without densifying | `rmatvec`/`rmatmat` required; `T` on every operator; `Transposed` view |
 | `cholesky()` | in the PSD interface; contract already unhonourable for `BlockDiag` (returns a non-triangular, non-solving factor) | removed; `factor()` + `whiten()` cover both roles |

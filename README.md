@@ -53,10 +53,10 @@ cheaply:
 ```python
 import pyeki  # enables float64; import before creating arrays
 import jax.numpy as jnp
-from pyeki.linalg import BlockDiag, Diagonal, DensePSD
+from pyeki.linalg import DensePSD, PSDDiagonal, block_diag
 
 noise = BlockDiag((
-    Diagonal(jnp.array([0.5, 0.5, 2.0])),      # independent errors
+    PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),   # independent errors
     DensePSD.from_matrix(jnp.eye(2) + 0.3),    # correlated block
 ))
 

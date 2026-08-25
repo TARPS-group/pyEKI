@@ -22,10 +22,10 @@ from pyeki.linalg import (
     DensePSD,
     DenseSquare,
     DiagCongruence,
-    Diagonal,
     Identity,
     Product,
     PSDBlockDiag,
+    PSDDiagonal,
     PSDLinOp,
     PSDScaled,
     Scaled,
@@ -152,7 +152,7 @@ def test_blockdiag_capabilities_are_conditional_on_children():
 def test_derived_operations_report_supported():
     """supports() must not deny working derived operations (the dense-branch
     trap: reporting False would steer callers onto an O(n^3) fallback)."""
-    d = Diagonal(jnp.asarray([1.0, 2.0, 3.0]))
+    d = PSDDiagonal(jnp.asarray([1.0, 2.0, 3.0]))
     assert d.supports("solve_mat") and d.supports("whiten_mat")
     assert d.supports("matmat") and d.supports("to_dense")
     assert "solve_mat" in d.capabilities()
@@ -202,7 +202,7 @@ def test_unsupported_raises_and_densify_always_provides():
 def test_densify_guard_is_static_and_raises_before_allocating():
     with pytest.raises(ValueError, match="max_n"):
         densify(Identity(10_000), max_n=4096)
-    assert isinstance(densify(Diagonal(jnp.asarray([1.0, 2.0]))), DensePSD)
+    assert isinstance(densify(PSDDiagonal(jnp.asarray([1.0, 2.0]))), DensePSD)
 
 
 def test_unsupported_error_pickles_and_rebuilds_from_args():
@@ -220,13 +220,13 @@ def test_unsupported_error_pickles_and_rebuilds_from_args():
 
 def test_wrong_operand_shapes_raise_instead_of_broadcasting():
     """Structured operators used to fail silently here: Identity returned
-    the wrong shape and Diagonal broadcast a length-1 operand."""
+    the wrong shape and PSDDiagonal broadcast a length-1 operand."""
     with pytest.raises(ValueError, match="matvec"):
         Identity(6).matvec(jnp.ones(3))
     with pytest.raises(ValueError, match="matvec"):
-        Diagonal(jnp.ones(6)).matvec(jnp.ones(1))
+        PSDDiagonal(jnp.ones(6)).matvec(jnp.ones(1))
     with pytest.raises(ValueError, match="matmat"):
-        Diagonal(jnp.ones(6)).matmat(jnp.ones(6))  # rank 1 is not a matrix
+        PSDDiagonal(jnp.ones(6)).matmat(jnp.ones(6))  # rank 1 is not a matrix
 
 
 def test_strict_constructors_reject_batched_arrays():
@@ -236,7 +236,7 @@ def test_strict_constructors_reject_batched_arrays():
     with pytest.raises(ValueError, match="from_matrix"):
         DensePSD.from_matrix(As)
     with pytest.raises(ValueError, match="rank"):
-        Diagonal(jnp.asarray(2.0))  # below core rank is always rejected
+        PSDDiagonal(jnp.asarray(2.0))  # below core rank is always rejected
 
 
 def test_field_allowlist_rejects_undeclared_non_array_fields():
@@ -297,8 +297,8 @@ def test_custom_vjp_sentinel_unflatten_survives_composites():
 
 
 def test_operators_use_identity_equality_and_are_never_static():
-    a = Diagonal(jnp.asarray([1.0, 2.0]))
-    assert a == a and not (a == Diagonal(jnp.asarray([1.0, 2.0])))
+    a = PSDDiagonal(jnp.asarray([1.0, 2.0]))
+    assert a == a and not (a == PSDDiagonal(jnp.asarray([1.0, 2.0])))
     assert {a: "usable as a dict key"}[a]
 
 
@@ -335,7 +335,7 @@ def test_repr_is_shape_based_and_does_not_dump_arrays():
 def test_numpy_left_operands_defer_to_the_guided_errors():
     """Without __array_ufunc__ = None, np_array * op silently builds an
     object array of per-element scaled operators."""
-    op = Diagonal(jnp.ones(3))
+    op = PSDDiagonal(jnp.ones(3))
     with pytest.raises(TypeError, match="scalar"):
         np.ones(3) * op
     with pytest.raises(TypeError, match="rmatvec"):
@@ -345,7 +345,7 @@ def test_numpy_left_operands_defer_to_the_guided_errors():
 
 
 def test_matmul_composes_operators_via_the_product_factory():
-    d = Diagonal(jnp.asarray([1.0, 2.0, 3.0]))
+    d = PSDDiagonal(jnp.asarray([1.0, 2.0, 3.0]))
     A = Dense(jnp.asarray(RNG.normal(size=(3, 5))))
     comp = d @ A
     assert isinstance(comp, Product)
@@ -426,17 +426,17 @@ def test_structured_transposes_keep_their_capabilities():
 def test_debug_checks_catch_value_violations_eagerly():
     with debug_checks():
         with pytest.raises(ValueError, match="positive"):
-            Diagonal(jnp.asarray([1.0, -2.0]))
+            PSDDiagonal(jnp.asarray([1.0, -2.0]))
         with pytest.raises(ValueError, match="positive definite|finite"):
             DensePSD.from_matrix(jnp.asarray(-np.eye(3)))
         with pytest.raises(ValueError, match="singular"):
             DenseSquare.from_matrix(jnp.zeros((3, 3)))
         # ... and tracers are exempt, so jit-ed code is unaffected.
-        jax.jit(lambda d: Diagonal(d).logdet())(jnp.asarray([1.0, 2.0]))
+        jax.jit(lambda d: PSDDiagonal(d).logdet())(jnp.asarray([1.0, 2.0]))
 
 
 def test_value_violations_are_silent_nan_outside_debug_mode():
-    assert bool(jnp.isnan(Diagonal(jnp.asarray([1.0, -2.0])).logdet()))
+    assert bool(jnp.isnan(PSDDiagonal(jnp.asarray([1.0, -2.0])).logdet()))
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +445,7 @@ def test_value_violations_are_silent_nan_outside_debug_mode():
 
 
 def test_factories_choose_the_most_capable_class():
-    psd_blocks = block_diag(Identity(2), Diagonal(jnp.ones(3)))
+    psd_blocks = block_diag(Identity(2), PSDDiagonal(jnp.ones(3)))
     assert isinstance(psd_blocks, PSDBlockDiag)
     mixed = block_diag(Identity(2), Dense(jnp.ones((3, 3))))
     assert isinstance(mixed, BlockDiag) and not isinstance(mixed, PSDLinOp)
@@ -461,7 +461,7 @@ def test_factories_unwrap_single_operands_and_reject_empty():
 
 def test_block_anatomy_is_exposed_for_localization():
     """Consumers align sub-vectors with blocks through blocks/block_shapes."""
-    a, b = Diagonal(jnp.ones(2)), DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    a, b = PSDDiagonal(jnp.ones(2)), DensePSD.from_matrix(jnp.asarray(_psd(3)))
     op = block_diag(a, b)
     assert op.blocks == (a, b)
     assert op.block_shapes == ((2, 2), (3, 3))

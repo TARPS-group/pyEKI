@@ -13,7 +13,7 @@ typically block diagonal, priors are often Kronecker-structured, and ensemble
 covariances are low rank by construction.
 
 An **operator** represents a matrix by how it acts, so that structure is
-preserved and used. A `Diagonal` of length one million costs one million
+preserved and used. A `PSDDiagonal` of length one million costs one million
 numbers and applies in linear time; the equivalent dense array does not fit in
 memory.
 
@@ -22,9 +22,9 @@ memory.
 ```python
 import pyeki  # enables float64; import this before creating arrays
 import jax.numpy as jnp
-from pyeki.linalg import Diagonal, DensePSD, Identity
+from pyeki.linalg import PSDDiagonal, DensePSD, Identity
 
-d = Diagonal(jnp.array([1.0, 4.0, 9.0]))
+d = PSDDiagonal(jnp.array([1.0, 4.0, 9.0]))
 d.shape          # (3, 3)
 d.matvec(jnp.ones(3))    # Array([1., 4., 9.])
 d.logdet()               # Array(4.394..., dtype=float64)
@@ -74,7 +74,7 @@ in one data stream, correlated errors in another:
 from pyeki.linalg import block_diag
 
 noise = block_diag(
-    Diagonal(jnp.array([0.5, 0.5, 2.0])),
+    PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),
     DensePSD.from_matrix(jnp.eye(2) + 0.3),
 )
 
