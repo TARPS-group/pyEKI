@@ -437,39 +437,130 @@ class LinOp(abc.ABC):
 
     # -- public surface --------------------------------------------------------
     def matvec(self, x) -> Array:
-        """Apply the operator to ``x``, contracting its trailing axis."""
+        """Apply the operator to a batch of vectors: ``A x``.
+
+        Contracts the trailing axis of ``x`` against the operator's columns
+        and applies independently over any leading batch axes.
+
+        Parameters
+        ----------
+        x
+            Array of shape ``(..., n_in)`` — vectors along the trailing
+            axis, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            Shape ``(..., n_out)``, the batch axes of ``x`` preserved.
+
+        Raises
+        ------
+        ValueError
+            If ``x`` has no axes, or its trailing axis is not ``n_in``.
+        """
         return self._matvec(_check_vec(self, "matvec", x, self.shape[1]))
 
     def rmatvec(self, x) -> Array:
-        """Apply the transpose to ``x``, contracting its trailing axis."""
+        """Apply the transposed operator to a batch of vectors: ``A.T x``.
+
+        Parameters
+        ----------
+        x
+            Array of shape ``(..., n_out)`` — vectors along the trailing
+            axis, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            Shape ``(..., n_in)``, the batch axes of ``x`` preserved.
+
+        Raises
+        ------
+        ValueError
+            If ``x`` has no axes, or its trailing axis is not ``n_out``.
+        """
         return self._rmatvec(_check_vec(self, "rmatvec", x, self.shape[0]))
 
     def matmat(self, X) -> Array:
-        """Apply the operator to a matrix ``X`` of core shape ``(n_in, k)``.
+        """Apply the operator to a matrix operand: ``A X``.
 
-        Equal to ``matvec`` applied over the columns of ``X``.
+        Contracts axis ``-2`` of ``X``. Column ``j`` of the result equals
+        ``matvec(X[..., :, j])`` — matrix application is ``matvec`` batched
+        over columns, not over leading axes.
+
+        Parameters
+        ----------
+        X
+            Array of shape ``(..., n_in, k)`` — a matrix in the trailing
+            two axes, any number of leading batch axes. ``k`` may be any
+            size, including 0; it is part of the core shape, not a batch
+            axis.
+
+        Returns
+        -------
+        Array
+            Shape ``(..., n_out, k)``, the batch axes of ``X`` preserved.
+
+        Raises
+        ------
+        ValueError
+            If ``X`` has fewer than two axes, or axis ``-2`` is not
+            ``n_in``.
         """
         return self._matmat(_check_mat(self, "matmat", X, self.shape[1]))
 
     def rmatmat(self, X) -> Array:
-        """Apply the transpose to a matrix ``X`` of core shape ``(n_out, k)``."""
+        """Apply the transposed operator to a matrix operand: ``A.T X``.
+
+        Parameters
+        ----------
+        X
+            Array of shape ``(..., n_out, k)`` — a matrix in the trailing
+            two axes, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            Shape ``(..., n_in, k)``, the batch axes of ``X`` preserved.
+
+        Raises
+        ------
+        ValueError
+            If ``X`` has fewer than two axes, or axis ``-2`` is not
+            ``n_out``.
+        """
         return self._rmatmat(_check_mat(self, "rmatmat", X, self.shape[0]))
 
     def to_dense(self) -> Array:
-        """Return the operator as a dense ``(n_out, n_in)`` array.
+        """Materialize the operator as a dense array.
 
-        The reference and debugging path; it has no size guard. Use
-        :func:`densify` for a guarded fallback that returns an operator.
+        Returns
+        -------
+        Array
+            Shape ``(n_out, n_in)``, the matrix this operator represents.
+
+        Notes
+        -----
+        This is the reference and debugging path, and it has no size guard:
+        the result costs ``n_out * n_in`` memory regardless of structure.
+        Use :func:`densify` for a size-guarded fallback that returns an
+        operator instead of an array.
         """
         return self._to_dense()
 
     @property
     def T(self) -> LinOp:  # noqa: N802 - mirrors the NumPy attribute
-        """The transpose, as an operator.
+        """The transpose, as an operator of shape ``(n_in, n_out)``.
 
-        The default wraps the operator in a :class:`~.composite.Transposed`
-        view, a plain ``LinOp``. Operators whose transpose supports more
-        override this to return a structured result.
+        Its ``matvec`` is this operator's :meth:`rmatvec` and vice versa,
+        and its ``to_dense()`` is the dense transpose. The default wraps
+        the operator in a :class:`~.composite.Transposed` view — a plain
+        ``LinOp``, whatever this operator's level — and transposing the
+        view returns this operator itself. Operators whose transpose
+        supports more override this with a structured result
+        (:class:`~.elementary.Triangular`,
+        :class:`~.elementary.DenseSquare`); a :class:`PSDLinOp` returns
+        itself.
         """
         from .composite import Transposed
 
@@ -479,9 +570,27 @@ class LinOp(abc.ABC):
     def supports(self, name: str) -> bool:
         """Return True exactly when calling ``name`` on this operator succeeds.
 
-        ``name`` must be one of the twelve operation names; anything else
-        raises ``ValueError``, so a typo cannot silently steer callers onto
-        a fallback branch. Names below the operator's level return False.
+        Parameters
+        ----------
+        name
+            One of the twelve operation names: ``matvec``, ``rmatvec``,
+            ``matmat``, ``rmatmat``, ``to_dense`` (always supported),
+            ``solve``, ``solve_mat``, ``logdet``, ``diag``, ``factor``,
+            ``whiten``, ``whiten_mat`` (supported when implemented).
+
+        Returns
+        -------
+        bool
+            True when calling the operation completes without
+            :class:`UnsupportedOpError`; False when it would raise it, and
+            also for operations below the operator's level (which the type
+            does not define at all).
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is not one of the twelve — so a typo cannot
+            silently steer callers onto a fallback branch.
 
         Notes
         -----
@@ -503,7 +612,15 @@ class LinOp(abc.ABC):
         return self.supports(_DERIVED_DEPS[name])
 
     def capabilities(self) -> frozenset[str]:
-        """Return the supported operations among those not always available."""
+        """Return the supported operations among those not always available.
+
+        Returns
+        -------
+        frozenset[str]
+            The supported subset of ``{"solve", "solve_mat", "logdet",
+            "diag", "factor", "whiten", "whiten_mat"}``. The five
+            always-available operations are not listed.
+        """
         return frozenset(n for n in _OPTIONAL_OPS if self.supports(n))
 
     def _require(self, name: str) -> None:
@@ -534,7 +651,26 @@ class LinOp(abc.ABC):
 
     # -- operator arithmetic ------------------------------------------------------
     def __matmul__(self, other):
-        """Compose with another operator; arrays get a guided error."""
+        """Compose two operators: ``A @ B`` is ``product(A, B)``.
+
+        Parameters
+        ----------
+        other
+            Another operator, with ``other.shape[0] == self.shape[1]``.
+
+        Returns
+        -------
+        LinOp
+            The lazy composition, of shape ``(self.shape[0],
+            other.shape[1])``; nothing is multiplied out.
+
+        Raises
+        ------
+        TypeError
+            If ``other`` is an array. Applying an operator to an array is
+            always :meth:`matvec` or :meth:`matmat`; ``@`` would contract
+            axis ``-2``, which is silently wrong for leading-batch vectors.
+        """
         if isinstance(other, LinOp):
             from .composite import product
 
@@ -552,7 +688,28 @@ class LinOp(abc.ABC):
         )
 
     def __mul__(self, c):
-        """Scale by a scalar, returning a level-preserving scaled operator."""
+        """Scale by a scalar: ``c * op`` and ``op * c`` represent ``c A``.
+
+        Parameters
+        ----------
+        c
+            A true scalar: a Python or NumPy real number, or a 0-d array —
+            which may be traced, so a tempering increment computed inside a
+            ``jit``-ed step flows through.
+
+        Returns
+        -------
+        LinOp
+            A scaled operator of the same shape and hierarchy level,
+            supporting everything this operator supports. Scaling an
+            already-scaled operator folds the scalars into one wrapper.
+
+        Raises
+        ------
+        TypeError
+            If ``c`` is an array with one or more axes, or another
+            operator (composition is ``@``).
+        """
         if isinstance(c, LinOp):
             raise TypeError(
                 "op1 * op2 is not defined; use op1 @ op2 for composition."
@@ -562,7 +719,11 @@ class LinOp(abc.ABC):
     __rmul__ = __mul__
 
     def __truediv__(self, c):
-        """Scale by the reciprocal of a scalar."""
+        """Scale by the reciprocal of a scalar: ``op / c`` represents ``A / c``.
+
+        Accepts, returns, and raises exactly as ``op * (1 / c)`` — see
+        :meth:`__mul__`.
+        """
         if isinstance(c, LinOp):
             raise TypeError("op1 / op2 is not defined.")
         return _scale(self, 1.0 / _as_scalar(self, c))
@@ -595,30 +756,92 @@ class SquareLinOp(LinOp):
 
     # -- public surface -----------------------------------------------------------
     def solve(self, b) -> Array:
-        """Solve ``A x = b`` exactly, contracting the trailing axis of ``b``.
+        """Solve ``A x = b`` for a batch of right-hand sides.
 
-        Requires the operator to be nonsingular.
+        An exact direct solve; the operator must be nonsingular (a value
+        precondition — a singular operator yields non-finite results rather
+        than an error, except in debug mode).
+
+        Parameters
+        ----------
+        b
+            Array of shape ``(..., n)`` — right-hand sides along the
+            trailing axis, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            The solutions ``x``, of shape ``(..., n)``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap solve; check ``supports("solve")``
+            first, or use :func:`densify`.
+        ValueError
+            If ``b`` has no axes, or its trailing axis is not ``n``.
         """
         self._require("solve")
         return self._solve(_check_vec(self, "solve", b, self.n))
 
     def solve_mat(self, B) -> Array:
-        """Solve ``A X = B`` for a matrix ``B`` of core shape ``(n, k)``."""
+        """Solve ``A X = B`` for a matrix right-hand side.
+
+        Column ``j`` of the result equals ``solve(B[..., :, j])``.
+
+        Parameters
+        ----------
+        B
+            Array of shape ``(..., n, k)`` — a matrix in the trailing two
+            axes, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            The solutions ``X``, of shape ``(..., n, k)``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap solve.
+        ValueError
+            If ``B`` has fewer than two axes, or axis ``-2`` is not ``n``.
+        """
         self._require("solve_mat")
         return self._solve_mat(_check_mat(self, "solve_mat", B, self.n))
 
     def logdet(self) -> Array:
-        """Return ``log |det A|`` as a real scalar array.
+        """Return the log magnitude of the determinant, ``log |det A|``.
 
-        Always a 0-d JAX array, never a Python float: converting would fail
-        on a tracer under ``jit``. The absolute value matters only for
-        non-PSD operators and matches ``slogdet``'s magnitude convention.
+        Returns
+        -------
+        Array
+            A 0-d real JAX array — never a Python float, which would fail
+            on a tracer under ``jit``. The absolute value matters only for
+            non-PSD operators and matches ``slogdet``'s magnitude
+            convention; a singular operator yields ``-inf``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap log-determinant.
         """
         self._require("logdet")
         return self._logdet()
 
     def diag(self) -> Array:
-        """Return the diagonal as a vector of length ``n``."""
+        """Return the diagonal of the operator.
+
+        Returns
+        -------
+        Array
+            Shape ``(n,)``: entry ``i`` is ``A[i, i]``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap diagonal.
+        """
         self._require("diag")
         return self._diag()
 
@@ -652,32 +875,86 @@ class PSDLinOp(SquareLinOp):
 
     # -- public surface -----------------------------------------------------------
     def factor(self) -> LinOp:
-        """Return an operator ``L`` of shape ``(n, k)`` with ``L @ L.T == self``.
+        """Return a square root of the operator: ``L`` with ``L @ L.T == self``.
 
-        The sampling interface: ``L.matvec(eps)`` for standard normal ``eps``
-        of length ``k`` has covariance equal to this operator, and
-        ``L.rmatvec`` applies ``L.T``. No triangularity, squareness, or
-        orientation is promised: ``k > n`` means the operator is a sum of
-        simpler pieces, and ``k < n`` means it is singular.
+        The sampling interface: for standard normal ``eps`` of length
+        ``k``, ``L.matvec(eps)`` has covariance equal to this operator, and
+        ``L.rmatvec`` applies ``L.T``.
+
+        Returns
+        -------
+        LinOp
+            An operator of shape ``(n, k)`` whose dense form ``L``
+            satisfies ``L @ L.T == self.to_dense()``. No triangularity,
+            squareness, or orientation is promised: ``k > n`` means the
+            operator is a sum of simpler pieces, and ``k < n`` means it is
+            singular.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap square root.
         """
         self._require("factor")
         return self._factor()
 
     def whiten(self, x) -> Array:
-        """Apply a fixed matrix ``W`` satisfying ``W A W.T == I`` to ``x``.
+        """Whiten a batch of vectors: apply ``W`` with ``W A W.T == I``.
 
         Transforms ``x`` so that data with this operator as its covariance
-        becomes uncorrelated with unit variance. Requires the operator to be
-        nonsingular. ``W`` is fixed per instance but otherwise unspecified —
-        in particular it need not invert the ``L`` that :meth:`factor`
-        returns, so whitened quantities agree with sampled ones in
-        distribution, not elementwise.
+        becomes uncorrelated with unit variance. The operator must be
+        nonsingular. ``W`` is a fixed matrix per instance — the same on
+        every call — but is otherwise unspecified: in particular it need
+        not invert the ``L`` that :meth:`factor` returns, so whitened
+        quantities agree with sampled ones in distribution, never
+        elementwise. Every valid ``W`` satisfies
+        ``sum(whiten(x)**2) == x @ solve(x)``.
+
+        Parameters
+        ----------
+        x
+            Array of shape ``(..., n)`` — vectors along the trailing axis,
+            any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            ``W x``, of shape ``(..., n)``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap whitener; check
+            ``supports("whiten")`` first, or use :func:`densify`.
+        ValueError
+            If ``x`` has no axes, or its trailing axis is not ``n``.
         """
         self._require("whiten")
         return self._whiten(_check_vec(self, "whiten", x, self.n))
 
     def whiten_mat(self, X) -> Array:
-        """Apply the whitener to a matrix ``X`` of core shape ``(n, k)``."""
+        """Whiten a matrix operand: ``W X`` for the same ``W`` as :meth:`whiten`.
+
+        Column ``j`` of the result equals ``whiten(X[..., :, j])``.
+
+        Parameters
+        ----------
+        X
+            Array of shape ``(..., n, k)`` — a matrix in the trailing two
+            axes, any number of leading batch axes.
+
+        Returns
+        -------
+        Array
+            ``W X``, of shape ``(..., n, k)``.
+
+        Raises
+        ------
+        UnsupportedOpError
+            If this operator has no cheap whitener.
+        ValueError
+            If ``X`` has fewer than two axes, or axis ``-2`` is not ``n``.
+        """
         self._require("whiten_mat")
         return self._whiten_mat(_check_mat(self, "whiten_mat", X, self.n))
 
