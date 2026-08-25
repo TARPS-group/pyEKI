@@ -536,7 +536,8 @@ the operation that just raised:
   case: a tier-4 value violation, on which `supports` still answers `True`
   — support is static — and the result is `nan`.
 
-`DenseSquare` is the LU-backed square leaf this mapping requires.
+`DenseSquare` is the LU-backed elementary square operator this mapping
+requires.
 `DenseSquare.from_matrix(A)` computes the LU factorization once and stores
 `A` together with the factors; `to_dense` returns the stored `A`; it
 supports `solve`, `solve_mat`, `logdet` ($\log\lvert\det\rvert$ from the
@@ -895,7 +896,7 @@ their structure (block count) but never recurse into children's arrays.
 ## Public surface
 
 For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
-`LinOp`, `SquareLinOp`, `PSDLinOp`; the leaves `Identity`,
+`LinOp`, `SquareLinOp`, `PSDLinOp`; the elementary operators `Identity`,
 `ScaledIdentity`, `Diagonal`, `Dense`, `DenseSquare`, `Triangular`,
 `DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
@@ -1054,7 +1055,7 @@ specification, and will be deleted afterwards.
 | `supports()` | reports `False` for working derived methods (`solve_mat`, `whiten`); returns `False` for unknown names | derived operations resolve through their dependencies; unknown names raise `ValueError`; invariant "supports ⟺ succeeds" enforced by the public-method gate |
 | `_WITHDRAWN` | class variable consulted by `supports` but unenforced, and unused | removed; monotone-capability rule replaces it |
 | unsupported-op error | not reconstructible from `args`; not picklable | picklable, rebuilds from `args` |
-| `densify` of a square non-PSD operator | returns `Dense`, which has no `solve` — the advertised fallback fails | returns `DenseSquare` (new LU-backed leaf); mapping preserves the hierarchy level |
+| `densify` of a square non-PSD operator | returns `Dense`, which has no `solve` — the advertised fallback fails | returns `DenseSquare` (new LU-backed elementary operator); mapping preserves the hierarchy level |
 | operand validation | none; `Identity(6).matvec(ones(3))` returns the wrong shape silently | tier-3 core-shape checks on every public method |
 | constructor validation | none; batched arrays accepted then misbehave | tier-2 structural checks — exact core rank in classmethods/factories, a rank floor in the storing constructor (vmap-exit reconstruction requires it); `vmap`-over-pytree is the batching story |
 | value preconditions | documented only; violations yield `nan` | opt-in debug mode checks them on concrete inputs |

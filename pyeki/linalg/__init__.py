@@ -13,7 +13,8 @@ documentation.
 
 - :mod:`~pyeki.linalg.base` defines the class hierarchy, the array-shape
   convention, and how to add a new operator.
-- :mod:`~pyeki.linalg.leaves` holds operators defined by their own arrays.
+- :mod:`~pyeki.linalg.elementary` holds operators defined by their own
+  arrays.
 - :mod:`~pyeki.linalg.composite` holds operators built from other operators,
   and the factory functions that construct them.
 - :mod:`~pyeki.linalg.testing` holds conformance checks for new operator
@@ -51,7 +52,7 @@ from .composite import (
     hstack,
     product,
 )
-from .leaves import (
+from .elementary import (
     Dense,
     DensePSD,
     DenseSquare,
@@ -75,7 +76,7 @@ __all__ = [
     "set_debug_checks",
     "debug_checks",
     "value_check",
-    # leaves
+    # elementary operators
     "Identity",
     "ScaledIdentity",
     "Diagonal",

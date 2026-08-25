@@ -45,7 +45,7 @@ from .base import (
     linop,
     value_check,
 )
-from .leaves import Diagonal
+from .elementary import Diagonal
 
 __all__ = [
     "Transposed",

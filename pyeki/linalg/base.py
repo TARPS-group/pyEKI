@@ -3,7 +3,7 @@
 An operator represents a matrix implicitly, by how it acts on vectors, so
 that known structure is exploited instead of storing or factorizing a dense
 array. This module defines the operator interface and the machinery for
-writing new operators; concrete operators live in :mod:`.leaves` and
+writing new operators; concrete operators live in :mod:`.elementary` and
 :mod:`.composite`. The normative specification of everything promised here
 is the "Linear operator contract" page of the documentation.
 
@@ -725,11 +725,11 @@ def densify(op: LinOp, *, max_n: int = 4096) -> LinOp:
     The explicit fallback for operations an operator does not support
     cheaply. The returned operator provides everything its level defines:
 
-    - a :class:`PSDLinOp` densifies to :class:`~.leaves.DensePSD` (backed by
+    - a :class:`PSDLinOp` densifies to :class:`~.elementary.DensePSD` (backed by
       a Cholesky factor),
-    - any other :class:`SquareLinOp` to :class:`~.leaves.DenseSquare`
+    - any other :class:`SquareLinOp` to :class:`~.elementary.DenseSquare`
       (backed by an LU factorization),
-    - anything else to :class:`~.leaves.Dense`.
+    - anything else to :class:`~.elementary.Dense`.
 
     Parameters
     ----------
@@ -745,7 +745,7 @@ def densify(op: LinOp, *, max_n: int = 4096) -> LinOp:
     ValueError
         If either side of ``op.shape`` exceeds ``max_n``.
     """
-    from .leaves import Dense, DensePSD, DenseSquare
+    from .elementary import Dense, DensePSD, DenseSquare
 
     n_out, n_in = op.shape
     if max(n_out, n_in) > max_n:
