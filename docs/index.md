@@ -102,6 +102,7 @@ user-guide/writing-an-operator
 :hidden:
 
 linop-contract
+gaussian-contract
 design
 api/index
 ```
