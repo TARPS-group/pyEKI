@@ -180,8 +180,14 @@ def operator(cls: type) -> type:
     compare arrays elementwise and raise on the ambiguous truth value, and the
     generated ``__hash__`` would fail on array fields. Pass operators as
     ordinary traced arguments, never via ``static_argnums``.
+
+    No ``__repr__`` is generated either (``repr=False``), so that
+    :meth:`LinOp.__repr__` is the one that applies. A generated ``__repr__``
+    is defined on the decorated class itself, which shadows the base class's,
+    and prints every field — dumping whole arrays into tracebacks, pytest
+    identifiers and debugger output.
     """
-    cls = dataclass(frozen=True, eq=False)(cls)
+    cls = dataclass(frozen=True, eq=False, repr=False)(cls)
 
     data_fields, meta_fields = [], []
     for f in dataclasses.fields(cls):
@@ -298,6 +304,12 @@ class LinOp:
         raise UnsupportedOpError(name, self)
 
     def __repr__(self) -> str:
+        """Return the type name and shape, as ``Dense(4, 6)``.
+
+        Deliberately omits field values, which are usually arrays too large to
+        be worth printing. :func:`operator` suppresses the dataclass-generated
+        ``__repr__`` so that this one is not shadowed.
+        """
         return f"{type(self).__name__}{self.shape}"
 
 

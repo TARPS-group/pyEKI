@@ -205,3 +205,19 @@ def test_dense_psd_factorizes_once_at_construction():
     assert op.L.shape == (4, 4)
     leaves = jax.tree_util.tree_leaves(op)
     assert len(leaves) == 1 and leaves[0].shape == (4, 4)
+
+
+def test_repr_is_shape_based_and_does_not_dump_arrays():
+    """`@operator` must not let the dataclass generate a __repr__.
+
+    A generated __repr__ is defined on the decorated class itself, so it
+    shadows `LinOp.__repr__` -- silently, since both are valid reprs. The
+    generated one prints every field, which for this layer means whole arrays
+    appearing in tracebacks, pytest ids and debugger output.
+    """
+    op = Dense(jnp.zeros((200, 300)))
+    assert "__repr__" not in type(op).__dict__
+    assert repr(op) == "Dense(200, 300)"
+
+    assert repr(Identity(4)) == "Identity(4, 4)"
+    assert repr(BlockDiag((Identity(2), Identity(3)))) == "BlockDiag(5, 5)"
