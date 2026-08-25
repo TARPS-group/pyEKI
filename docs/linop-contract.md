@@ -92,6 +92,10 @@ then columns, matching the dense array `to_dense()` returns.
 - **Shapes are strictly positive.** Both entries of `shape` are at least
   1; the strict constructors reject empty operators. (The `k` axis of a
   matrix *operand* may be 0 — see the batch contract.)
+- **`batch_shape` names the batch axes.** A second static property,
+  `()` for every directly constructed operator and non-empty only on the
+  vmapped families that pytree reconstruction produces — see
+  {ref}`contract-families`.
 
 (contract-batch)=
 ## Batch contract
@@ -208,11 +212,66 @@ constructor entirely** (`@linop` registers an unflatten that allocates
 the instance and sets its fields directly), so strict validation and
 batched reconstruction never meet. An operator whose leaves carry extra
 leading axes is therefore constructible only as a pytree reconstruction —
-a *vmapped family*: valid as a `vmap` argument and for pytree operations,
-and nothing else; the contract defines no behaviour for calling its
-methods directly (its `shape` reads only the trailing core axes). The
-conformance suite checks that constructing and returning an operator
-inside `vmap` round-trips.
+a *vmapped family*. Families are **legible but inert**: they identify
+themselves through `batch_shape` and refuse direct operation calls with a
+specified error ({ref}`contract-families`). The conformance suite checks
+that constructing and returning an operator inside `vmap` round-trips.
+
+(contract-families)=
+### Families: `batch_shape`, legibility, inertness
+
+Every operator has a **`batch_shape`** property, a concrete tuple of
+Python ints computed — like `shape` — from static information only:
+
+- Each data field contributes the leading axes of its stored array beyond
+  that field's core rank; a child operator contributes its own
+  `batch_shape`. The contributions combine by broadcasting
+  (`jnp.broadcast_shapes` semantics), and incompatible contributions raise
+  `ValueError` — a hand-assembled pytree with inconsistently stacked
+  leaves is diagnosed at the property, not by downstream shape wreckage.
+- An operator with no data leaves (`Identity`) has `batch_shape == ()`
+  always.
+- Directly constructed operators always have `batch_shape == ()` — the
+  strict constructors guarantee it. Non-empty batch shapes arise only
+  from pytree reconstruction. Inside a `vmap` trace, leaves are presented
+  at core shape, so `batch_shape == ()` there and every operation works,
+  member by member.
+
+**Inertness.** When `batch_shape` is non-empty, each of the twelve
+operations raises `ValueError`, with a message naming the operator, the
+operation, the batch shape, and the remedy — apply the family under
+`jax.vmap`. This *family guard* runs before the capability gate, which
+runs before operand validation. Introspection stays available, because
+introspection is how a family is recognized: `shape` (the core shape),
+`n`, `batch_shape`, `supports`, `capabilities`, and the `T` property (a
+view whose `batch_shape` is the wrapped operator's) all work on families.
+
+**Legibility.** `repr` appends the batch shape when it is non-empty —
+`DensePSD(3, 3)@(100,)` — so a family is visible in a debugger and in
+error messages instead of impersonating a single operator.
+
+:::{admonition} Future extension: implicit batching (auto-vmap)
+:class: note
+
+The inertness guard is designed to be *loosened*, never worked around. A
+future revision may define direct operation calls on families by
+`vmap`-ing the hook in the public layer, with gufunc-style broadcasting
+between `batch_shape` and the operand's leading batch axes — member `i`
+applied to vector `i` when they align, one vector broadcast across all
+members otherwise. Hooks would stay written for the unbatched case (the
+batching lives once, in the public layer), constructors would stay
+strict, and the upgrade is backward compatible by construction: code that
+was correct under the guard only ever saw `batch_shape == ()`, so turning
+errors into behaviour breaks nothing.
+
+It is deferred, not rejected, for three reasons: no planned consumer
+calls operations on a family directly (every roadmap use applies families
+under `jax.vmap`, which is already fully defined); the semantics carry
+real specification cost (broadcast-alignment rules, `logdet` and `diag`
+returning `batch_shape`-shaped arrays, a conformance suite doubled over
+batched instances); and eager-mode auto-`vmap` adds per-call dispatch
+overhead. If a consumer emerges, this box becomes a contract section.
+:::
 
 ## Method contracts
 
@@ -238,9 +297,10 @@ Three clauses pin the division of labour:
   implements the full batch contract itself — usually one broadcasting
   expression, which the helpers encode. The base classes never loop or
   `vmap` on a hook's behalf.
-- **The capability gate runs before operand validation**, so an
-  unsupported operation raises `UnsupportedOpError` regardless of the
-  operand.
+- **The family guard runs first, then the capability gate, then operand
+  validation.** An operator with a non-empty `batch_shape` refuses every
+  operation ({ref}`contract-families`); after that, an unsupported
+  operation raises `UnsupportedOpError` regardless of the operand.
 - **The two properties, `shape` and `T`, are exempt from the no-override
   rule.** They take no operand, so there is nothing to validate or gate —
   and `T` is expressly overridden where the transpose is structured
@@ -611,6 +671,7 @@ The full error taxonomy:
 | field neither array-like nor marked static | `TypeError`, at class definition |
 | structural mismatch (wrong array rank, disagreeing block shapes) | `ValueError`, at construction |
 | wrong block *type* (non-PSD block in a PSD composite) | `TypeError`, at construction |
+| operation called on a vmapped family (non-empty `batch_shape`) | `ValueError`, at call — apply the family under `jax.vmap` instead |
 | operand core shape mismatch | `ValueError`, at call |
 | unsupported operation (type defines it, no cheap implementation) | `UnsupportedOpError`, at call/trace |
 | operation below the operator's level (type does not define it) | `AttributeError`, at call — see {ref}`contract-capabilities` |
@@ -886,8 +947,10 @@ the second already has a name.
 `repr(op)` is the type name and shape — `Dense(200, 300)`,
 `PSDBlockDiag(5, 5)` — and never includes array contents. Reprs appear in
 tracebacks, pytest ids, and error messages of this very contract, where a
-dumped array would bury the signal. Composites may append a summary of
-their structure (block count) but never recurse into children's arrays.
+dumped array would bury the signal. A vmapped family appends its batch
+shape — `DensePSD(3, 3)@(100,)` ({ref}`contract-families`). Composites may
+append a summary of their structure (block count) but never recurse into
+children's arrays.
 
 (contract-surface)=
 ## Public surface
@@ -975,6 +1038,11 @@ enough to densify, before it is merged. It must verify at least:
     reflected dunders — `x @ op` and `array * op` raise the guided
     `TypeError`, and `scalar * op` returns the scaled composite — pinning
     the `__array_ufunc__ = None` deferral the guided errors depend on.
+14. **Family legibility and inertness**: the instance itself reports
+    `batch_shape == ()`; stacking its leaves and unflattening yields a
+    family whose `batch_shape` is the stacked shape, whose repr appends
+    it, and whose twelve operations each raise `ValueError`, while
+    `shape`, `supports` and `capabilities` still answer.
 
 The suite skips what `supports()` disclaims (that is check 9's other
 half), so the same driver applies to every operator type unchanged.
@@ -1007,12 +1075,11 @@ the reasoning is in {ref}`contract-arithmetic`.
 **`cholesky()`.** Removed from the contract; see the square-roots section
 for the reasoning.
 
-**Batched operators.** One operator holds one matrix; families are
-`vmap`ed pytrees ({ref}`contract-batching-operators`). Supporting stored
-batch axes would force every `shape`, `split`, and validation rule to
-carry a second convention through the whole layer. (Families arise
-only from pytree reconstruction, which bypasses the constructor — the
-contract defines no direct-call behaviour for them.)
+**Direct operation calls on batched operators.** One operator holds one
+matrix; families are `vmap`ed pytrees, legible through `batch_shape` and
+inert to direct calls ({ref}`contract-families`). Defining those calls —
+implicit batching via auto-`vmap` — is a designed-for future extension,
+deferred until a consumer needs it; see the box in that section.
 
 **dtype tracking.** The package runs float64 end to end (enabled at
 import). A per-operator dtype attribute and promotion rules would be
@@ -1060,5 +1127,6 @@ specification, and will be deleted afterwards.
 | abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |
 | composites | direct class construction; `BlockDiag` + `BlockDiagGeneral` pair, the latter with a stub `solve` raising `AttributeError` | factories `block_diag`/`product`/`hstack` select the class; general `BlockDiag` is a plain `LinOp` with no stub methods |
 | arithmetic | none; `op @ x` fails with Python's generic unsupported-operand error; `np_array * op` silently builds an object array | `@` composes operators (guided `TypeError` on arrays); `*`/`/` return a level-preserving scaled composite; `__array_ufunc__ = None` so NumPy defers; `__jax_array__` forbidden; `+` still excluded |
+| vmapped families | exist as reconstructions; direct operation calls are undefined behaviour | `batch_shape` property, the inertness guard, and the family-aware repr ({ref}`contract-families`) — *specified here, implementation pending* |
 | composite anatomy | `blocks`/`ops` fields exist but are implementation detail | children and static block sizes are contract ({ref}`contract-composites`); `PSDDiagCongruence` added for localization noise inflation |
-| conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–13 above, with the monkeypatch guard and per-check keys |
+| conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–14 above, with the monkeypatch guard and per-check keys |
