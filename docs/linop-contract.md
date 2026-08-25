@@ -246,9 +246,11 @@ introspection is how a family is recognized: `shape` (the core shape),
 `n`, `batch_shape`, `supports`, `capabilities`, and the `T` property (a
 view whose `batch_shape` is the wrapped operator's) all work on families.
 
-**Legibility.** `repr` appends the batch shape when it is non-empty —
-`DensePSD(3, 3)@(100,)` — so a family is visible in a debugger and in
-error messages instead of impersonating a single operator.
+**Legibility.** A family's `repr` wraps the ordinary type-and-shape form
+and names the batch — `vmapped(DensePSD(3, 3), batch=(100,))` — so a
+family is visible in a debugger and in error messages instead of
+impersonating a single operator, and the wrapper itself says how the
+object is meant to be used.
 
 :::{admonition} Future extension: implicit batching (auto-vmap)
 :class: note
@@ -947,10 +949,10 @@ the second already has a name.
 `repr(op)` is the type name and shape — `Dense(200, 300)`,
 `PSDBlockDiag(5, 5)` — and never includes array contents. Reprs appear in
 tracebacks, pytest ids, and error messages of this very contract, where a
-dumped array would bury the signal. A vmapped family appends its batch
-shape — `DensePSD(3, 3)@(100,)` ({ref}`contract-families`). Composites may
-append a summary of their structure (block count) but never recurse into
-children's arrays.
+dumped array would bury the signal. A vmapped family wraps that form and
+names its batch — `vmapped(DensePSD(3, 3), batch=(100,))`
+({ref}`contract-families`). Composites may append a summary of their
+structure (block count) but never recurse into children's arrays.
 
 (contract-surface)=
 ## Public surface
@@ -1040,9 +1042,10 @@ enough to densify, before it is merged. It must verify at least:
     the `__array_ufunc__ = None` deferral the guided errors depend on.
 14. **Family legibility and inertness**: the instance itself reports
     `batch_shape == ()`; stacking its leaves and unflattening yields a
-    family whose `batch_shape` is the stacked shape, whose repr appends
-    it, and whose twelve operations each raise `ValueError`, while
-    `shape`, `supports` and `capabilities` still answer.
+    family whose `batch_shape` is the stacked shape, whose repr takes the
+    `vmapped(...)` form, and whose twelve operations each raise
+    `ValueError`, while `shape`, `supports` and `capabilities` still
+    answer.
 
 The suite skips what `supports()` disclaims (that is check 9's other
 half), so the same driver applies to every operator type unchanged.
