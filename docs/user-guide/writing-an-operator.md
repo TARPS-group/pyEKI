@@ -114,10 +114,10 @@ already provides:
 
 ```python
     def _factor(self):
-        from pyeki.linalg import Dense, PSDScaledIdentity, hstack
+        from pyeki.linalg import Dense, Identity, hstack
         n = self.shape[0]
         return hstack(
-            PSDScaledIdentity(jnp.sqrt(self.sigma2), n),
+            jnp.sqrt(self.sigma2) * Identity(n),
             Dense(self.u[:, None]),
         )
 ```

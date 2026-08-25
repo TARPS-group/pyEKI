@@ -4,7 +4,6 @@
 class                        represents
 ===========================  ===============================================
 :class:`Identity`            the identity matrix
-:class:`PSDScaledIdentity`   a positive multiple of the identity
 :class:`PSDDiagonal`         a diagonal matrix with positive entries
 :class:`Dense`               an explicit array, possibly rectangular
 :class:`DenseSquare`         a dense square matrix, stored with its LU
@@ -49,7 +48,6 @@ from .base import (
 
 __all__ = [
     "Identity",
-    "PSDScaledIdentity",
     "PSDDiagonal",
     "Dense",
     "DenseSquare",
@@ -128,61 +126,6 @@ class Identity(PSDLinOp):
 
     def _to_dense(self) -> Array:
         return jnp.eye(self.size)
-
-
-@linop
-class PSDScaledIdentity(PSDLinOp):
-    """A strictly positive multiple of the identity.
-
-    Parameters
-    ----------
-    c
-        Scalar array, strictly positive. Held as an array so it can be
-        traced and differentiated with respect to.
-    size
-        Side length, a positive int.
-
-    Notes
-    -----
-    The positivity precondition, and hence the ``PSD`` in the name, follow
-    the same reasoning as :class:`PSDDiagonal`.
-    """
-
-    c: Array
-    size: int = static_field()
-
-    def __post_init__(self) -> None:
-        _check_size("PSDScaledIdentity", self.size)
-        value_check(
-            self.c,
-            lambda c: bool(jnp.all(c > 0)),
-            "PSDScaledIdentity.c must be strictly positive",
-        )
-
-    @property
-    def shape(self) -> tuple[int, int]:
-        return (self.size, self.size)
-
-    def _matvec(self, x: Array) -> Array:
-        return self.c * x
-
-    def _solve(self, b: Array) -> Array:
-        return b / self.c
-
-    def _logdet(self) -> Array:
-        return self.size * jnp.log(self.c)
-
-    def _diag(self) -> Array:
-        return jnp.full((self.size,), self.c)
-
-    def _factor(self) -> LinOp:
-        return PSDScaledIdentity(jnp.sqrt(self.c), self.size)
-
-    def _whiten(self, x: Array) -> Array:
-        return x / jnp.sqrt(self.c)
-
-    def _to_dense(self) -> Array:
-        return self.c * jnp.eye(self.size)
 
 
 @linop

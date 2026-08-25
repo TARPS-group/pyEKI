@@ -19,7 +19,6 @@ from pyeki.linalg import (
     Identity,
     LinOp,
     PSDDiagonal,
-    PSDScaledIdentity,
     Triangular,
     block_diag,
     diag_congruence,
@@ -41,7 +40,7 @@ def _instances() -> list[LinOp]:
     well_conditioned = jnp.asarray(RNG.normal(size=(5, 5)) + 5 * np.eye(5))
     return [
         Identity(6),
-        PSDScaledIdentity(jnp.asarray(2.5), 6),
+        2.5 * Identity(6),  # the scaled identity, via arithmetic
         PSDDiagonal(d),
         Dense(jnp.asarray(RNG.normal(size=(4, 6)))),
         DenseSquare.from_matrix(well_conditioned),
@@ -60,7 +59,7 @@ def _instances() -> list[LinOp]:
             )
         ),
         block_diag(PSDDiagonal(d), DensePSD.from_matrix(_psd(3))),
-        block_diag(Identity(2), PSDScaledIdentity(jnp.asarray(4.0), 3)),
+        block_diag(Identity(2), 4.0 * Identity(3)),
         diag_congruence(
             DensePSD.from_matrix(_psd(4)), jnp.asarray(RNG.uniform(0.5, 2, 4))
         ),

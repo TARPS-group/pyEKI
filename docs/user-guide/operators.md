@@ -22,7 +22,6 @@ operator. The full behavioural specification is the
 | class | represents | notes |
 | --- | --- | --- |
 | `Identity(size)` | $I_n$ | every operation is free |
-| `PSDScaledIdentity(c, size)` | $cI_n$ | `c` is an array, so it can be traced and differentiated |
 | `PSDDiagonal(d)` | $\mathrm{diag}(d)$ | all operations linear in $n$ |
 | `Dense(A)` | an explicit array | may be rectangular; no structure assumed |
 | `DenseSquare.from_matrix(A)` | a dense square matrix | stored with its LU; what `densify` returns for square non-PSD operators |
@@ -108,7 +107,7 @@ For an operator of side $n$:
 
 | operator | `matvec` | `solve` | `whiten` | `logdet` |
 | --- | --- | --- | --- | --- |
-| `Identity`, `PSDScaledIdentity` | $O(n)$ | $O(n)$ | $O(n)$ | $O(1)$ |
+| `Identity` | $O(n)$ | $O(n)$ | $O(n)$ | $O(1)$ |
 | `PSDDiagonal` | $O(n)$ | $O(n)$ | $O(n)$ | $O(n)$ |
 | `DensePSD`, `DenseSquare` | $O(n^2)$ | $O(n^2)$ | $O(n^2)$ | $O(n)$ after the constructor's $O(n^3)$ |
 | `Triangular` | $O(n^2)$ | $O(n^2)$ | — | $O(n)$ |

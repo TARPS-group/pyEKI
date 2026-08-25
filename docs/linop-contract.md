@@ -897,7 +897,7 @@ their structure (block count) but never recurse into children's arrays.
 
 For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
 `LinOp`, `SquareLinOp`, `PSDLinOp`; the elementary operators `Identity`,
-`PSDScaledIdentity`, `PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
+`PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
 `DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
 `DiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
@@ -1047,7 +1047,7 @@ specification, and will be deleted afterwards.
 
 | area | implemented today | specified here |
 | ---- | ----------------- | -------------- |
-| naming | `PSDOperator`; `@operator` (shadows the stdlib module); `Diagonal`/`ScaledIdentity` despite their positivity preconditions | `PSDLinOp`; `@linop`; `PSDDiagonal`/`PSDScaledIdentity` — generic mathematical names are reserved for unrestricted classes |
+| naming | `PSDOperator`; `@operator` (shadows the stdlib module); `Diagonal`/`ScaledIdentity` despite their positivity preconditions | `PSDLinOp`; `@linop`; `PSDDiagonal` — generic mathematical names are reserved for unrestricted classes. `ScaledIdentity` is dropped entirely: `c * Identity(n)` is the same operator with the same costs |
 | implementation surface | subclasses override public methods; base classes hold raising defaults, detected by comparing against a snapshot | subclasses implement `_`-prefixed hooks; public methods validate, gate on `supports`, and dispatch |
 | transpose | none; `factor()`'s result cannot be transposed without densifying | `rmatvec`/`rmatmat` required; `T` on every operator; `Transposed` view |
 | `cholesky()` | in the PSD interface; contract already unhonourable for `BlockDiag` (returns a non-triangular, non-solving factor) | removed; `factor()` + `whiten()` cover both roles |

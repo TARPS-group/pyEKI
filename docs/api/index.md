@@ -28,7 +28,6 @@ contract.
 
 ```{eval-rst}
 .. autoclass:: pyeki.linalg.Identity
-.. autoclass:: pyeki.linalg.PSDScaledIdentity
 .. autoclass:: pyeki.linalg.PSDDiagonal
 .. autoclass:: pyeki.linalg.Dense
 .. autoclass:: pyeki.linalg.DenseSquare
