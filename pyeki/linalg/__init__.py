@@ -39,10 +39,10 @@ from .base import (
 )
 from .composite import (
     BlockDiag,
-    DiagCongruence,
     HStack,
     Product,
     PSDBlockDiag,
+    PSDDiagCongruence,
     PSDScaled,
     Scaled,
     SquareScaled,
@@ -91,7 +91,7 @@ __all__ = [
     "HStack",
     "BlockDiag",
     "PSDBlockDiag",
-    "DiagCongruence",
+    "PSDDiagCongruence",
     # factories
     "block_diag",
     "product",

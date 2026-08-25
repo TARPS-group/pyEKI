@@ -134,8 +134,10 @@ class PSDDiagonal(PSDLinOp):
 
     Parameters
     ----------
-    d
-        Diagonal entries, strictly positive. Its length sets the size.
+    diagonal
+        The diagonal entries, strictly positive. Their number sets the
+        size. (Named ``diagonal`` rather than ``diag``, which would shadow
+        the inherited :meth:`~.base.SquareLinOp.diag` method.)
 
     Notes
     -----
@@ -147,41 +149,41 @@ class PSDDiagonal(PSDLinOp):
     needs it.
     """
 
-    d: Array
+    diagonal: Array
 
     def __post_init__(self) -> None:
-        _check_rank_floor("PSDDiagonal", "d", self.d, 1)
+        _check_rank_floor("PSDDiagonal", "diagonal", self.diagonal, 1)
         value_check(
-            self.d,
+            self.diagonal,
             lambda d: bool(jnp.all(d > 0)),
             "PSDDiagonal entries must be strictly positive",
         )
 
     @property
     def shape(self) -> tuple[int, int]:
-        n = self.d.shape[-1]
+        n = self.diagonal.shape[-1]
         return (n, n)
 
     def _matvec(self, x: Array) -> Array:
-        return self.d * x
+        return self.diagonal * x
 
     def _solve(self, b: Array) -> Array:
-        return b / self.d
+        return b / self.diagonal
 
     def _logdet(self) -> Array:
-        return jnp.sum(jnp.log(self.d), axis=-1)
+        return jnp.sum(jnp.log(self.diagonal), axis=-1)
 
     def _diag(self) -> Array:
-        return self.d
+        return self.diagonal
 
     def _factor(self) -> LinOp:
-        return PSDDiagonal(jnp.sqrt(self.d))
+        return PSDDiagonal(jnp.sqrt(self.diagonal))
 
     def _whiten(self, x: Array) -> Array:
-        return x / jnp.sqrt(self.d)
+        return x / jnp.sqrt(self.diagonal)
 
     def _to_dense(self) -> Array:
-        return jnp.diag(self.d)
+        return jnp.diag(self.diagonal)
 
 
 @linop

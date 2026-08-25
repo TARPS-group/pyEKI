@@ -48,7 +48,7 @@ contract.
 .. autoclass:: pyeki.linalg.HStack
 .. autoclass:: pyeki.linalg.BlockDiag
 .. autoclass:: pyeki.linalg.PSDBlockDiag
-.. autoclass:: pyeki.linalg.DiagCongruence
+.. autoclass:: pyeki.linalg.PSDDiagCongruence
 ```
 
 ### Factory functions

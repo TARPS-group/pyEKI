@@ -22,7 +22,7 @@ operator. The full behavioural specification is the
 | class | represents | notes |
 | --- | --- | --- |
 | `Identity(size)` | $I_n$ | every operation is free |
-| `PSDDiagonal(d)` | $\mathrm{diag}(d)$ | all operations linear in $n$ |
+| `PSDDiagonal(diagonal)` | $\mathrm{diag}(d)$ | all operations linear in $n$ |
 | `Dense(A)` | an explicit array | may be rectangular; no structure assumed |
 | `DenseSquare.from_matrix(A)` | a dense square matrix | stored with its LU; what `densify` returns for square non-PSD operators |
 | `Triangular(L, lower)` | a triangular matrix | what `DensePSD.factor()` returns |
@@ -43,7 +43,7 @@ class for the ingredients:
 | `block_diag(*blocks)` | `PSDBlockDiag` if every block is PSD, else `BlockDiag` | a block-diagonal matrix |
 | `product(*ops)` | `Product` | $A_1 A_2 \cdots A_m$, applied right to left |
 | `hstack(*ops)` | `HStack` | $[A_1\ A_2\ \cdots\ A_m]$, a block *row* |
-| `diag_congruence(op, s)` | `DiagCongruence` | $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$ for PSD $A$ |
+| `diag_congruence(op, scale)` | `PSDDiagCongruence` | $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$ for PSD $A$ |
 
 `HStack` splits its input along the trailing axis and sums the blocks'
 outputs, so $[A_1\ A_2]\,[x_1; x_2] = A_1 x_1 + A_2 x_2$; its transpose
@@ -112,5 +112,5 @@ For an operator of side $n$:
 | `DensePSD`, `DenseSquare` | $O(n^2)$ | $O(n^2)$ | $O(n^2)$ | $O(n)$ after the constructor's $O(n^3)$ |
 | `Triangular` | $O(n^2)$ | $O(n^2)$ | — | $O(n)$ |
 | block diagonals | sum over blocks | sum over blocks | sum over blocks | sum over blocks |
-| `DiagCongruence`, scaled operators | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ |
+| `PSDDiagCongruence`, scaled operators | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ |
 | `Product`, `HStack` | sum over factors | — | — | — |

@@ -11,7 +11,7 @@ class                         represents
 :class:`HStack`               blocks placed side by side, ``[A_1 ... A_m]``
 :class:`BlockDiag`            a block-diagonal matrix of arbitrary blocks
 :class:`PSDBlockDiag`         a block-diagonal matrix of PSD blocks
-:class:`DiagCongruence`       ``diag(s) A diag(s)`` for a PSD ``A``
+:class:`PSDDiagCongruence`    ``diag(s) A diag(s)`` for a PSD ``A``
 ============================  ==============================================
 
 Construct through the factory functions — :func:`block_diag`,
@@ -28,8 +28,8 @@ Notes
 This layer does not track definiteness through composition: a
 :class:`Product` of PSD operators is not PSD in general, so ``Product`` and
 ``HStack`` are plain :class:`~.base.LinOp`. An operator family that is
-closed under a composition gets its own class — :class:`DiagCongruence` is
-the diagonal congruence, which maps PSD operators to PSD operators.
+closed under a composition gets its own class — :class:`PSDDiagCongruence`
+is the diagonal congruence, which maps PSD operators to PSD operators.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ __all__ = [
     "HStack",
     "BlockDiag",
     "PSDBlockDiag",
-    "DiagCongruence",
+    "PSDDiagCongruence",
     "block_diag",
     "product",
     "hstack",
@@ -493,7 +493,7 @@ class PSDBlockDiag(PSDLinOp):
 
 
 @linop
-class DiagCongruence(PSDLinOp):
+class PSDDiagCongruence(PSDLinOp):
     """``diag(s) A diag(s)`` for a PSD operator ``A`` and positive ``s``.
 
     A diagonal congruence of a PSD operator is PSD, and every capability
@@ -505,29 +505,29 @@ class DiagCongruence(PSDLinOp):
     ----------
     op
         The PSD operator to rescale.
-    s
+    scale
         Per-coordinate scale vector of length ``op.n``, strictly positive.
     """
 
     op: PSDLinOp
-    s: Array
+    scale: Array
 
     def __post_init__(self) -> None:
         if not isinstance(self.op, PSDLinOp):
             raise TypeError(
-                f"DiagCongruence wraps a PSDLinOp, got {type(self.op).__name__}"
+                f"PSDDiagCongruence wraps a PSDLinOp, got {type(self.op).__name__}"
             )
-        _check_rank_floor("DiagCongruence", "s", self.s, 1)
-        if self.op._has_shape_info() and getattr(self.s, "ndim", None) is not None:
-            if self.s.shape[-1] != self.op.shape[0]:
+        _check_rank_floor("PSDDiagCongruence", "scale", self.scale, 1)
+        if self.op._has_shape_info() and getattr(self.scale, "ndim", None) is not None:
+            if self.scale.shape[-1] != self.op.shape[0]:
                 raise ValueError(
-                    f"DiagCongruence: scale length {self.s.shape[-1]} does not "
+                    f"PSDDiagCongruence: scale length {self.scale.shape[-1]} does not "
                     f"match operator side {self.op.shape[0]}"
                 )
         value_check(
-            self.s,
+            self.scale,
             lambda s: bool(jnp.all(s > 0)),
-            "DiagCongruence.s must be strictly positive",
+            "PSDDiagCongruence.scale must be strictly positive",
         )
 
     @property
@@ -538,26 +538,26 @@ class DiagCongruence(PSDLinOp):
         return super().supports(name) and self.op.supports(name)
 
     def _matvec(self, x: Array) -> Array:
-        return self.s * self.op._matvec(self.s * x)
+        return self.scale * self.op._matvec(self.scale * x)
 
     def _solve(self, b: Array) -> Array:
-        return self.op._solve(b / self.s) / self.s
+        return self.op._solve(b / self.scale) / self.scale
 
     def _logdet(self) -> Array:
-        return 2.0 * jnp.sum(jnp.log(self.s), axis=-1) + self.op._logdet()
+        return 2.0 * jnp.sum(jnp.log(self.scale), axis=-1) + self.op._logdet()
 
     def _diag(self) -> Array:
-        return self.s * self.s * self.op._diag()
+        return self.scale * self.scale * self.op._diag()
 
     def _factor(self) -> LinOp:
-        return Product((PSDDiagonal(self.s), self.op._factor()))
+        return Product((PSDDiagonal(self.scale), self.op._factor()))
 
     def _whiten(self, x: Array) -> Array:
-        return self.op._whiten(x / self.s)
+        return self.op._whiten(x / self.scale)
 
     def _to_dense(self) -> Array:
         D = self.op._to_dense()
-        return self.s[..., :, None] * D * self.s[..., None, :]
+        return self.scale[..., :, None] * D * self.scale[..., None, :]
 
 
 # ---------------------------------------------------------------------------
@@ -614,24 +614,24 @@ def hstack(*ops: LinOp) -> LinOp:
     return HStack(tuple(ops))
 
 
-def diag_congruence(op: PSDLinOp, s) -> DiagCongruence:
+def diag_congruence(op: PSDLinOp, scale) -> PSDDiagCongruence:
     """Build ``diag(s) op diag(s)`` for a PSD operator and positive ``s``.
 
     Parameters
     ----------
     op
         The PSD operator to rescale.
-    s
+    scale
         Per-coordinate scale vector of length ``op.n``, strictly positive.
     """
     if not isinstance(op, PSDLinOp):
         raise TypeError(
             f"diag_congruence() requires a PSDLinOp, got {type(op).__name__}"
         )
-    s = jnp.asarray(s)
-    if s.ndim != 1 or s.shape[0] != op.shape[0]:
+    scale = jnp.asarray(scale)
+    if scale.ndim != 1 or scale.shape[0] != op.shape[0]:
         raise ValueError(
             f"diag_congruence(): expected a scale vector of shape "
-            f"({op.shape[0]},), got {s.shape}"
+            f"({op.shape[0]},), got {scale.shape}"
         )
-    return DiagCongruence(op, s)
+    return PSDDiagCongruence(op, scale)

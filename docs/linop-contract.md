@@ -715,7 +715,7 @@ class**:
 | `product(*ops)`         | `Product` (a square variant will be added when an EKI consumer needs `solve`/`logdet` through a product) |
 | `hstack(*ops)`          | `HStack`                                     |
 | `kron(A, B)`            | the PSD Kron variant if both children are `PSDLinOp`, else the general variant — the rectangular factor-Kron is the general one *(classes arrive with the Kron milestone)* |
-| `diag_congruence(op, s)`| `DiagCongruence` (see below)                 |
+| `diag_congruence(op, scale)`| `PSDDiagCongruence` (see below)             |
 
 Variadic factories require at least one operand (`ValueError` otherwise);
 applied to a single operand, `block_diag`, `product` and `hstack` return
@@ -754,14 +754,14 @@ Semantics fixed by this contract:
 - Composites do not track definiteness through composition: a `Product` of
   PSD operators is not PSD in general, and the layer never infers PSD-ness
   from structure. An operator family that *is* closed under a composition
-  gets its own class — which is exactly what `DiagCongruence` is.
+  gets its own class — which is exactly what `PSDDiagCongruence` is.
 
 ### Diagonal congruence
 
-`diag_congruence(op, s)` represents $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$
+`diag_congruence(op, scale)` represents $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$
 for a `PSDLinOp` $A$ and a strictly positive vector $s$ (a tier-4
-precondition, like every value constraint), returning `DiagCongruence`, a
-`PSDLinOp` holding $s$ as a 1-D data field. Like scalar scaling, every
+precondition, like every value constraint), returning `PSDDiagCongruence`, a
+`PSDLinOp` holding the scale as a 1-D data field (`scale`). Like scalar scaling, every
 capability delegates to the base operator with the diagonal folded in:
 
 | operation on $SAS$, $S = \mathrm{diag}(s)$ | in terms of $A$              |
@@ -900,7 +900,7 @@ For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
 `PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
 `DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
-`DiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
+`PSDDiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
 (with the Kron classes, once that milestone lands), `diag_congruence`; the
 helpers `dense_matvec` and `tri_solve`; `densify`, `UnsupportedOpError`,
 `linop`, `static_field`, and the debug switch (`set_debug_checks`, the
@@ -1063,5 +1063,5 @@ specification, and will be deleted afterwards.
 | abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |
 | composites | direct class construction; `BlockDiag` + `BlockDiagGeneral` pair, the latter with a stub `solve` raising `AttributeError` | factories `block_diag`/`product`/`hstack` select the class; general `BlockDiag` is a plain `LinOp` with no stub methods |
 | arithmetic | none; `op @ x` fails with Python's generic unsupported-operand error; `np_array * op` silently builds an object array | `@` composes operators (guided `TypeError` on arrays); `*`/`/` return a level-preserving scaled composite; `__array_ufunc__ = None` so NumPy defers; `__jax_array__` forbidden; `+` still excluded |
-| composite anatomy | `blocks`/`ops` fields exist but are implementation detail | children and static block sizes are contract ({ref}`contract-composites`); `DiagCongruence` added for localization noise inflation |
+| composite anatomy | `blocks`/`ops` fields exist but are implementation detail | children and static block sizes are contract ({ref}`contract-composites`); `PSDDiagCongruence` added for localization noise inflation |
 | conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–13 above, with the monkeypatch guard and per-check keys |

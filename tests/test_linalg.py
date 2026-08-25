@@ -21,10 +21,10 @@ from pyeki.linalg import (
     Dense,
     DensePSD,
     DenseSquare,
-    DiagCongruence,
     Identity,
     Product,
     PSDBlockDiag,
+    PSDDiagCongruence,
     PSDDiagonal,
     PSDLinOp,
     PSDScaled,
@@ -473,7 +473,7 @@ def test_diag_congruence_is_taper_reciprocal_inflation():
     R = DensePSD.from_matrix(jnp.asarray(_psd(4)))
     taper = jnp.asarray(RNG.uniform(0.2, 1.0, 4))
     inflated = diag_congruence(R, 1.0 / jnp.sqrt(taper))
-    assert isinstance(inflated, DiagCongruence)
+    assert isinstance(inflated, PSDDiagCongruence)
     want = np.asarray(R.to_dense()) / np.sqrt(
         np.outer(np.asarray(taper), np.asarray(taper))
     )
