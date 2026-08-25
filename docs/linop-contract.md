@@ -137,6 +137,22 @@ vectors", and `matmat`, `solve_mat` and `whiten_mat` always mean "a matrix
 operand, possibly batched". The pairing is a requirement of the batch
 contract, not an API convenience.
 
+The two readings are nevertheless consistent in exactly the way intuition
+expects: **`matmat` is batched `matvec` — batched over columns** rather
+than over leading axes,
+
+$$
+\texttt{matmat}(X)[\ldots,\, :,\, j] \;=\; \texttt{matvec}\bigl(X[\ldots,\, :,\, j]\bigr),
+$$
+
+and the default `_matmat` hook implements precisely this identity (the
+same holds for `solve_mat`/`solve` and `whiten_mat`/`whiten`). What
+distinguishes this layer from column-stacked operator libraries is not
+whether matrix application is batched vector application — it is — but
+which axis carries a batch of vectors in the *vector* methods: leading,
+because that is what `vmap` produces and the layout in which ensembles
+arrive from a `vmap`-ed forward model.
+
 The matrix methods are the single exception to "contract the trailing
 axis": their core operand is 2-D, so they contract axis `-2` and carry `k`
 along. `k` is part of the core shape, never a batch axis.
@@ -563,6 +579,10 @@ class**:
 | `product(*ops)`      | `Product` (a square variant will be added when an EKI consumer needs `solve`/`logdet` through a product) |
 | `hstack(*ops)`       | `HStack`                                     |
 
+Two further composites are constructed through operator arithmetic rather
+than a named factory: `A @ B` is `product(A, B)`, and `c * op` builds a
+level-preserving scaled operator ({ref}`contract-arithmetic`).
+
 The factories are the stable public construction API: as structured
 variants are added, factory calls transparently start returning them,
 without breaking callers. The concrete classes remain public — they are
@@ -586,6 +606,92 @@ Semantics fixed by this contract:
   PSD operators is not PSD in general, and the layer never infers PSD-ness
   from structure. An operator family that *is* closed under a composition
   (a congruence $D A D$) gets its own class.
+
+(contract-arithmetic)=
+## Operator arithmetic
+
+Operators support a deliberately small arithmetic surface: composition
+with `@`, and scalar scaling with `*` and `/`. Both are sugar over
+structured composites, both are unambiguous under the batch contract, and
+neither accepts a raw array. Addition remains excluded
+({ref}`contract-excluded`).
+
+### Composition: `A @ B`
+
+When **both operands are operators**, `A @ B` returns `product(A, B)` —
+the lazy composition, with adjacent shapes validated at construction and
+nothing multiplied out. It is exactly the factory call, so as structured
+product variants are added, `@` picks them up transparently.
+
+### `@` never accepts an array
+
+`op @ x` and `x @ op` raise `TypeError` for array operands — deliberately,
+and the dunders are defined so that the error is a *guided* one, naming
+the methods to use instead (`matvec`/`matmat`, or `rmatvec`/`T` on the
+right-hand side) and the batch convention. The reasoning:
+
+- NumPy fixed what `@` means for operands with two or more dimensions:
+  contract axis `-2`, treat leading axes as batches of *matrices*. So
+  there is exactly one consistent array semantics available for `op @ X`,
+  and it is `matmat`.
+- That semantics collides with this layer's canonical data layout. A
+  `vmap`-ed forward model produces ensembles as `(J, n)` row-batches, and
+  applying an operator to one is a *batch-of-vectors* operation. Given
+  `R` of side $n$, the natural-looking `R @ ensemble` is a confusing
+  shape error when $J \ne n$ — and when $J = n$ it is shape-valid,
+  contracts the wrong axis, and returns a wrong answer silently. The
+  small-observation regime makes $J = n$ a case that actually occurs, not
+  a corner.
+- A `@` that works for 1-D operands and column matrices but misbehaves on
+  the package's own preferred layout would be worse than no `@`: partial
+  support teaches a habit, then punishes it where the cost is a wrong
+  posterior. The named methods are total — `matvec` handles every batch
+  rank uniformly — and their names force the caller to say which of the
+  two shape-identical operations they mean.
+
+Restricting `@` to operator–operator composition is also the convention of
+the closest analogue among JAX operator libraries (lineax): the collision
+above is a property of leading-batch layouts, not of this package.
+
+### Scalar scaling: `c * op`, `op * c`, `op / c`
+
+Scalar multiplication returns a **scaled composite at the same hierarchy
+level as its operand**, delegating every capability of the base operator
+with the scalar folded in:
+
+| operation on $cA$ | in terms of $A$                              |
+| ----------------- | -------------------------------------------- |
+| `matvec(x)`       | $c \cdot A x$                                |
+| `solve(b)`        | $A^{-1} b \,/\, c$                           |
+| `logdet()`        | $n \log\lvert c\rvert + \log\lvert\det A\rvert$ |
+| `diag()`          | $c \cdot \operatorname{diag}(A)$             |
+| `factor()`        | $\sqrt{c}\, L$, as a scaled factor           |
+| `whiten(x)`       | $A$'s whitening of $x$, divided by $\sqrt{c}$ |
+
+Requirements:
+
+- The scalar is held as a **0-d array field** (pytree data), never a
+  Python float, so a traced value flows through it. This is the point:
+  the consumer is tempering, where the per-step noise covariance is
+  $\Sigma / \Delta\beta_t$ with an increment chosen adaptively — and
+  therefore traced — inside the step. Scaling must not rebuild or
+  re-factorize the base operator.
+- `supports()` delegates to the base operator: the scaled composite
+  supports exactly what its base supports.
+- As with the other composites ({ref}`contract-composites`), the concrete
+  class is selected by the operand's level — the dunder plays the factory
+  role — so scaling a `PSDLinOp` yields a `PSDLinOp`, and scaling a
+  factor yields a plain `LinOp`.
+- Value preconditions are tier 4 ({ref}`contract-validation`): $c > 0$
+  when the operand is PSD (a traced sign cannot be checked eagerly),
+  $c \ne 0$ when `solve` is used. Violations produce `nan`, or an error
+  in debug mode, like every other value precondition.
+- Only true scalars scale: `array * op` for a non-0-d array is a guided
+  `TypeError`, for the same reason `@` rejects arrays — elementwise and
+  batched readings would be ambiguous.
+
+There is no unary negation and no `op1 * op2`: the first cannot preserve
+any level above `SquareLinOp`, and the second already has a name, `@`.
 
 (contract-repr)=
 ## `repr`
@@ -654,13 +760,19 @@ redundant with conformance.
 
 Recorded so their absence reads as a decision, not an oversight.
 
-**Operator arithmetic (`+`, `@`, scalar `*`).** Construction is explicit,
-through classes and factories. Overloaded arithmetic needs simplification
-rules to return structured results (`Diagonal + Diagonal`,
-`Identity @ A`), and a registry of such rules is machinery the current
-type count does not justify. When a sum type is needed, dispatching on
-structure inside its `solve`/`logdet` is the fallback design. Revisit when
+**Operator addition (`+`).** Composition and scalar scaling are supported
+({ref}`contract-arithmetic`); addition is not. A sum is only worth
+representing when its structure survives — the factor of a sum of PSD
+operators is a horizontal stack, but its `solve` and `logdet` require
+either a simplification rule per pair of types (`Diagonal + Diagonal`,
+low-rank plus diagonal) or a dedicated class per structured sum. A
+registry of such rules is machinery the current type count does not
+justify, and a generic sum class would advertise almost nothing. Structured
+sums get their own classes as EKI needs them; revisit `__add__` when
 `pyeki.gauss` exists and real call sites are visible.
+
+**`@` between an operator and an array.** Excluded with a guided error;
+the reasoning is in {ref}`contract-arithmetic`.
 
 **`cholesky()`.** Removed from the contract; see the square-roots section
 for the reasoning.
@@ -715,4 +827,5 @@ specification, and will be deleted afterwards.
 | field classification | denylist heuristic over annotation strings (misses `int \| None`, `Optional[int]`, `Literal`, `np.ndarray`) | allowlist: data iff `Array` / `LinOp` / tuples thereof; everything else must be static |
 | abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |
 | composites | direct class construction; `BlockDiag` + `BlockDiagGeneral` pair, the latter with a stub `solve` raising `AttributeError` | factories `block_diag`/`product`/`hstack` select the class; general `BlockDiag` is a plain `LinOp` with no stub methods |
+| arithmetic | none; `op @ x` fails with Python's generic unsupported-operand error | `@` composes operators (guided `TypeError` on arrays); `*`/`/` return a level-preserving scaled composite; `+` still excluded |
 | conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–12 above, with the monkeypatch guard and per-check keys |
