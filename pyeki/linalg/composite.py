@@ -41,7 +41,7 @@ from .base import (
     LinOp,
     PSDLinOp,
     SquareLinOp,
-    _check_rank_floor,
+    _check_core_rank,
     linop,
     value_check,
 )
@@ -158,6 +158,7 @@ class Scaled(LinOp):
     def __post_init__(self) -> None:
         if not isinstance(self.op, LinOp):
             raise TypeError(f"Scaled wraps a LinOp, got {type(self.op).__name__}")
+        _check_core_rank("Scaled", "c", self.c, 0)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -256,12 +257,9 @@ class Product(LinOp):
 
     def __post_init__(self) -> None:
         _check_ops_tuple("Product", "ops", self.ops)
-        if all(op._has_shape_info() for op in self.ops):
-            for a, b in zip(self.ops[:-1], self.ops[1:], strict=True):
-                if a.shape[1] != b.shape[0]:
-                    raise ValueError(
-                        f"shape mismatch in Product: {a!r} @ {b!r}"
-                    )
+        for a, b in zip(self.ops[:-1], self.ops[1:], strict=True):
+            if a.shape[1] != b.shape[0]:
+                raise ValueError(f"shape mismatch in Product: {a!r} @ {b!r}")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -313,13 +311,12 @@ class HStack(LinOp):
 
     def __post_init__(self) -> None:
         _check_ops_tuple("HStack", "ops", self.ops)
-        if all(op._has_shape_info() for op in self.ops):
-            rows = {op.shape[0] for op in self.ops}
-            if len(rows) != 1:
-                raise ValueError(
-                    f"HStack blocks must share a row count, got "
-                    f"{[op.shape for op in self.ops]}"
-                )
+        rows = {op.shape[0] for op in self.ops}
+        if len(rows) != 1:
+            raise ValueError(
+                f"HStack blocks must share a row count, got "
+                f"{[op.shape for op in self.ops]}"
+            )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -517,8 +514,8 @@ class PSDDiagCongruence(PSDLinOp):
             raise TypeError(
                 f"PSDDiagCongruence wraps a PSDLinOp, got {type(self.op).__name__}"
             )
-        _check_rank_floor("PSDDiagCongruence", "scale", self.scale, 1)
-        if self.op._has_shape_info() and getattr(self.scale, "ndim", None) is not None:
+        _check_core_rank("PSDDiagCongruence", "scale", self.scale, 1)
+        if getattr(self.scale, "ndim", None) is not None:
             if self.scale.shape[-1] != self.op.shape[0]:
                 raise ValueError(
                     f"PSDDiagCongruence: scale length {self.scale.shape[-1]} does not "

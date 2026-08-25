@@ -192,8 +192,8 @@ def value_check(x, predicate, message: str) -> None:
     ``from_matrix``-style classmethods for preconditions that are values
     rather than shapes — positivity, finiteness, definiteness.
 
-    Skipped when debug checks are off, when ``x`` is not array-like (a
-    placeholder used during pytree unflattening), or when ``x`` is a tracer.
+    Skipped when debug checks are off, when ``x`` is not array-like, or
+    when ``x`` is a tracer — value checks never affect ``jit``-ed code.
     """
     if not _debug_checks_enabled:
         return
@@ -247,6 +247,13 @@ def linop(cls: type) -> type:
 
     Notes
     -----
+    - **Pytree unflattening bypasses the constructor.** The registered
+      unflatten allocates the instance and sets its fields directly, so
+      ``__init__``/``__post_init__`` run only where code constructs an
+      operator explicitly. Constructor validation therefore runs exactly
+      once per operator, never at JAX's reconstruction boundaries — which
+      is what lets constructors demand exact core ranks while ``vmap``
+      still rebuilds batched families at its exit boundary.
     - Operators compare by identity (``eq=False``): dataclass equality would
       compare arrays elementwise and raise on the ambiguous truth value.
       They hash by identity, which makes them usable as dictionary keys but
@@ -279,10 +286,31 @@ def linop(cls: type) -> type:
                 f"tuples of those may be pytree data. Mark this field with "
                 f"static_field(), or store it as an array."
             )
+    data_names, meta_names = tuple(data_fields), tuple(meta_fields)
 
-    jax.tree_util.register_dataclass(
-        cls, data_fields=data_fields, meta_fields=meta_fields
-    )
+    def flatten_with_keys(obj):
+        children = [
+            (jax.tree_util.GetAttrKey(name), getattr(obj, name))
+            for name in data_names
+        ]
+        return children, tuple(getattr(obj, name) for name in meta_names)
+
+    def flatten(obj):
+        children = [getattr(obj, name) for name in data_names]
+        return children, tuple(getattr(obj, name) for name in meta_names)
+
+    def unflatten(aux, children):
+        # Deliberately bypasses __init__/__post_init__: reconstruction is
+        # not construction, and must accept batched leaves (vmap exit) and
+        # placeholder leaves (JAX internals) that validation would reject.
+        obj = object.__new__(cls)
+        for name, value in zip(data_names, children, strict=True):
+            object.__setattr__(obj, name, value)
+        for name, value in zip(meta_names, aux, strict=True):
+            object.__setattr__(obj, name, value)
+        return obj
+
+    jax.tree_util.register_pytree_with_keys(cls, flatten_with_keys, unflatten, flatten)
     return cls
 
 
@@ -340,18 +368,21 @@ def _check_mat(op: LinOp, method: str, X, size: int) -> Array:
     return X
 
 
-def _check_rank_floor(cls_name: str, field_name: str, value, core_ndim: int) -> None:
-    """Reject an array field whose rank is below its core rank.
+def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> None:
+    """Reject an array field whose rank is not exactly its core rank.
 
-    Extra leading axes are accepted — such an operator is a vmapped family,
-    reconstructed at ``vmap`` exit boundaries. Fields without ``ndim``
-    (placeholders used by JAX during unflattening) pass untouched.
+    Operators are unbatched; a batched family is built with ``jax.vmap``
+    over the operator pytree, never by passing arrays with extra leading
+    axes. Enforcing this in the constructor is safe because pytree
+    unflattening bypasses it (:func:`linop`). Fields without ``ndim`` pass
+    untouched.
     """
     ndim = getattr(value, "ndim", None)
-    if ndim is not None and ndim < core_ndim:
+    if ndim is not None and ndim != core_ndim:
         raise ValueError(
-            f"{cls_name}.{field_name}: expected an array of rank at least "
-            f"{core_ndim}, got rank {ndim}"
+            f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, "
+            f"got rank {ndim}. Operators are unbatched; batch with jax.vmap "
+            f"over the operator pytree, not with extra leading axes."
         )
 
 
@@ -629,25 +660,6 @@ class LinOp(abc.ABC):
             raise UnsupportedOpError(
                 name, type(self).__name__, tuple(sorted(self.capabilities()))
             )
-
-    def _has_shape_info(self) -> bool:
-        """Return True when every stored array, recursively, reports a shape.
-
-        False while JAX unflattens with placeholder leaves; cross-field
-        structural checks in constructors must be skipped then.
-        """
-        for f in dataclasses.fields(self):
-            if f.metadata.get("static", False):
-                continue
-            value = getattr(self, f.name)
-            items = value if isinstance(value, tuple) else (value,)
-            for item in items:
-                if isinstance(item, LinOp):
-                    if not item._has_shape_info():
-                        return False
-                elif getattr(item, "ndim", None) is None:
-                    return False
-        return True
 
     # -- operator arithmetic ------------------------------------------------------
     def __matmul__(self, other):

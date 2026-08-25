@@ -229,14 +229,44 @@ def test_wrong_operand_shapes_raise_instead_of_broadcasting():
         PSDDiagonal(jnp.ones(6)).matmat(jnp.ones(6))  # rank 1 is not a matrix
 
 
-def test_strict_constructors_reject_batched_arrays():
-    """from_matrix enforces exact core rank; the storing constructor accepts
-    extra leading axes only because vmap exit boundaries rebuild through it."""
+def test_constructors_reject_batched_arrays():
+    """Every constructor demands exact core rank -- the (J, n)-where-(n,)
+    slip constructs nothing. Batched families exist only through pytree
+    reconstruction, which bypasses the constructor."""
+    with pytest.raises(ValueError, match="vmap"):
+        PSDDiagonal(jnp.ones((100, 6)))  # an ensemble where a diagonal was meant
+    with pytest.raises(ValueError, match="vmap"):
+        Dense(jnp.ones((4, 3, 3)))
+    with pytest.raises(ValueError, match="rank"):
+        PSDDiagonal(jnp.asarray(2.0))  # below core rank
     As = jnp.asarray(np.stack([_psd(3) for _ in range(4)]))
     with pytest.raises(ValueError, match="from_matrix"):
         DensePSD.from_matrix(As)
-    with pytest.raises(ValueError, match="rank"):
-        PSDDiagonal(jnp.asarray(2.0))  # below core rank is always rejected
+
+
+def test_unflatten_bypasses_the_constructor():
+    """tree_unflatten rebuilds instances without running __init__, so
+    batched leaves (vmap exit) and placeholder leaves (JAX internals)
+    coexist with strict constructors."""
+    op = PSDDiagonal(jnp.ones(3))
+    leaves, treedef = jax.tree_util.tree_flatten(op)
+    fam = jax.tree_util.tree_unflatten(treedef, [jnp.ones((5, 3))])
+    assert isinstance(fam, PSDDiagonal)  # a family: pytree plumbing only
+    jax.tree_util.tree_unflatten(treedef, [object()])  # sentinels pass too
+
+
+def test_vmap_over_scalars_builds_a_scaled_family():
+    """The vmap exit boundary reconstructs a Scaled family whose base
+    leaves are broadcast -- unconstructible when unflatten ran __init__."""
+    op = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    cs = jnp.asarray([0.5, 1.0, 2.0])
+    xs = jnp.asarray(RNG.normal(size=(3, 3)))
+    got = jax.vmap(lambda c, x: (op * c).solve(x))(cs, xs)
+    want = np.stack(
+        [np.linalg.solve(float(cs[i]) * np.asarray(op.to_dense()), np.asarray(xs[i]))
+         for i in range(3)]
+    )
+    np.testing.assert_allclose(np.asarray(got), want, rtol=1e-8)
 
 
 def test_field_allowlist_rejects_undeclared_non_array_fields():

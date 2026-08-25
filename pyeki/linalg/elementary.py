@@ -38,7 +38,7 @@ from .base import (
     LinOp,
     PSDLinOp,
     SquareLinOp,
-    _check_rank_floor,
+    _check_core_rank,
     dense_matvec,
     linop,
     static_field,
@@ -76,9 +76,9 @@ def _strict_square_matrix(cls_name: str, A) -> Array:
 
 
 def _check_square_field(cls_name: str, field_name: str, value) -> None:
-    """Structural check for a stored square-matrix field: rank floor 2 and
-    equal trailing axes. Skipped for placeholders without ``ndim``."""
-    _check_rank_floor(cls_name, field_name, value, 2)
+    """Structural check for a stored square-matrix field: rank exactly 2
+    and equal axes."""
+    _check_core_rank(cls_name, field_name, value, 2)
     shape = getattr(value, "shape", None)
     if shape is not None and shape[-1] != shape[-2]:
         raise ValueError(
@@ -152,7 +152,7 @@ class PSDDiagonal(PSDLinOp):
     diagonal: Array
 
     def __post_init__(self) -> None:
-        _check_rank_floor("PSDDiagonal", "diagonal", self.diagonal, 1)
+        _check_core_rank("PSDDiagonal", "diagonal", self.diagonal, 1)
         value_check(
             self.diagonal,
             lambda d: bool(jnp.all(d > 0)),
@@ -202,7 +202,7 @@ class Dense(LinOp):
     A: Array
 
     def __post_init__(self) -> None:
-        _check_rank_floor("Dense", "A", self.A, 2)
+        _check_core_rank("Dense", "A", self.A, 2)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -251,8 +251,8 @@ class DenseSquare(SquareLinOp):
 
     def __post_init__(self) -> None:
         _check_square_field("DenseSquare", "A", self.A)
-        _check_rank_floor("DenseSquare", "lu", self.lu, 2)
-        _check_rank_floor("DenseSquare", "piv", self.piv, 1)
+        _check_core_rank("DenseSquare", "lu", self.lu, 2)
+        _check_core_rank("DenseSquare", "piv", self.piv, 1)
 
     @classmethod
     def from_matrix(cls, A) -> DenseSquare:

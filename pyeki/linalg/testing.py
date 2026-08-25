@@ -326,8 +326,10 @@ def check_pytree(op: LinOp, key) -> None:
     ``vmap`` over operands and over the operator itself, and ``grad``.
 
     The operator-batching check flattens the instance, stacks each leaf,
-    and reconstructs inside ``jax.vmap`` — the vmap-exit reconstruction the
-    contract requires the storing constructor to accept.
+    and reconstructs inside ``jax.vmap`` — exercising the vmap-exit
+    reconstruction, which bypasses the constructor. So does the sentinel
+    check: ``tree_unflatten`` with bare ``object()`` leaves must succeed
+    for every operator type, composites included.
     """
     leaves, treedef = jax.tree_util.tree_flatten(op)
     n_in = op.shape[1]

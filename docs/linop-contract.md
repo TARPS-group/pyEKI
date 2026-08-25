@@ -83,14 +83,12 @@ then columns, matching the dense array `to_dense()` returns.
 - `SquareLinOp` adds `n`, the side length, equal to both entries of
   `shape`.
 - **Operators are unbatched.** Every stored array has exactly its core
-  rank: a `Dense` stores a 2-D array, a `PSDDiagonal` a 1-D array. The
-  user-facing constructors — classmethods like `from_matrix` and the
-  factories — enforce this exactly; the storing constructor enforces only
-  a rank *floor*, for reasons the pytree machinery imposes (see
-  {ref}`contract-validation` and {ref}`contract-batching-operators`). A
-  "batch of operators" is expressed with `jax.vmap` over the operator
-  pytree, never by handing arrays with extra leading axes to a strict
-  constructor.
+  rank: a `Dense` stores a 2-D array, a `PSDDiagonal` a 1-D array. Every
+  constructor enforces this exactly — which is safe because pytree
+  unflattening bypasses the constructor (see {ref}`contract-validation`
+  and {ref}`contract-batching-operators`). A "batch of operators" is
+  expressed with `jax.vmap` over the operator pytree, never by passing
+  arrays with extra leading axes.
 - **Shapes are strictly positive.** Both entries of `shape` are at least
   1; the strict constructors reject empty operators. (The `k` axis of a
   matrix *operand* may be 0 — see the batch contract.)
@@ -200,22 +198,21 @@ This is the only supported way to batch an operator. Handing batched
 arrays to a strict constructor (`Dense.from_matrix` on a 3-D array) is
 rejected.
 
-The mechanics deserve precision, because they dictate where validation
-may live. *Inside* a `vmap` trace, each leaf is presented at its unbatched
-core shape, so strict checks would pass there. But at the **vmap exit
-boundary** — and on every other unflatten of a batched family — the
-operator is reconstructed through its *storing constructor* with fully
-batched concrete leaves, outside any trace. Exact-rank enforcement in the
-storing constructor would therefore make the family above unconstructible.
-Hence the split stated in the shape contract: **classmethods and
-factories, which are never on an unflatten path, enforce exact core rank;
-the storing constructor rejects only rank below the core** and accepts
-extra leading axes. An operator whose leaves carry extra leading axes is a
-*vmapped family*: it is valid as a `vmap` argument and for pytree
-operations, and nothing else — the contract defines no behaviour for
-calling its methods directly (its `shape` reads only the trailing core
-axes). The conformance suite checks that constructing and returning an
-operator inside `vmap` round-trips.
+The mechanics deserve precision. *Inside* a `vmap` trace, each leaf is
+presented at its unbatched core shape, so constructor validation passes
+everywhere user code actually constructs an operator — eagerly, under
+`jit`, or inside `vmap`. At the **vmap exit boundary** — and on every
+other pytree unflatten — the family is rebuilt with fully batched
+concrete leaves, outside any trace; that reconstruction **bypasses the
+constructor entirely** (`@linop` registers an unflatten that allocates
+the instance and sets its fields directly), so strict validation and
+batched reconstruction never meet. An operator whose leaves carry extra
+leading axes is therefore constructible only as a pytree reconstruction —
+a *vmapped family*: valid as a `vmap` argument and for pytree operations,
+and nothing else; the contract defines no behaviour for calling its
+methods directly (its `shape` reads only the trailing core axes). The
+conformance suite checks that constructing and returning an operator
+inside `vmap` round-trips.
 
 ## Method contracts
 
@@ -557,7 +554,7 @@ is impossible on tracers and forces a device sync on concrete arrays.
 | tier | what is checked | when | cost | on failure |
 | ---- | --------------- | ---- | ---- | ---------- |
 | 1. class definition | every dataclass field is declared data or static correctly | `import` time | free | `TypeError` |
-| 2. construction | structural validity: array ranks, block shape agreement, block types | every construction, including pytree unflatten | O(#fields) Python | `ValueError` / `TypeError` |
+| 2. construction | structural validity: exact array ranks, block shape agreement, block types | every construction; pytree unflatten bypasses the constructor and is not re-validated | O(#fields) Python | `ValueError` / `TypeError` |
 | 3. call | operand core shape matches the operator | every public method call | free (shapes are static) | `ValueError` |
 | 4. value (debug) | positivity, finiteness, definiteness preconditions | opt-in, concrete arrays only | a device sync | `ValueError` |
 
@@ -573,33 +570,25 @@ Python over static information, so they cost nothing under `jit` and are
 therefore unconditional. Error messages must name the operator (its
 `repr`), the method, the expected core shape, and the offending shape.
 
-Tier 2 has three rules imposed by JAX's pytree machinery, which
-reconstructs operators through their storing constructor on every
-`jit`/`vmap` boundary ({ref}`contract-jax`):
+Tier 2 has two rules:
 
 - **Shape-only.** Constructor validation may inspect `ndim`, `shape` and
-  Python-level structure. It must never read values (tracers pass through
-  constructors routinely).
-- **Sentinel-tolerant, transitively.** Any field that does not expose
-  `ndim` passes validation untouched: JAX internals unflatten pytrees with
-  placeholder objects — `jax.custom_vjp`, for one, rebuilds arguments with
-  bare `object()` leaves — and validation must not break them. The rule
-  extends through composites: any check that reads a *child operator's*
-  `shape` must first verify the child's stored arrays expose `ndim` and
-  skip the check otherwise, because a child built around sentinel leaves
-  constructs successfully but cannot answer `shape`.
-- **Rank floor, not exact rank.** The storing constructor rejects arrays
-  whose rank is *below* the field's core rank and accepts extra leading
-  axes — a vmapped family, reconstructed at `vmap` exit boundaries with
-  batched concrete leaves ({ref}`contract-batching-operators`). Exact core
-  rank, and the positivity of core sizes, are enforced by the classmethods
-  and factories, which are never on an unflatten path.
+  Python-level structure. It must never read values: user code constructs
+  operators under `jit` and `vmap`, where fields are tracers.
+- **Exact core rank.** Every array field must have exactly its core rank,
+  and core sizes must be positive. This is enforceable in the constructor
+  because JAX's pytree reconstruction never calls it: `@linop` registers
+  an unflatten that allocates the instance and sets its fields directly,
+  so tier 2 runs only at genuine construction. The batched leaves of a
+  vmap-exit reconstruction ({ref}`contract-batching-operators`) never
+  reach validation, and neither do placeholder leaves — JAX internals
+  occasionally unflatten with bare `object()` sentinels (`jax.custom_vjp`
+  rebuilds arguments that way), which the bypass renders harmless.
 
-Tier-2 and tier-3 code runs in Python on every eager call, and — because
-unflatten calls the constructor — tier 2 runs again on every
-reconstruction of a `jit` *output*; under `jit` the call-site checks run
-at trace time only. Both tiers must therefore stay O(#fields) of pure
-Python, with no array work.
+Tier-3 checks run in Python on every eager call; under `jit` they run at
+trace time only. Tier 2 runs once per constructed operator, never at
+`jit`/`vmap` boundaries. Both tiers must stay O(#fields) of pure Python,
+with no array work.
 
 Tier 4 covers preconditions that are *values*: `PSDDiagonal` entries strictly
 positive, `from_matrix` arguments actually positive definite, factors
@@ -655,6 +644,13 @@ explicitly separated data and metadata:
 - **Static metadata must be hashable and cheap to compare** — ints, bools,
   strings, tuples of those. Never arrays (a NumPy array as metadata
   poisons the compilation cache).
+- **Pytree unflattening bypasses the constructor.** The registered
+  unflatten allocates the instance and sets its fields directly;
+  `__init__`/`__post_init__` run only where code constructs an operator
+  explicitly. Consequences: constructor validation may be strict without
+  breaking JAX's reconstruction boundaries, boundaries pay no validation
+  cost, and behaviour must never live in the constructor — the fields are
+  the whole state.
 - `eq=False`: operators compare by identity. Dataclass equality would
   compare arrays elementwise and raise on the ambiguous truth value.
 - `repr=False`: the generated dataclass `__repr__` would shadow the
@@ -667,13 +663,14 @@ The dataclass constructor **must only store and validate** — never
 factorize, never allocate more than trivially. Anything computed from the
 inputs (a Cholesky factor, an eigendecomposition, LU) is done in an
 alternate constructor (`DensePSD.from_matrix(A)`), which computes once and
-passes the results to the storing constructor.
+passes the results to the field-storing constructor.
 
 Two independent reasons, either sufficient:
 
-- JAX **reconstructs pytrees through the constructor** on every
-  `jit`/`vmap`/`grad` boundary. A constructor that computes would
-  silently recompute at each of them.
+- Pytree reconstruction rebuilds instances **from their stored fields
+  alone**, bypassing `__init__` — so the fields are the operator's whole
+  state, and anything the operator needs at use time must be sitting in
+  them when the constructor finishes.
 - The lazy alternative — caching a factorization on first use — does not
   work at all under JAX: a cache written inside a traced function lands on
   a temporary copy and is discarded, so the operator re-factorizes on
@@ -1013,9 +1010,9 @@ for the reasoning.
 **Batched operators.** One operator holds one matrix; families are
 `vmap`ed pytrees ({ref}`contract-batching-operators`). Supporting stored
 batch axes would force every `shape`, `split`, and validation rule to
-carry a second convention through the whole layer. (The storing
-constructor's tolerance of extra leading axes is `vmap` plumbing only —
-the contract defines no direct-call behaviour for such a family.)
+carry a second convention through the whole layer. (Families arise
+only from pytree reconstruction, which bypasses the constructor — the
+contract defines no direct-call behaviour for them.)
 
 **dtype tracking.** The package runs float64 end to end (enabled at
 import). A per-operator dtype attribute and promotion rules would be
@@ -1057,7 +1054,7 @@ specification, and will be deleted afterwards.
 | unsupported-op error | not reconstructible from `args`; not picklable | picklable, rebuilds from `args` |
 | `densify` of a square non-PSD operator | returns `Dense`, which has no `solve` — the advertised fallback fails | returns `DenseSquare` (new LU-backed elementary operator); mapping preserves the hierarchy level |
 | operand validation | none; `Identity(6).matvec(ones(3))` returns the wrong shape silently | tier-3 core-shape checks on every public method |
-| constructor validation | none; batched arrays accepted then misbehave | tier-2 structural checks — exact core rank in classmethods/factories, a rank floor in the storing constructor (vmap-exit reconstruction requires it); `vmap`-over-pytree is the batching story |
+| constructor validation | none; batched arrays accepted then misbehave; `register_dataclass` unflatten calls the constructor, forcing sentinel tolerance and rank floors | exact core rank in every constructor; `@linop` registers a custom unflatten that bypasses `__init__`, so strictness and vmap-exit reconstruction coexist; `vmap`-over-pytree is the batching story |
 | value preconditions | documented only; violations yield `nan` | opt-in debug mode checks them on concrete inputs |
 | field classification | denylist heuristic over annotation strings (misses `int \| None`, `Optional[int]`, `Literal`, `np.ndarray`) | allowlist: data iff `Array` / `LinOp` / tuples thereof; everything else must be static |
 | abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |

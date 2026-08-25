@@ -146,11 +146,13 @@ constructor on every `jit`/`vmap` boundary, so a computing constructor
 silently recomputes there, and a factorization cached lazily inside a
 traced function is discarded when the trace ends.
 
-**Constructor validation is shape-only and tolerant.** A `__post_init__`
-may check ranks and static structure, but it must never read array values,
-must skip fields that do not expose `ndim` (JAX sometimes rebuilds pytrees
-with placeholder objects), and must reject only ranks *below* the field's
-core rank — extra leading axes are how `vmap` reconstructs a batched family
-of operators. Value-level preconditions (positivity, definiteness) belong
-in `pyeki.linalg.value_check` assertions, which run only under
+**Constructor validation is shape-only, and runs only at genuine
+construction.** A `__post_init__` may check ranks — exactly the field's
+core rank — and static structure, but must never read array values: user
+code constructs operators under `jit` and `vmap`, where fields are
+tracers. JAX's pytree reconstruction (at every `jit`/`vmap` boundary)
+bypasses the constructor entirely, so validation neither slows those
+boundaries nor ever sees their batched or placeholder leaves. Value-level
+preconditions (positivity, definiteness) belong in
+`pyeki.linalg.value_check` assertions, which run only under
 `pyeki.linalg.debug_checks()`.
