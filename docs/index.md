@@ -101,6 +101,7 @@ user-guide/writing-an-operator
 :caption: Reference
 :hidden:
 
+linop-contract
 design
 api/index
 ```
