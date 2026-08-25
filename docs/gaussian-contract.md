@@ -1,10 +1,11 @@
 # Joint Gaussian contract
 
 This page specifies `pyeki.gauss`: the classes it provides, the contract of
-every method, and the conditioning mathematics that all of them share. It is normative — an implementation that violates a rule here is
-defective even if its tests pass — and it is the reference for two audiences:
-contributors implementing or reviewing the layer, and users who want a more
-precise account of Gaussian conditioning in pyEKI than the user guide gives.
+every method, and the conditioning mathematics that all of them share. It is
+normative — an implementation that violates a rule here is defective even if
+its tests pass — and it is the reference for two audiences: contributors
+implementing or reviewing the layer, and users who want a more precise
+account of Gaussian conditioning in pyEKI than the user guide gives.
 
 Throughout, *must* and *never* state requirements, *should* states a strong
 default that a documented reason may override, and *may* states a permission.
@@ -35,23 +36,24 @@ Inversion needs from Gaussian machinery:
   deterministic (square-root transform) forms — Gaussian conditioning applied
   to the Gaussian determined by an ensemble's empirical moments — together
   with that posterior as a distribution, in structured low-rank form;
-- **exact moment conditioning** of an operator-represented joint, as the
-  reference the ensemble forms are tested against;
 - **the array-level conditioning primitives** underneath both, exposed at the
   granularity that domain localization consumes.
 
-It is deliberately not a probabilistic-programming layer: there are no
-densities over anything non-Gaussian, no transformations of distributions,
-and no inference machinery. {ref}`gauss-excluded` lists what is left out and
-why.
+There is deliberately no packaged "exact" joint alongside the ensemble one:
+the dense reference that everything is tested against is hand-written in the
+test suite ({ref}`gauss-conformance`), and an operator-represented joint
+class waits for a consumer ({ref}`gauss-excluded`). Nor is the layer a
+probabilistic-programming toolkit: there are no densities over anything
+non-Gaussian, no transformations of distributions, and no inference
+machinery.
 
 Everything numerical routes through one algorithm, the **whitened-SVD
 conditioning kernel** ({ref}`gauss-kernel`) — *kernel* in the computational
 sense, the shared numerical core of every conditioning routine; nothing in
-this package uses the word to mean a covariance kernel. The competing route — the
-Woodbury identity applied to the normal equations — squares a condition
-number that is already the failure mode of late-stage EKI, and is excluded;
-{doc}`design` gives the full comparison.
+this package uses the word to mean a covariance kernel. The algebraically
+equivalent alternatives — the Woodbury identity on the normal equations, and
+a dense factorization of the predictive covariance — are respectively
+rejected and deferred, with reasons, in {ref}`gauss-excluded`.
 
 (gauss-notation)=
 ## Notation and conventions
@@ -95,7 +97,7 @@ Conventions, each normative:
 - **Noise covariances are `PSDLinOp`s.** Every `noise_cov` argument must be
   a {class}`~pyeki.linalg.PSDLinOp` of side $N$; a non-operator or an
   operator of the wrong shape is a `TypeError` / `ValueError` at call time.
-  The ensemble updates use it only through `whiten` — by design, the one
+  The conditioning methods use it only through `whiten` — by design, the one
   operation the noise covariance must support ({doc}`design`) — so a noise
   operator with no factorization at all still drives every update, and
   tempering's per-step covariance `noise_cov / dbeta` (a
@@ -104,27 +106,26 @@ Conventions, each normative:
 (gauss-objects)=
 ## The objects
 
-The public surface is three classes and two functions. Each class is one
-*representation* of a Gaussian object, and the representation is explicit in
-the type — the layer never converts between representations behind the
-caller's back.
+The public surface is two classes and two functions.
 
 | object          | represents                            | representation                                | role in EKI |
 | --------------- | ------------------------------------- | --------------------------------------------- | ----------- |
-| `Gaussian`      | one Gaussian distribution             | mean vector + `PSDLinOp` covariance           | the prior; the posteriors `condition` returns |
-| `EnsembleJoint` | the joint Gaussian with an ensemble's empirical moments | $J$ paired samples                | every update — the hot path |
-| `JointGaussian` | a joint Gaussian over $(u, v)$        | mean vectors + covariance blocks as operators | the exact reference the ensemble forms are tested against |
+| `Gaussian`      | one Gaussian distribution             | mean vector + `PSDLinOp` covariance           | the prior; the posterior `condition` returns |
+| `EnsembleJoint` | the joint Gaussian with an ensemble's empirical moments | $J$ paired samples                | every conditioning operation |
 | `gain_weights`  | the Kalman gain, in whitened variables| pure array function                           | the shared conditioning core; localization's entry point |
 | `sqrt_transform`| the square-root update transform      | pure array function                           | the shared conditioning core; localization's entry point |
 
 Three rules govern the set:
 
-1. **Representations are explicit and never coerced.** An `EnsembleJoint`
-   stores samples and computes through anomalies; a `JointGaussian` stores
-   means and covariance blocks as operators. No method converts one
-   representation into the other implicitly — the conformance suite builds
-   both from the same data *in the tests*, where the equivalence is the
-   thing being checked.
+1. **One joint abstraction.** `EnsembleJoint` stores samples and *acts as*
+   the Gaussian obtained by matching moments to them; every conditioning
+   path — the posterior as a distribution, the deterministic transform, the
+   stochastic pathwise update — is a method on it ({ref}`gauss-ensemble`).
+   There is no second, operator-represented joint class: the one
+   load-bearing role such a class had — being the reference implementation —
+   belongs to the test suite by design, precisely so that no package code
+   has to be trusted ({ref}`gauss-conformance`), and packaging it would add
+   surface without a consumer ({ref}`gauss-excluded`).
 2. **The set is closed.** Unlike the operator layer, `pyeki.gauss` has no
    extension story: users do not subclass these classes. User extensibility
    lives one layer down, in the operators supplied as covariances — a custom
@@ -153,8 +154,8 @@ S \;=\; \frac{1}{\sqrt{J-1}}\, A_v W^\top \;\in\; \mathbb{R}^{J \times N},
 $$
 
 whose $j$-th row is $W a_j / \sqrt{J-1}$ — in code, exactly
-`noise_cov.whiten(A_v) / sqrt(J - 1)`, one call under the operator layer's batch
-contract. Let
+`noise_cov.whiten(A_v) / sqrt(J - 1)`, one call under the operator layer's
+batch contract. Let
 
 $$
 S = U \Sigma V^\top \quad \text{(thin SVD)}, \qquad
@@ -210,7 +211,8 @@ which exhibits two contract-level properties:
 
 The SVD form is the normative implementation: it never forms
 $S^\top S$ or $S S^\top$, whose condition numbers are the *squares* of
-$S$'s. See {doc}`design` for the numerical comparison with the
+$S$'s. The algebraically equivalent routes that do form them are excluded
+({ref}`gauss-excluded`); {doc}`design` gives the full comparison with the
 normal-equations route.
 
 ### The square-root transform
@@ -230,7 +232,7 @@ the orthogonal complement* and is simply wrong whenever $r < J$ — the
 $I_J + U(\cdot - I)U^\top$ form is exact for every rank.
 
 Transformed anomalies $T A_u$ have empirical covariance exactly equal to the
-posterior covariance of the empirical joint:
+posterior covariance of the fitted joint Gaussian:
 
 $$
 \frac{(T A_u)^\top (T A_u)}{J-1}
@@ -293,8 +295,8 @@ Rules:
 ## `Gaussian`
 
 A single Gaussian distribution $\mathcal{N}(m, C)$: the prior a caller
-supplies, and the posterior that conditioning returns — from either joint
-class ({ref}`gauss-ensemble`, {ref}`gauss-joint`).
+supplies, and the posterior that `EnsembleJoint.condition` returns
+({ref}`gauss-ensemble`).
 
 **Fields.** `mean`, a `(n,)` array, and `cov`, a
 {class}`~pyeki.linalg.PSDLinOp` of side `n`. Construction validates the rank
@@ -384,17 +386,19 @@ once, uses it, and discards it — never caching it on the instance, which
 under `jit` would be the discarded-cache bug the operator contract
 documents. One method call, one SVD.
 
-All three conditioning methods share two trailing arguments: `y`, the
-observation, a `(N,)` array (tier-3 core-shape check), and `noise_cov`, a
-`PSDLinOp` of side $N$ supporting `whiten` (`UnsupportedOpError` from the
-inner call otherwise). The two update methods return a `(J, P)` array of
-updated members — they update $u$ only, since EKI re-evaluates the forward
-model to get the next step's $v$ — while `condition` returns the same
-posterior as a distribution. All are deterministic functions of their
-arguments (`pathwise_update` includes the key among them), safe under
-`jit`, and all degrade gracefully when the prediction anomalies are zero:
-the updates return `u_samples` unchanged and `condition` returns the prior
-marginal's moments — a collapsed ensemble is a no-op, not `nan`.
+All three conditioning methods condition on the same observation model —
+$y = v + \eta$ with $\eta \sim \mathcal{N}(0, R)$ — and share two trailing
+arguments: `y`, the observation, a `(N,)` array (tier-3 core-shape check),
+and `noise_cov`, a `PSDLinOp` of side $N$ supporting `whiten`
+(`UnsupportedOpError` from the inner call otherwise). The two update
+methods return a `(J, P)` array of updated members — they update $u$ only,
+since EKI re-evaluates the forward model to get the next step's $v$ — while
+`condition` returns the same posterior as a distribution. All are
+deterministic functions of their arguments (`pathwise_update` includes the
+key among them), safe under `jit`, and all degrade gracefully when the
+prediction anomalies are zero: the updates return `u_samples` unchanged and
+`condition` returns the prior marginal's moments — a collapsed ensemble is
+a no-op, not `nan`.
 
 ### `pathwise_update(key, y, noise_cov)`
 
@@ -433,7 +437,7 @@ $\varepsilon$ and choosing one representation for it.
 ### `transform_update(y, noise_cov)`
 
 The deterministic (square-root) update: the moment-form posterior of the
-empirical joint, returned in ensemble representation. The result is
+fitted joint Gaussian, returned in ensemble representation. The result is
 
 $$
 u_j' \;=\; \underbrace{\bar u + \frac{1}{\sqrt{J-1}}\, A_u^\top\,
@@ -446,9 +450,10 @@ representation of the moment posterior: its sample mean equals the
 posterior mean and its sample covariance (divisor $J-1$) equals the
 posterior covariance, both in exact arithmetic — the identity of
 {ref}`gauss-kernel`, and the bridge the conformance suite uses between the
-ensemble and block representations. Because $T\mathbf{1} = \mathbf{1}$, the
-transformed anomalies remain centred, so the two summands above really are
-the posterior mean and posterior anomalies.
+update and the hand-written dense reference. Because
+$T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centred, so
+the two summands above really are the posterior mean and posterior
+anomalies.
 
 `transform_update` and `pathwise_update` produce ensembles with the same
 first and second moments in expectation; they differ in that the transform
@@ -457,10 +462,9 @@ Which to use is the EKI layer's decision, not this layer's.
 
 ### `condition(y, noise_cov)`
 
-Moment-form conditioning in the ensemble representation: the same posterior
-that `transform_update` represents as members, returned as a
-{class}`Gaussian` — for sampling the posterior at any size, and for
-diagnostics. The result has
+Moment-form conditioning: the same posterior that `transform_update`
+represents as members, returned as a {class}`Gaussian` — for sampling the
+posterior at any size, and for diagnostics. The result has
 
 $$
 m_{\text{post}} \;=\; \bar u + \frac{1}{\sqrt{J-1}}\, A_u^\top\,
@@ -505,69 +509,6 @@ computed at construction: the stored field *is* the factorization. Like
 every operator, it must pass `check_operator` before merging.
 :::
 
-(gauss-joint)=
-## `JointGaussian`
-
-The operator-represented joint: means and covariance blocks held explicitly.
-Its role is to be the **obviously correct reference** — exact moment
-conditioning computed by dense linear algebra on materialized blocks,
-against which the whitened-SVD path is tested — and the exact conditioner
-for problems small enough to afford it. It is deliberately not a hot-path
-object, and its one conditioning method is deliberately dense: the
-reference must be a *different, simpler code path* than the whitened-SVD
-path it checks, or the comparison is vacuous — the same principle as the operator
-contract's `to_dense` independence rule.
-
-**Fields.** `u_mean` `(P,)`, `v_mean` `(N,)`, `u_cov` a `PSDLinOp` of side
-$P$, `cross_cov` a {class}`~pyeki.linalg.LinOp` of shape `(P, N)` — the
-block $C_{uv}$, so *rows index $u$* — and `v_cov` a `PSDLinOp` of side $N$.
-Construction validates ranks, operator types (`TypeError` for a non-PSD
-marginal block or a non-operator, mirroring the composite rules of
-{ref}`contract-composites`), and shape agreement across all five fields
-(tier 2).
-
-**Joint validity is a value precondition.** The types guarantee each
-marginal block is PSD, but positive semi-definiteness of the *joint* —
-$C_{vv} \succeq C_{vu} C_{uu}^{-1} C_{uv}$ — is a property of the values,
-unverifiable from structure. It is the caller's responsibility, tier 4: in
-debug mode ({ref}`contract-validation`), `condition` assembles the dense
-joint covariance it has already materialized and checks its smallest
-eigenvalue; outside debug mode a violation yields a posterior that is
-simply wrong, silently, like every tier-4 violation.
-
-### `condition(y, noise_cov, *, max_n=4096)`
-
-Exact moment conditioning: returns the posterior over $u$ given the
-observation $y = v + \eta$, $\eta \sim \mathcal{N}(0, R)$, as a
-{class}`Gaussian`. With materialized blocks and $M = C_{vv} + R$ (dense):
-
-$$
-m_{\text{post}} = m_u + C_{uv} M^{-1} (y - m_v), \qquad
-C_{\text{post}} = C_{uu} - C_{uv} M^{-1} C_{vu},
-$$
-
-computed by dense Cholesky factorization of $M$, the posterior covariance
-symmetrized as $\tfrac{1}{2}(C + C^\top)$ against floating-point asymmetry
-and returned as a {class}`~pyeki.linalg.DensePSD` (via `from_matrix`, so
-debug mode's positive-definiteness check applies to it). Requirements:
-
-- **Size guard before allocation**: `ValueError` when $\max(P, N)$ exceeds
-  `max_n`, raised before any dense block is materialized. Raising the limit
-  is a deliberate act at the call site, exactly as with
-  {func}`~pyeki.linalg.densify`.
-- `noise_cov` is used through `to_dense()` — always available — so *any*
-  `PSDLinOp` works here, including ones with no `whiten`. The reference
-  path and the whitened-SVD path deliberately have complementary
-  requirements.
-- Cost is $O\bigl((P+N)^3\bigr)$ and the method must not pretend otherwise:
-  no structured shortcuts, no routing through `gain_weights`. Its value is
-  its simplicity.
-- Precondition: $M$ nonsingular (guaranteed when $R \succ 0$). A posterior
-  covariance that is singular — $u$ fully determined by the observation —
-  is legitimate as a distribution but fails inside
-  `DensePSD.from_matrix` in the usual tier-4 way: `nan` silently, an error
-  in debug mode.
-
 (gauss-prng)=
 ## Randomness
 
@@ -595,9 +536,9 @@ request. What each tier means here:
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
-| 2. construction | ranks, static sizes, operator types, cross-field shape agreement | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `cross_cov` shape disagreeing with the means |
+| 2. construction | ranks, static sizes, operator types, cross-field shape agreement | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
 | 3. call | operand core shapes and operator arguments | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of samples and means; joint PSD-ness in `JointGaussian.condition`; the operator layer's own checks via `from_matrix` | violations yield `nan` or a wrong posterior silently outside debug mode |
+| 4. value (debug) | finiteness of samples, means, and observations | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
@@ -619,15 +560,14 @@ The explicit escape hatch is the same one as everywhere:
 | `noise_cov` not a `PSDLinOp` / wrong side | `TypeError` / `ValueError` |
 | `n_samples` not a positive Python `int` | `TypeError` / `ValueError` |
 | covariance lacking `factor` / `whiten` / `logdet` where required | `UnsupportedOpError`, from the operator layer |
-| `condition` size guard | `ValueError`, before allocation |
 | violated value precondition | `ValueError` in debug mode; `nan` or a silently wrong result otherwise |
 
 (gauss-jax)=
 ## JAX integration
 
-The three classes are frozen-dataclass pytrees declared with the same
-machinery as operators, and every rule of the operator contract's JAX
-section ({ref}`contract-jax`) binds them:
+Both classes are frozen-dataclass pytrees declared with the same machinery
+as operators, and every rule of the operator contract's JAX section
+({ref}`contract-jax`) binds them:
 
 - **Field classification is the same allowlist**: a field is pytree data iff
   its annotation is `Array` or a `LinOp` subtype; everything else is
@@ -636,7 +576,8 @@ section ({ref}`contract-jax`) binds them:
 - **Unflattening bypasses the constructor**, so tier-2 validation is strict
   at genuine construction and absent at trace boundaries; `vmap`-ed
   families reconstruct exactly as operator families do
-  ({ref}`contract-batching-operators`), and the same conformance round-trip
+  ({ref}`contract-batching-operators`), are legible but inert in the same
+  way ({ref}`contract-families`), and the same conformance round-trip
   applies.
 - **Identity semantics**: `eq=False`, hash by identity, never
   `static_argnums` — a joint is always a traced argument.
@@ -689,28 +630,31 @@ apply to its own $u$-anomalies. The primitives' array-purity, their
 one-SVD-per-call rule, and the block anatomy that
 {ref}`contract-composites` makes contractual are what this plan relies on.
 
-**Tests and diagnostics** consume `JointGaussian`: on a linear-Gaussian
-problem the empirical moments of `transform_update`'s output must
-reproduce `JointGaussian.condition`'s posterior exactly, and a tempered run's
-posterior must telescope to the one-shot posterior. The telescoping test
-itself belongs to the EKI layer; the per-step exactness it composes from
-lives here.
+**The test suite** holds the reference implementation. On small problems
+the dense Bayes formulas are written out in the tests themselves — plain
+dense linear algebra over the empirical moments, independent of this
+layer's code — and every conditioning method is checked against them
+({ref}`gauss-conformance`). Exact-moment fixtures extend the comparison to
+analytic posteriors: for any target joint, an ensemble of
+$J = P + N + 1$ members can be constructed (simplex-sigma-point style,
+from a factor of the target's joint covariance) whose empirical moments
+equal the target's exactly, so closed-form linear-Gaussian posteriors are
+reachable through `EnsembleJoint` alone. A tempered run's posterior
+telescoping to the one-shot posterior is the EKI layer's test; the
+per-step exactness it composes from lives here.
 
 (gauss-repr)=
 ## `repr`
 
 Type name and static sizes, never array contents, matching the operator
 rule ({ref}`contract-repr`): `Gaussian(n=12)`,
-`EnsembleJoint(n_members=100, u_dim=12, v_dim=40)`,
-`JointGaussian(u_dim=12, v_dim=40)`. `JointGaussian` may append its blocks'
-type names but never recurses into their arrays.
+`EnsembleJoint(n_members=100, u_dim=12, v_dim=40)`.
 
 (gauss-surface)=
 ## Public surface
 
-`pyeki.gauss` exports exactly: the classes `Gaussian`, `EnsembleJoint`,
-`JointGaussian`, and the conditioning primitives `gain_weights` and
-`sqrt_transform`.
+`pyeki.gauss` exports exactly: the classes `Gaussian` and `EnsembleJoint`,
+and the conditioning primitives `gain_weights` and `sqrt_transform`.
 Anything else is private, and no consumer may depend on it. There is no
 `pyeki.gauss.testing`: the conformance obligations below bind the package's
 own test suite, since the class set is closed.
@@ -719,10 +663,14 @@ own test suite, since the class set is closed.
 ## Conformance
 
 The layer has no user-extension point, so conformance is not a public
-harness but a set of obligations on `tests/`. Exactness tests check against
-closed forms and independent code paths, not tolerances chosen to pass
-({doc}`linop-contract` sets the convention). The suite must verify at
-least:
+harness but a set of obligations on `tests/`. Two rules govern the
+reference: exactness tests check against closed forms, not tolerances
+chosen to pass ({doc}`linop-contract` sets the convention), and **the dense
+reference is hand-written in the tests** — plain dense linear algebra over
+means, anomalies, and materialized operators, never routed through
+`gain_weights`, `sqrt_transform`, or any other code of this layer — so
+every comparison is between two genuinely independent paths. The suite
+must verify at least:
 
 1. **Gain against dense**: `gain_weights` composed with `whiten` reproduces
    the dense $K r$ elementwise on small random problems, in all three shape
@@ -733,8 +681,8 @@ least:
    `eigh`-based $(I + ss^\top)^{-1/2}$ — including the rank-deficient case
    $r < J$ that the naive thin-SVD formula gets wrong — and satisfies
    $T = T^\top$ and $T\mathbf{1} = \mathbf{1}$.
-4. **Moment exactness of the ensemble posterior**: `transform_update`'s
-   output has sample mean and covariance equal to the dense posterior
+4. **Moment exactness of the posterior**: `transform_update`'s output has
+   sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;
    `condition`'s mean and the dense form of its low-rank covariance equal
    the same moments; and the two methods satisfy the elementwise identity
@@ -744,33 +692,29 @@ least:
    from the same key (the pinned draw), `pathwise_update` equals
    $u_j + K(y - v_j - W^{-1}\varepsilon_j)$ computed densely, with $W$
    recovered by whitening the columns of $I_N$.
-6. **Cross-representation agreement**: a `JointGaussian` built from an
-   ensemble's densified empirical moments conditions to the same posterior
-   that `EnsembleJoint.condition` returns and `transform_update`
-   represents.
-7. **Reference independence**: `JointGaussian.condition` is tested against
-   hand-written dense Bayes formulas, not against the whitened-SVD path —
-   and must not route through `gain_weights` or `sqrt_transform`, so that
-   check 6 compares two genuinely independent paths.
-8. **Marginal formulas**: `sample` matches its pinned elementwise
+6. **Exact-moment fixtures**: on an ensemble constructed so that its
+   empirical moments equal an analytic linear-Gaussian joint
+   ({ref}`gauss-consumers`), `condition` and `transform_update` reproduce
+   that joint's closed-form posterior moments.
+7. **Marginal formulas**: `sample` matches its pinned elementwise
    definition; `log_density` matches the dense closed form at batch ranks
    0, 1, and 2 and differentiates.
-9. **Degeneracy**: zero prediction anomalies make both updates the
-   identity on `u_samples`; $J = 2$ and $N = 1$ work; a collapsed ensemble
-   produces no `nan`.
-10. **Capability propagation**: a noise covariance without `whiten`, and a
-    covariance without `factor` or `logdet`, raise `UnsupportedOpError`
-    from the update, `sample`, and `log_density` respectively — and
-    `log_density` on the singular posterior `EnsembleJoint.condition`
-    returns raises the same way.
-11. **Validation**: every tier-2 and tier-3 rule of
-    {ref}`gauss-validation` raises as specified, including the size guard
-    firing before allocation.
-12. **JAX round trips**: flatten/unflatten preserves type and behaviour for
-    all three classes; updates run under `jit`; constructing an
+8. **Degeneracy**: zero prediction anomalies make both updates the
+   identity on `u_samples` and `condition` return the prior marginal's
+   moments; $J = 2$ and $N = 1$ work; a collapsed ensemble produces no
+   `nan`.
+9. **Capability propagation**: a noise covariance without `whiten`, and a
+   covariance without `factor` or `logdet`, raise `UnsupportedOpError`
+   from the conditioning methods, `sample`, and `log_density`
+   respectively — and `log_density` on the singular posterior `condition`
+   returns raises the same way.
+10. **Validation**: every tier-2 and tier-3 rule of
+    {ref}`gauss-validation` raises as specified.
+11. **JAX round trips**: flatten/unflatten preserves type and behaviour for
+    both classes; the conditioning methods run under `jit`; constructing an
     `EnsembleJoint` inside `vmap` round-trips and a `vmap`-ed family of
     joints agrees with a Python loop; sentinel-leaf unflattening succeeds.
-13. **Reproducibility and repr**: same key, same output, elementwise;
+12. **Reproducibility and repr**: same key, same output, elementwise;
     different keys differ; reprs match {ref}`gauss-repr` with no array
     data.
 
@@ -784,49 +728,50 @@ transform — under the same do-not-delete rule as the operator layer's.
 
 Recorded so their absence reads as a decision, not an oversight.
 
-**A structured posterior from `JointGaussian.condition`.** The ensemble
-path returns structured posteriors (`EnsembleJoint.condition`); the
-operator path deliberately does not. Its posterior covariance
-$C_{uu} - C_{uv} M^{-1} C_{vu}$ is a low-rank *downdate*, and an operator
-for one — `PSDDowndate(base, F)` representing $\mathrm{base} - FF^\top$ —
-has a lopsided capability set: `matvec` and `diag` are immediate, `solve`
-and `logdet` follow from the Woodbury identity given `base.solve` and
-`base.logdet` plus one $k \times k$ factorization at construction, but
-`factor` and `whiten` require writing $F = LG$ against the base's own
-factor $L$, which only some base types can solve for — colliding with the
-rule that support is static. More decisively, `condition`'s whole role is
-to be the dense oracle ({ref}`gauss-joint`), and check 7 of
-{ref}`gauss-conformance` depends on its independence. If a consumer ever
-needs large exact operator-path posteriors, the shape of the addition is
-`PSDDowndate` in `pyeki.linalg` first, then a *new* structured
-conditioning method here — with `condition` staying dense.
+**An operator-represented joint class.** An earlier draft of this contract
+had one — mean vectors plus covariance blocks $(C_{uu}, C_{uv}, C_{vv})$ as
+operators, with a dense `condition` as the packaged oracle. It was dropped:
+the conformance rules require the oracle to be hand-written in the tests
+precisely so that no package code is trusted, and with the ensemble path
+supplying the moment posterior ({ref}`gauss-ensemble`) the class had no
+remaining consumer. If exact conditioning of operator joints is ever
+needed — GP-style prediction with full-rank structured priors — the right
+re-entry is a **factor-pair joint**: coherent operators $(F_u, F_v)$
+sharing one latent vector, with $C_{uu} = F_uF_u^\top$,
+$C_{uv} = F_uF_v^\top$, $C_{vv} = F_vF_v^\top$. That representation runs
+through the same whitened-SVD kernel (`EnsembleJoint` is its dense special
+case, $F = A^\top/\sqrt{J-1}$), gives joint sampling and Matheron-style
+pathwise conditioning for free, and avoids the two dead ends of the block
+form: a linear-map constructor whose $C_{vv}$ cannot be *typed* PSD
+(composition never proves PSD-ness), and a downdate operator
+(`PSDDowndate(base, F)` for $\mathrm{base} - FF^\top$) whose `factor` and
+`whiten` require solving $F = LG$ against the base's own factor, which
+only some base types can do.
 
-**Joint sampling and pathwise conditioning for `JointGaussian`.** Matheron-style
-posterior sampling — draw from the joint, condition each draw — requires a
-*coherent factor pair* $(F_u, F_v)$ sharing one latent vector, which the
-block fields $(C_{uu}, C_{uv}, C_{vv})$ cannot supply: consistency of the
-cross block with the factors is a value property no constructor can check.
-EKI does not need it (the ensemble *is* the joint sample), so it waits for
-a real consumer, likely arriving together with a factor-pair construction
-such as a linear-map classmethod.
+**The Woodbury route.** Applying the Woodbury identity to
+$(\widehat{C}_{vv} + R)^{-1}$ is the same algebra as the whitened SVD with
+worse arithmetic: it forms
+$(J-1)I + A_v^\top R^{-1} A_v = (J-1)(I + S S^\top)$, whose condition
+number is $\kappa(S)^2$ — and $\kappa(S)$ degrading as the ensemble
+collapses is the failure mode this layer is designed around. The SVD route
+gets the bounded multiplier $\sigma/(1+\sigma^2)$ for free; a factorization
+of the formed Gram matrix does not. Its one advantage — needing `solve` on
+the noise instead of `whiten` — has no consumer, since `whiten` is the
+operation the noise interface is designed around. Rejected, not deferred;
+{doc}`design` records the full comparison.
 
-**A linear-map constructor** (`from_linear_map(prior, H)`). Convenient, but
-its natural output — `v_cov = product(H, C, H.T)` — cannot be *typed* PSD
-under the operator layer's rule that PSD-ness is never inferred through
-composition. Callers assemble the blocks explicitly (for the reference
-role, three lines of dense algebra); revisit alongside the previous item.
+**The dense $N \le J$ route.** When observations are few, materializing
+$\widehat{C}_{vv} + R$ and factorizing it is affordable and can beat the
+SVD. It may arrive later as an *internal* optimization behind the same
+method signatures, with results equal to floating point — and it must
+never become the in-package reference: the oracle stays hand-written in
+the tests.
 
 **A reified gain object.** Computing the SVD once and reusing it across
 conditioning methods on the same `(joint, noise_cov)` pair would need a
 returned decomposition object. Each EKI step calls exactly one method once,
 so today it would be surface without a consumer; the conditioning
 primitives already serve anyone assembling custom flows.
-
-**Regime selection.** The whitened-SVD kernel is correct in every shape
-regime, including $N \le J$ where a dense factorization of
-$\widehat{C}_{vv} + R$ would also be affordable. Selecting between them is
-an optimization to add behind the same method signatures if profiles ever
-demand it, not an API decision.
 
 **Batched observations.** `y` is one observation vector. A family of
 updates — multiple observations, multiple noise levels — is `jax.vmap`
@@ -843,8 +788,3 @@ pinned key-derived draw.
 **Non-Gaussian anything.** No mixtures, no transformations of variables,
 no likelihoods other than additive Gaussian noise. The layer is the
 Gaussian core of EKI, not an inference framework.
-
-**Mean-only conditioning.** `JointGaussian.condition` always computes the
-posterior covariance. A mean-only fast path saves one dense solve on an
-object whose whole role is small exact reference computations; not worth a
-second signature.
