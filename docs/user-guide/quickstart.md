@@ -49,6 +49,7 @@ trailing. This is the same rule NumPy's `matmul` follows, and it is what
 | method | core operand | signature |
 | --- | --- | --- |
 | `matvec` | vector `(n_in,)` | `(..., n_in) -> (..., n_out)` |
+| `rmatvec` | vector `(n_out,)` | `(..., n_out) -> (..., n_in)` |
 | `matmat` | matrix `(n_in, k)` | `(..., n_in, k) -> (..., n_out, k)` |
 | `solve` | vector `(n,)` | `(..., n) -> (..., n)` |
 | `solve_mat` | matrix `(n, k)` | `(..., n, k) -> (..., n, k)` |
@@ -70,19 +71,30 @@ Observation error covariances are usually block diagonal — independent errors
 in one data stream, correlated errors in another:
 
 ```python
-from pyeki.linalg import BlockDiag
+from pyeki.linalg import block_diag
 
-noise = BlockDiag((
+noise = block_diag(
     Diagonal(jnp.array([0.5, 0.5, 2.0])),
     DensePSD.from_matrix(jnp.eye(2) + 0.3),
-))
+)
 
 noise.shape        # (5, 5)
 noise.logdet()     # sum over blocks
 ```
 
 Every operation is applied block by block, so cost is the sum over blocks
-rather than cubic in the total size.
+rather than cubic in the total size. Operators also compose and scale
+directly — and the scalar may be a traced value, which is what tempering
+needs:
+
+```python
+tempered = noise / dbeta        # same structure, same capabilities
+C = A @ B                       # composition of two operators
+At = A.T                        # the transpose, as an operator
+```
+
+`@` composes operators only; applying an operator to an array is always
+`matvec` or `matmat`, and `op @ x` raises an error that says so.
 
 ## Square roots, sampling and whitening
 
@@ -111,12 +123,12 @@ singular and has no `solve`.
 ## Asking what an operator can do
 
 Not every operator supports every operation cheaply, and support can depend on
-an operator's contents. A `BlockDiag` can only `solve` if all of its blocks
-can:
+an operator's contents. A block-diagonal operator can only `solve`
+if all of its blocks can:
 
 ```python
 noise.supports("solve")      # True
-noise.capabilities()         # frozenset({'solve', 'factor', 'cholesky', ...})
+noise.capabilities()         # frozenset({'solve', 'whiten', 'factor', ...})
 ```
 
 Calling an unsupported operation raises `UnsupportedOpError` rather than quietly
@@ -132,4 +144,5 @@ densify(op).solve(b)         # explicit dense fallback, with a size guard
 
 - {doc}`operators` — the full catalogue and what each one costs.
 - {doc}`writing-an-operator` — adding a new structure.
+- {doc}`../linop-contract` — the precise behavioural contract.
 - {doc}`../design` — why the interface looks the way it does.

@@ -1,58 +1,101 @@
 """Structured linear operators.
 
 Operators represent matrices implicitly, by how they act on vectors, so that
-known structure can be exploited instead of storing or factorizing dense
-arrays. A block-diagonal covariance, for example, is solved block by block at a
-cost that is the sum over blocks rather than cubic in the total size.
+known structure is exploited instead of storing or factorizing dense arrays.
+A block-diagonal covariance, for example, is solved block by block at a cost
+that is the sum over blocks rather than cubic in the total size.
 
 This is a lean layer aimed at what Ensemble Kalman Inversion needs — applying
-operators, solving against them, and taking square roots to sample and whiten —
-rather than a general-purpose linear algebra library.
+operators and their transposes, solving against them, and taking square roots
+to sample and whiten — rather than a general-purpose linear algebra library.
+Its behaviour is specified by the "Linear operator contract" page of the
+documentation.
 
 - :mod:`~pyeki.linalg.base` defines the class hierarchy, the array-shape
   convention, and how to add a new operator.
 - :mod:`~pyeki.linalg.leaves` holds operators defined by their own arrays.
-- :mod:`~pyeki.linalg.composite` holds operators built from other operators.
-- :mod:`~pyeki.linalg.testing` holds conformance checks for new operator types.
+- :mod:`~pyeki.linalg.composite` holds operators built from other operators,
+  and the factory functions that construct them.
+- :mod:`~pyeki.linalg.testing` holds conformance checks for new operator
+  types.
 
 Import :mod:`pyeki` before creating any array, so that float64 is enabled
 first.
 """
 from .base import (
     LinOp,
-    PSDOperator,
+    PSDLinOp,
     SquareLinOp,
     UnsupportedOpError,
+    debug_checks,
     dense_matvec,
     densify,
-    operator,
+    linop,
+    set_debug_checks,
     static_field,
     tri_solve,
+    value_check,
 )
-from .composite import BlockDiag, BlockDiagGeneral, HStack, Product
-from .leaves import Dense, DensePSD, Diagonal, Identity, ScaledIdentity, Triangular
+from .composite import (
+    BlockDiag,
+    DiagCongruence,
+    HStack,
+    Product,
+    PSDBlockDiag,
+    PSDScaled,
+    Scaled,
+    SquareScaled,
+    Transposed,
+    block_diag,
+    diag_congruence,
+    hstack,
+    product,
+)
+from .leaves import (
+    Dense,
+    DensePSD,
+    DenseSquare,
+    Diagonal,
+    Identity,
+    ScaledIdentity,
+    Triangular,
+)
 
 __all__ = [
-    # base
+    # hierarchy and machinery
     "LinOp",
     "SquareLinOp",
-    "PSDOperator",
+    "PSDLinOp",
     "UnsupportedOpError",
     "densify",
-    "operator",
+    "linop",
     "static_field",
     "dense_matvec",
     "tri_solve",
+    "set_debug_checks",
+    "debug_checks",
+    "value_check",
     # leaves
     "Identity",
     "ScaledIdentity",
     "Diagonal",
     "Dense",
+    "DenseSquare",
     "Triangular",
     "DensePSD",
     # composites
+    "Transposed",
+    "Scaled",
+    "SquareScaled",
+    "PSDScaled",
     "Product",
     "HStack",
     "BlockDiag",
-    "BlockDiagGeneral",
+    "PSDBlockDiag",
+    "DiagCongruence",
+    # factories
+    "block_diag",
+    "product",
+    "hstack",
+    "diag_congruence",
 ]

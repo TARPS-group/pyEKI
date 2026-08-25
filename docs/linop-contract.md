@@ -605,8 +605,9 @@ positive, `from_matrix` arguments actually positive definite, factors
 finite. Outside debug mode these are the caller's responsibility, and
 violating them yields `nan` (or `±inf` — `logdet` of a singular operator)
 downstream rather than an exception — silently, which is why the debug
-mode exists. Debug mode is a process-global boolean, toggled by a public
-function and usable as a context manager (name provisional); it is
+mode exists. Debug mode is a process-global boolean, toggled by
+`set_debug_checks` and usable as the `debug_checks` context manager, with
+`value_check` the helper that consults it inside constructors; it is
 consulted when constructors and `from_matrix`-style classmethods execute —
 call-time value checks are out of scope. `densify`'s singular-PSD hazard
 is caught this way: `densify` routes through `from_matrix`, which in debug
@@ -738,7 +739,7 @@ Semantics fixed by this contract:
 - **Composite anatomy is contract, not implementation detail.** The
   children are a public data field — `blocks` on the block-diagonal
   classes, `ops` on `Product` and `HStack` — and the block classes expose
-  the per-block sizes (split points) as a static property, computed like
+  the per-block shapes as a static `block_shapes` property, computed like
   `shape`. The consumer is domain localization, which must align
   sub-vectors of the observation space with the noise operator's blocks.
 - `HStack(ops)` is a block **row** `[A_1 ... A_m]`: it splits the operand's
@@ -901,8 +902,9 @@ For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
 `DiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
 (with the Kron classes, once that milestone lands), `diag_congruence`; the
 helpers `dense_matvec` and `tri_solve`; `densify`, `UnsupportedOpError`,
-`linop`, `static_field`, and the debug switch. The conformance suite lives
-in `pyeki.linalg.testing`. Anything else is private, and no consumer may
+`linop`, `static_field`, and the debug switch (`set_debug_checks`, the
+`debug_checks` context manager, and the `value_check` helper it gates). The
+conformance suite lives in `pyeki.linalg.testing`. Anything else is private, and no consumer may
 depend on it.
 
 (contract-conformance)=

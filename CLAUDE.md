@@ -105,9 +105,11 @@ linear algebra. Size guards raise before allocating.
 **Return JAX scalars, not Python floats.** Converting fails on a tracer under
 `jit`, and on any complex intermediate.
 
-**Factorize in the constructor.** Never cache a factorization lazily — a cache
-written inside a traced function is discarded, so the operator silently
-re-factorizes on every call.
+**Factorize at construction time, in `from_matrix`-style classmethods.** The
+dataclass constructor only stores: JAX rebuilds operators through it on every
+`jit`/`vmap` boundary. Never cache a factorization lazily — a cache written
+inside a traced function is discarded, so the operator silently re-factorizes
+on every call.
 
 **Every new operator gets `check_operator`.** The conformance suite in
 `pyeki.linalg.testing` catches the batch-rank and square-root bugs that
