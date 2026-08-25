@@ -14,7 +14,7 @@ methods gate and validate; authors implement `_`-prefixed hooks), transposes
 (`rmatvec`, `T`), operator arithmetic (`@` composition, scalar `*`/`/`),
 six elementary operators, nine composites with factory functions, a debug
 mode for value
-preconditions, and a 13-check conformance harness. 52 tests pass.
+preconditions, and a 14-check conformance harness; the full test suite passes.
 Documentation builds: landing page, installation, quickstart, operator
 catalogue, a guide to writing an operator, the operator contract, design
 notes, and an API reference.

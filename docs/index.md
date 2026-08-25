@@ -33,8 +33,8 @@ internals.
 
 :::{grid-item-card} Structured operators
 `pyeki.linalg` represents covariance matrices by how they act on vectors, so
-that block, diagonal, Kronecker and low-rank structure is exploited rather than
-materialized.
+that structure — block, diagonal, triangular today; Kronecker and low-rank
+planned — is exploited rather than materialized.
 :::
 
 :::{grid-item-card} Gaussian conditioning

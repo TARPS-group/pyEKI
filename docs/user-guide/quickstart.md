@@ -27,7 +27,7 @@ from pyeki.linalg import PSDDiagonal, DensePSD, Identity
 d = PSDDiagonal(jnp.array([1.0, 4.0, 9.0]))
 d.shape          # (3, 3)
 d.matvec(jnp.ones(3))    # Array([1., 4., 9.])
-d.logdet()               # Array(4.394..., dtype=float64)
+d.logdet()               # Array(3.583..., dtype=float64)
 ```
 
 Every operator exposes the same core interface, so code written against it
@@ -64,6 +64,9 @@ d.matvec(ensemble).shape          # (100, 3)
 Use `matvec` for a batch of vectors and `matmat` for a single matrix operand.
 The `k` in `matmat` is part of the core shape, not a batch axis, and neither
 method infers which you meant from the number of dimensions.
+
+A batch of *operators* is a different thing from a batch of operands, and it
+is built with `jax.vmap` — see {ref}`operator-batches` in the catalogue.
 
 ## Composing operators
 

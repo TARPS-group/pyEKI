@@ -21,6 +21,7 @@ from pyeki.linalg import (
     Dense,
     DensePSD,
     DenseSquare,
+    HStack,
     Identity,
     Product,
     PSDBlockDiag,
@@ -30,6 +31,7 @@ from pyeki.linalg import (
     PSDScaled,
     Scaled,
     SquareLinOp,
+    SquareScaled,
     Transposed,
     Triangular,
     UnsupportedOpError,
@@ -252,6 +254,21 @@ def test_constructors_reject_batched_arrays():
         DensePSD.from_matrix(As)
 
 
+def test_constructors_reject_empty_operators():
+    """Shapes are strictly positive: an empty core axis is a construction
+    error everywhere, not just in from_matrix classmethods."""
+    with pytest.raises(ValueError, match="positive"):
+        PSDDiagonal(jnp.zeros((0,)))
+    with pytest.raises(ValueError, match="positive"):
+        Dense(jnp.zeros((0, 3)))
+    with pytest.raises(ValueError, match="positive"):
+        Dense(jnp.zeros((3, 0)))
+    with pytest.raises(ValueError, match="positive"):
+        Triangular(jnp.zeros((0, 0)))
+    with pytest.raises(ValueError, match="positive"):
+        Identity(0)
+
+
 def test_unflatten_bypasses_the_constructor():
     """tree_unflatten rebuilds instances without running __init__, so
     batched leaves (vmap exit) and placeholder leaves (JAX internals)
@@ -282,6 +299,8 @@ def test_inconsistently_stacked_leaves_are_diagnosed_at_batch_shape():
     )
     with pytest.raises(ValueError, match="batch"):
         bad.batch_shape  # noqa: B018 - the property itself raises
+    # ... but repr never raises: a raising repr would mask the failure.
+    assert "unprintable" in repr(bad)
 
 
 def test_vmap_over_scalars_builds_a_scaled_family():
@@ -489,7 +508,11 @@ def test_debug_checks_catch_value_violations_eagerly():
         with pytest.raises(ValueError, match="positive definite|finite"):
             DensePSD.from_matrix(jnp.asarray(-np.eye(3)))
         with pytest.raises(ValueError, match="singular"):
-            DenseSquare.from_matrix(jnp.zeros((3, 3)))
+            DenseSquare.from_matrix(jnp.eye(3) * 0.0 + jnp.diag(jnp.zeros(3)))
+        with pytest.raises(ValueError, match="symmetric"):
+            DensePSD.from_matrix(jnp.asarray([[4.0, 0.5], [1.5, 3.0]]))
+        with pytest.raises(ValueError, match="nonzero"):
+            0.0 * DenseSquare.from_matrix(jnp.eye(3) * 2.0)
         # ... and tracers are exempt, so jit-ed code is unaffected.
         jax.jit(lambda d: PSDDiagonal(d).logdet())(jnp.asarray([1.0, 2.0]))
 
@@ -548,3 +571,116 @@ def test_diag_congruence_is_taper_reciprocal_inflation():
 def test_diag_congruence_size_mismatch_raises():
     with pytest.raises(ValueError, match="scale"):
         diag_congruence(Identity(3), jnp.ones(4))
+
+
+# ---------------------------------------------------------------------------
+# error paths and harness self-tests
+# ---------------------------------------------------------------------------
+
+
+def test_structural_error_paths_raise_loudly():
+    """Every documented construction error actually fires."""
+    A22, A23 = jnp.ones((2, 2)), jnp.ones((2, 3))
+    with pytest.raises(ValueError, match="shape mismatch"):
+        Product((Dense(A23), Dense(A23)))
+    with pytest.raises(ValueError, match="row count"):
+        HStack((Dense(A22), Dense(jnp.ones((3, 2)))))
+    with pytest.raises(TypeError, match="tuple"):
+        Product([Dense(A22)])  # list, not tuple
+    with pytest.raises(ValueError, match="at least one"):
+        Product(())
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        PSDBlockDiag((Dense(A22),))
+    with pytest.raises(TypeError, match="LinOp"):
+        Transposed(3)
+    with pytest.raises(TypeError, match="LinOp"):
+        Scaled("x", jnp.asarray(1.0))
+    with pytest.raises(TypeError, match="SquareLinOp"):
+        SquareScaled(Dense(A23), jnp.asarray(1.0))
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        PSDScaled(DenseSquare.from_matrix(jnp.eye(2) * 2), jnp.asarray(1.0))
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        PSDDiagCongruence(Dense(A22), jnp.ones(2))
+    with pytest.raises(ValueError, match="scale length"):
+        PSDDiagCongruence(Identity(3), jnp.ones(4))
+    with pytest.raises(TypeError, match="operators"):
+        block_diag(Identity(2), "not an operator")
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        diag_congruence(Dense(A22), jnp.ones(2))
+    with pytest.raises(TypeError, match="int"):
+        Identity("3")
+    with pytest.raises(ValueError, match="positive"):
+        Identity(-1)
+    with pytest.raises(ValueError, match="square"):
+        Triangular(jnp.ones((2, 3)))
+    with pytest.raises(TypeError, match="bool"):
+        Triangular(jnp.eye(2), lower=1)
+    with pytest.raises(TypeError):
+        Identity(2) / Identity(2)
+
+
+def test_densify_rectangular_returns_dense():
+    rect = (2.0 * Dense(jnp.asarray(RNG.normal(size=(3, 5))))).T
+    dense = densify(rect)
+    assert type(dense) is Dense and dense.shape == (5, 3)
+    np.testing.assert_allclose(
+        np.asarray(dense.to_dense()), np.asarray(rect.to_dense()), rtol=1e-12
+    )
+
+
+def test_unresolvable_annotation_is_a_guided_type_error():
+    with pytest.raises(TypeError, match="resolve"):
+
+        @linop
+        class Bad(PSDLinOp):  # noqa: F811 - deliberately discarded
+            x: NoSuchType  # noqa: F821 - the point of the test
+
+
+def test_check_operator_rejects_broken_operators():
+    """The harness is itself load-bearing: it must fail on operators that
+    violate the contract, not only pass on ones that satisfy it."""
+    from pyeki.linalg.testing import check_operator
+
+    @linop
+    class RoutedToDense(PSDLinOp):
+        diagonal: Array
+
+        @property
+        def shape(self):
+            n = self.diagonal.shape[-1]
+            return (n, n)
+
+        @property
+        def batch_shape(self):
+            return tuple(self.diagonal.shape[:-1])
+
+        def _matvec(self, x):
+            return self.diagonal * x
+
+        def _to_dense(self):
+            return self.matmat(jnp.eye(self.shape[0]))  # forbidden routing
+
+    with pytest.raises(AssertionError, match="to_dense"):
+        check_operator(RoutedToDense(jnp.asarray([1.0, 2.0, 3.0])))
+
+    @linop
+    class SlightlyWrong(PSDLinOp):
+        diagonal: Array
+
+        @property
+        def shape(self):
+            n = self.diagonal.shape[-1]
+            return (n, n)
+
+        @property
+        def batch_shape(self):
+            return tuple(self.diagonal.shape[:-1])
+
+        def _matvec(self, x):
+            return self.diagonal * x + 1e-4  # off by a constant
+
+        def _to_dense(self):
+            return jnp.diag(self.diagonal)
+
+    with pytest.raises(AssertionError, match="matvec"):
+        check_operator(SlightlyWrong(jnp.asarray([1.0, 2.0, 3.0])))

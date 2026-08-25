@@ -64,10 +64,11 @@ shape expressions.
 
 **`batch_shape`** is its sibling: each array field contributes its leading
 axes beyond that field's core rank, combined by broadcasting. It is `()`
-for every operator your code constructs — the constructor guarantees it —
-and non-empty only on the *vmapped families* that `jax.vmap` rebuilds at
-its exit boundary, which refuse direct method calls and must be applied
-under `vmap`.
+whenever the fields hold exactly their core ranks — the built-in operators
+guarantee this by validating ranks in `__post_init__`, and your operator
+should too — and non-empty only on the *vmapped families* that `jax.vmap`
+rebuilds at its exit boundary, which refuse direct method calls and must
+be applied under `vmap`.
 
 **`_matvec`** receives its operand already validated, **batch axes
 included**: it must contract the trailing axis and carry any number of
@@ -152,10 +153,10 @@ of those — never NumPy arrays.
 
 **The dataclass constructor only stores.** Anything computed from the
 inputs — a Cholesky factor, an eigendecomposition — belongs in a
-`from_matrix`-style classmethod. JAX rebuilds operators through the
-constructor on every `jit`/`vmap` boundary, so a computing constructor
-silently recomputes there, and a factorization cached lazily inside a
-traced function is discarded when the trace ends.
+`from_matrix`-style classmethod. Pytree reconstruction rebuilds operators
+from their stored fields alone, bypassing the constructor, so the fields
+must already hold everything the operator needs — and a factorization
+cached lazily inside a traced function is discarded when the trace ends.
 
 **Constructor validation is shape-only, and runs only at genuine
 construction.** A `__post_init__` may check ranks — exactly the field's

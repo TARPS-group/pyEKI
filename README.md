@@ -55,11 +55,12 @@ import pyeki  # enables float64; import before creating arrays
 import jax.numpy as jnp
 from pyeki.linalg import DensePSD, PSDDiagonal, block_diag
 
-noise = BlockDiag((
+noise = block_diag(
     PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),   # independent errors
     DensePSD.from_matrix(jnp.eye(2) + 0.3),    # correlated block
-))
+)
 
+y = jnp.ones(5)
 noise.shape          # (5, 5)
 noise.logdet()       # summed over blocks, never forms a 5x5 matrix
 noise.whiten(y)      # applied block by block

@@ -51,8 +51,8 @@ Subclass the appropriate level, decorate with :func:`linop`, and implement
 the hooks: ``shape``, ``batch_shape``, ``_matvec``, ``_rmatvec``
 (``PSDLinOp`` provides it) and ``_to_dense`` are required, and ``_solve``,
 ``_logdet``, ``_diag``, ``_factor`` and ``_whiten`` are optional. The
-public methods are defined once, here: they check the family guard and the
-capability gate, validate the operand, and
+public methods are defined once, here: they refuse vmapped families (see
+:class:`LinOp`), check the capability gate, validate the operand, and
 dispatch to the hook, which receives the operand unchanged — batch axes
 included. Use :func:`dense_matvec` and :func:`tri_solve` for the array work
 so the shape convention is honoured, mark non-array fields with
@@ -259,9 +259,9 @@ def linop(cls: type) -> type:
       compare arrays elementwise and raise on the ambiguous truth value.
       They hash by identity, which makes them usable as dictionary keys but
       never as ``static_argnums`` — every call would retrace silently.
-    - No ``__repr__`` is generated (``repr=False``), so
-      :meth:`LinOp.__repr__` applies; a generated one would print whole
-      arrays into tracebacks and test identifiers.
+    - No ``__repr__`` is generated (``repr=False``), so ``LinOp.__repr__``
+      applies; a generated one would print whole arrays into tracebacks and
+      test identifiers.
     - Annotations are resolved with ``typing.get_type_hints``, so they must
       name types importable in the defining module at class definition time:
       no ``TYPE_CHECKING``-only names and no self- or forward-references.
@@ -370,7 +370,8 @@ def _check_mat(op: LinOp, method: str, X, size: int) -> Array:
 
 
 def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> None:
-    """Reject an array field whose rank is not exactly its core rank.
+    """Reject an array field whose rank is not exactly its core rank, or
+    whose core sizes are not positive.
 
     Operators are unbatched; a batched family is built with ``jax.vmap``
     over the operator pytree, never by passing arrays with extra leading
@@ -379,12 +380,32 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
     untouched.
     """
     ndim = getattr(value, "ndim", None)
-    if ndim is not None and ndim != core_ndim:
+    if ndim is None:
+        return
+    if ndim != core_ndim:
         raise ValueError(
             f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, "
             f"got rank {ndim}. Operators are unbatched; batch with jax.vmap "
             f"over the operator pytree, not with extra leading axes."
         )
+    if any(size < 1 for size in value.shape):
+        raise ValueError(
+            f"{cls_name}.{field_name}: core sizes must be positive, got shape "
+            f"{value.shape}. Empty operators are rejected at construction."
+        )
+
+
+def _construct_unchecked(cls: type, **fields):
+    """Build an operator instance without running ``__init__``.
+
+    The same path pytree unflattening uses. For internal reconstructions —
+    a structured transpose of a vmapped family — whose fields are known
+    valid, or deliberately batched.
+    """
+    obj = object.__new__(cls)
+    for name, value in fields.items():
+        object.__setattr__(obj, name, value)
+    return obj
 
 
 def _broadcast_batch(op_type: str, *shapes) -> tuple[int, ...]:
@@ -445,10 +466,11 @@ class LinOp(abc.ABC):
     A directly constructed operator always has ``batch_shape == ()``. A
     *vmapped family* — the same pytree rebuilt with stacked leaves, as
     ``jax.vmap`` produces at its exit boundary — reports a non-empty
-    ``batch_shape``, and every one of the twelve operations then raises
-    ``ValueError`` directing the caller to apply the family under
-    ``jax.vmap``. Introspection (``shape``, ``batch_shape``, ``supports``,
-    ``capabilities``, ``T``) remains available on families.
+    ``batch_shape``, and every operation the type defines, along with the
+    arithmetic ``@``, ``*`` and ``/``, then raises ``ValueError`` directing
+    the caller to apply the family under ``jax.vmap``. Introspection
+    (``shape``, ``batch_shape``, ``supports``, ``capabilities``, ``T``)
+    remains available on families.
     """
 
     #: NumPy consults this on binary operations: ``None`` makes NumPy defer
@@ -677,7 +699,9 @@ class LinOp(abc.ABC):
         -----
         This is an instance method because support can depend on an
         operator's contents: a block-diagonal operator can solve only if all
-        of its blocks can.
+        of its blocks can. On a vmapped family, ``supports`` reports the
+        class's capabilities even though calling any operation raises the
+        family guard.
         """
         if name not in _KNOWN_OPS:
             known = ", ".join(sorted(_KNOWN_OPS))
@@ -740,8 +764,12 @@ class LinOp(abc.ABC):
             If ``other`` is an array. Applying an operator to an array is
             always :meth:`matvec` or :meth:`matmat`; ``@`` would contract
             axis ``-2``, which is silently wrong for leading-batch vectors.
+        ValueError
+            If either operand is a vmapped family.
         """
+        self._check_not_family("__matmul__")
         if isinstance(other, LinOp):
+            other._check_not_family("__matmul__")
             from .composite import product
 
             return product(self, other)
@@ -779,7 +807,10 @@ class LinOp(abc.ABC):
         TypeError
             If ``c`` is an array with one or more axes, or another
             operator (composition is ``@``).
+        ValueError
+            If this operator is a vmapped family.
         """
+        self._check_not_family("__mul__")
         if isinstance(c, LinOp):
             raise TypeError(
                 "op1 * op2 is not defined; use op1 @ op2 for composition."
@@ -794,6 +825,7 @@ class LinOp(abc.ABC):
         Accepts, returns, and raises exactly as ``op * (1 / c)`` — see
         :meth:`__mul__`.
         """
+        self._check_not_family("__truediv__")
         if isinstance(c, LinOp):
             raise TypeError("op1 / op2 is not defined.")
         return _scale(self, 1.0 / _as_scalar(self, c))
@@ -804,9 +836,16 @@ class LinOp(abc.ABC):
         A vmapped family wraps that form and names its batch, as
         ``vmapped(Dense(4, 6), batch=(100,))``. Deliberately omits field
         values, which are usually arrays too large to be worth printing.
+        Never raises: an instance whose shapes cannot be read — a transient
+        placeholder reconstruction, or inconsistently stacked leaves —
+        falls back to a marker form, since a raising repr would mask the
+        failure being printed.
         """
-        base = f"{type(self).__name__}{self.shape}"
-        batch = self.batch_shape
+        try:
+            base = f"{type(self).__name__}{self.shape}"
+            batch = self.batch_shape
+        except Exception:
+            return f"<{type(self).__name__} (unprintable leaves)>"
         return f"vmapped({base}, batch={batch})" if batch != () else base
 
 

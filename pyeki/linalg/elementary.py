@@ -23,10 +23,11 @@ Notes
 -----
 Anything computed from a matrix — a Cholesky or LU factorization — is done
 in a ``from_matrix`` classmethod, once, at construction time. The dataclass
-constructor itself only stores: JAX rebuilds operators through it on every
-``jit``/``vmap`` boundary, so a computing constructor would silently
-recompute there, and a factorization cached lazily inside a traced function
-is written to a temporary copy and discarded.
+constructor itself only stores: pytree reconstruction rebuilds operators
+from their stored fields alone, bypassing the constructor, so the fields
+must already hold everything the operator needs — and a factorization
+cached lazily inside a traced function is written to a temporary copy and
+discarded.
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ from .base import (
     SquareLinOp,
     _broadcast_batch,
     _check_core_rank,
+    _construct_unchecked,
     dense_matvec,
     linop,
     static_field,
@@ -142,7 +144,7 @@ class PSDDiagonal(PSDLinOp):
     diagonal
         The diagonal entries, strictly positive. Their number sets the
         size. (Named ``diagonal`` rather than ``diag``, which would shadow
-        the inherited :meth:`~.base.SquareLinOp.diag` method.)
+        the inherited :meth:`~pyeki.linalg.SquareLinOp.diag` method.)
 
     Notes
     -----
@@ -241,7 +243,7 @@ class Dense(LinOp):
 class DenseSquare(SquareLinOp):
     """A dense square matrix with no symmetry assumed, stored with its LU.
 
-    What :func:`~.base.densify` returns for a square non-PSD operator.
+    What :func:`~pyeki.linalg.densify` returns for a square non-PSD operator.
     Construct with :meth:`from_matrix` rather than directly; the LU
     factorization runs once, there.
 
@@ -253,8 +255,14 @@ class DenseSquare(SquareLinOp):
         Its LU factorization, as returned by ``jax.scipy.linalg.lu_factor``.
     lu_of_transpose
         Static flag: whether ``lu``/``piv`` factorize ``A.T`` rather than
-        ``A``. Set by :attr:`T`, which reuses the factorization instead of
+        ``A``. Set by ``T``, which reuses the factorization instead of
         recomputing it.
+
+    Notes
+    -----
+    ``piv`` is an integer array and is pytree data (it must batch under
+    ``vmap``), so differentiating with respect to a pytree containing a
+    ``DenseSquare`` requires ``jax.grad(..., allow_int=True)``.
     """
 
     A: Array
@@ -326,9 +334,18 @@ class DenseSquare(SquareLinOp):
 
     @property
     def T(self) -> DenseSquare:  # noqa: N802 - mirrors the NumPy attribute
-        """The transpose, backed by the same LU factorization."""
-        return DenseSquare(
-            self.A.swapaxes(-1, -2), self.lu, self.piv, not self.lu_of_transpose
+        """The transpose, backed by the same LU factorization.
+
+        Built through the constructor-bypassing path so that it also works
+        as a view on a vmapped family, whose batched leaves the strict
+        constructor would reject.
+        """
+        return _construct_unchecked(
+            DenseSquare,
+            A=self.A.swapaxes(-1, -2),
+            lu=self.lu,
+            piv=self.piv,
+            lu_of_transpose=not self.lu_of_transpose,
         )
 
     def _to_dense(self) -> Array:
@@ -339,7 +356,7 @@ class DenseSquare(SquareLinOp):
 class Triangular(SquareLinOp):
     """A square triangular matrix.
 
-    The natural return type of :meth:`DensePSD.factor`. Not itself PSD, so
+    The natural return type of ``DensePSD.factor()``. Not itself PSD, so
     it provides ``solve``, ``logdet`` and ``diag`` but no factorization.
 
     Parameters
@@ -401,8 +418,15 @@ class Triangular(SquareLinOp):
 
     @property
     def T(self) -> Triangular:  # noqa: N802 - mirrors the NumPy attribute
-        """The transpose, which is triangular in the opposite direction."""
-        return Triangular(self.L.swapaxes(-1, -2), not self.lower)
+        """The transpose, which is triangular in the opposite direction.
+
+        Built through the constructor-bypassing path so that it also works
+        as a view on a vmapped family, whose batched leaves the strict
+        constructor would reject.
+        """
+        return _construct_unchecked(
+            Triangular, L=self.L.swapaxes(-1, -2), lower=not self.lower
+        )
 
     def _to_dense(self) -> Array:
         return self.L
@@ -436,10 +460,17 @@ class DensePSD(PSDLinOp):
     def from_matrix(cls, A) -> DensePSD:
         """Build from a dense positive-definite matrix, factorizing once, here.
 
-        The matrix must be positive definite; the Cholesky of anything else
-        is ``nan`` without an exception (or an error in debug mode).
+        The matrix must be symmetric positive definite. The Cholesky reads
+        only the lower triangle, so a non-symmetric matrix would silently
+        produce a different operator, and anything indefinite produces
+        ``nan`` without an exception; debug mode catches both.
         """
         A = _strict_square_matrix("DensePSD", A)
+        value_check(
+            A,
+            lambda M: bool(jnp.allclose(M, M.swapaxes(-1, -2))),
+            "DensePSD.from_matrix: matrix must be symmetric",
+        )
         return cls(jnp.linalg.cholesky(A))
 
     @property

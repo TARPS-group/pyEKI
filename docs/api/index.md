@@ -82,5 +82,5 @@ contract.
              check_factor, check_whiten, check_scalars,
              check_dense_independence, check_capabilities,
              check_operand_validation, check_pytree, check_repr,
-             check_arithmetic
+             check_arithmetic, check_family
 ```

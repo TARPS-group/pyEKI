@@ -1,8 +1,9 @@
 """Conformance tests: every operator type, through the full contract suite.
 
-One instance per operator class (plus variants whose capabilities differ)
-runs through :func:`pyeki.linalg.testing.check_operator`, which verifies the
-thirteen checks of the linear operator contract.
+One instance per operator class — plus variants whose capabilities,
+structure depth, block count, or sign differ — runs through
+:func:`pyeki.linalg.testing.check_operator`, the executable form of the
+linear operator contract.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from pyeki.linalg import (
     Identity,
     LinOp,
     PSDDiagonal,
+    Transposed,
     Triangular,
     block_diag,
     diag_congruence,
@@ -63,9 +65,37 @@ def _instances() -> list[LinOp]:
         diag_congruence(
             DensePSD.from_matrix(_psd(4)), jnp.asarray(RNG.uniform(0.5, 2, 4))
         ),
-        # arithmetic-built composites
+        # three or more blocks, so split-point accumulation is exercised
+        hstack(
+            Dense(jnp.asarray(RNG.normal(size=(4, 2)))),
+            Dense(jnp.asarray(RNG.normal(size=(4, 3)))),
+            Dense(jnp.asarray(RNG.normal(size=(4, 1)))),
+        ),
+        BlockDiag(
+            (
+                Dense(jnp.asarray(RNG.normal(size=(2, 3)))),
+                Dense(jnp.asarray(RNG.normal(size=(1, 2)))),
+                Dense(jnp.asarray(RNG.normal(size=(3, 1)))),
+            )
+        ),
+        block_diag(
+            PSDDiagonal(jnp.asarray(RNG.uniform(0.5, 3.0, 2))),
+            DensePSD.from_matrix(_psd(3)),
+            Identity(1),
+        ),
+        # a square product, and nesting
+        product(PSDDiagonal(d), DensePSD.from_matrix(_psd(6))),
+        block_diag(
+            diag_congruence(
+                DensePSD.from_matrix(_psd(3)), jnp.asarray(RNG.uniform(0.5, 2, 3))
+            ),
+            Identity(2),
+        ),
+        Transposed(DensePSD.from_matrix(_psd(4))),  # direct view construction
+        # arithmetic-built composites, both signs
         2.0 * DensePSD.from_matrix(_psd(4)),
         3.0 * DenseSquare.from_matrix(well_conditioned),
+        -2.0 * DenseSquare.from_matrix(well_conditioned),
         1.5 * Dense(jnp.asarray(RNG.normal(size=(3, 5)))),
         Dense(jnp.asarray(RNG.normal(size=(3, 5)))).T,
     ]

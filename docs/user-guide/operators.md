@@ -66,6 +66,47 @@ NumPy's `@` contracts axis `-2`, which is silently wrong for the
 leading-batch vector layout everything in pyEKI uses. Scalars for `*` and
 `/` may be traced values, which is what tempering needs.
 
+(operator-batches)=
+## Batches of operators
+
+A batch of operators — one covariance per ensemble member, say — is built
+with `jax.vmap` over the constructor, and used with `jax.vmap` over the
+operator argument:
+
+```python
+covs = jax.vmap(DensePSD.from_matrix)(As)          # As: (100, n, n)
+outs = jax.vmap(lambda C, x: C.solve(x))(covs, xs) # xs: (100, n)
+```
+
+What `vmap` hands back is a *vmapped family*: a single operator object
+whose stored arrays carry an extra leading axis. A family identifies
+itself — `covs.batch_shape` is `(100,)` and its repr reads
+`vmapped(DensePSD(3, 3), batch=(100,))` — and it is deliberately **inert**:
+calling any operation on it directly, or scaling or composing it, raises a
+`ValueError` telling you to apply it under `jax.vmap`, because outside of
+`vmap` there is no defined way to line its members up with your data.
+Passing arrays with extra leading axes to a constructor does *not* build a
+family; it is rejected outright.
+
+## Debugging value preconditions
+
+Some requirements are about values, not shapes: `PSDDiagonal` entries must
+be positive, `DensePSD.from_matrix` needs a symmetric positive-definite
+matrix. JAX cannot check values inside `jit`, so by default a violation
+produces `nan` or `inf` downstream rather than an error. When a `nan`
+appears and you want to find where, turn on debug checks:
+
+```python
+from pyeki.linalg import debug_checks
+
+with debug_checks():
+    cov = DensePSD.from_matrix(A)   # raises here if A is not symmetric PD
+```
+
+`set_debug_checks(True)` enables them process-wide. The checks run only on
+concrete arrays and are skipped on traced values, so enabling them never
+changes `jit`-ed behaviour.
+
 ## Conditional support
 
 A composite's capabilities depend on its contents. A block-diagonal operator

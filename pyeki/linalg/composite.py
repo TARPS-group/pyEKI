@@ -204,6 +204,11 @@ class SquareScaled(Scaled, SquareLinOp):
             raise TypeError(
                 f"SquareScaled wraps a SquareLinOp, got {type(self.op).__name__}"
             )
+        value_check(
+            self.c,
+            lambda c: bool(jnp.all(c != 0)),
+            "scaling a square operator requires a nonzero scalar",
+        )
 
     def _solve(self, b: Array) -> Array:
         return self.op._solve(b) / self.c
@@ -377,7 +382,7 @@ class HStack(LinOp):
 class BlockDiag(LinOp):
     """A block-diagonal matrix whose blocks may be rectangular.
 
-    What :meth:`PSDBlockDiag.factor` returns, since per-block factors need
+    What ``PSDBlockDiag.factor()`` returns, since per-block factors need
     not be square. Provides application and transposition only; use
     :class:`PSDBlockDiag` when every block is PSD.
 
@@ -625,9 +630,12 @@ def block_diag(*blocks: LinOp) -> LinOp:
 def product(*ops: LinOp) -> LinOp:
     """Compose operators right to left; what ``A @ B`` builds.
 
-    A single operator is returned unchanged. A structured square variant
-    will be added when a consumer needs ``solve`` or ``logdet`` through a
-    product.
+    A single operator is returned unchanged.
+
+    Notes
+    -----
+    A structured square variant will be added when a consumer needs
+    ``solve`` or ``logdet`` through a product.
     """
     _check_factory_args("product", ops)
     if len(ops) == 1:

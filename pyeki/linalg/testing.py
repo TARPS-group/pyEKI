@@ -10,7 +10,8 @@ function                           checks
 :func:`check_core`                 ``matvec``/``rmatvec`` at batch rank
                                    0, 1, 2; ``matmat``/``rmatmat`` batched
                                    and unbatched
-:func:`check_transpose`            ``T`` behaves as the dense transpose
+:func:`check_transpose`            ``T`` matches the dense transpose, its
+                                   capabilities included
 :func:`check_solve`                ``solve``/``solve_mat`` vs. the inverse
 :func:`check_factor`               ``factor()`` reproduces the operator
 :func:`check_whiten`               ``whiten`` is a fixed valid whitener
@@ -30,6 +31,8 @@ Checks skip operations the operator does not claim to support; capability
 honesty itself is checked, so the same suite applies to every type.
 """
 from __future__ import annotations
+
+import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -115,11 +118,21 @@ def check_core(op: LinOp, key) -> None:
 
 
 def check_transpose(op: LinOp, key) -> None:
-    """Check ``T``: the dense transpose, full core behaviour, and ``T.T``."""
+    """Check ``T``: the dense transpose, full core behaviour, and ``T.T``.
+
+    The transpose is checked as an operator in its own right — core
+    behaviour, solve, scalars, and capability honesty — so a structured
+    ``T`` override cannot ship a broken ``solve`` or ``logdet`` behind a
+    correct dense form.
+    """
     A = _ref(op)
     t = op.T
+    key_core, key_solve = jax.random.split(key)
     _close(t.to_dense(), A.T, f"{op!r}.T.to_dense")
-    check_core(t, key)
+    check_core(t, key_core)
+    check_solve(t, key_solve)
+    check_scalars(t)
+    check_capabilities(t)
     _close(t.T.to_dense(), A, f"{op!r}.T.T.to_dense")
 
 
@@ -213,15 +226,31 @@ def check_scalars(op: LinOp) -> None:
 def check_dense_independence(op: LinOp) -> None:
     """Check that ``to_dense`` does not route through ``matvec`` or ``matmat``.
 
-    Temporarily replaces the class-level ``matvec``, ``_matvec``, ``matmat``
-    and ``_matmat`` with raising stubs (instances are frozen, so the patch
-    must be on the class) and requires ``to_dense()`` to still succeed. A
-    ``to_dense`` written via application would make every dense comparison
-    in this suite compare ``matvec`` with itself.
+    Temporarily replaces the class-level application methods and hooks —
+    all eight names, ``matvec``/``rmatvec``/``matmat``/``rmatmat`` and
+    their hooks — with raising stubs, on the class of **every** operator
+    in the pytree (instances are frozen, so the patch must be on classes;
+    stubbing only the outermost class would let a composite route its
+    ``to_dense`` through a child's application). A ``to_dense`` written
+    via application would make every dense comparison in this suite
+    compare application with itself.
     """
-    cls = type(op)
-    names = ("matvec", "_matvec", "matmat", "_matmat")
-    saved = {name: cls.__dict__.get(name, _MISSING) for name in names}
+    names = (
+        "matvec", "_matvec", "matmat", "_matmat",
+        "rmatvec", "_rmatvec", "rmatmat", "_rmatmat",
+    )
+
+    def _operator_classes(obj: LinOp) -> set[type]:
+        classes = {type(obj)}
+        for f in dataclasses.fields(obj):
+            if f.metadata.get("static", False):
+                continue
+            value = getattr(obj, f.name)
+            items = value if isinstance(value, tuple) else (value,)
+            for item in items:
+                if isinstance(item, LinOp):
+                    classes |= _operator_classes(item)
+        return classes
 
     def _stub(name):
         def raise_(self, *args, **kwargs):
@@ -229,16 +258,22 @@ def check_dense_independence(op: LinOp) -> None:
 
         return raise_
 
+    classes = _operator_classes(op)
+    saved = {
+        (cls, name): cls.__dict__.get(name, _MISSING)
+        for cls in classes
+        for name in names
+    }
     try:
-        for name in names:
+        for cls, name in saved:
             setattr(cls, name, _stub(name))
         op.to_dense()
     finally:
-        for name in names:
-            if saved[name] is _MISSING:
+        for (cls, name), impl in saved.items():
+            if impl is _MISSING:
                 delattr(cls, name)
             else:
-                setattr(cls, name, saved[name])
+                setattr(cls, name, impl)
 
 
 _OPERATION_OPERANDS = {
@@ -281,6 +316,16 @@ def check_capabilities(op: LinOp) -> None:
     _expect_raises(ValueError, lambda: op.supports("choleksy"), "unknown name")
     caps = op.capabilities()
     assert all(op.supports(name) for name in caps)
+
+    # Operations below the operator's level must be absent from the type.
+    square_names = ("solve", "solve_mat", "logdet", "diag")
+    psd_names = ("factor", "whiten", "whiten_mat")
+    if not isinstance(op, SquareLinOp):
+        for name in square_names + psd_names:
+            assert not hasattr(type(op), name), f"{op!r} defines below-level {name}"
+    elif not isinstance(op, PSDLinOp):
+        for name in psd_names:
+            assert not hasattr(type(op), name), f"{op!r} defines below-level {name}"
 
 
 def check_operand_validation(op: LinOp) -> None:
@@ -398,7 +443,7 @@ def check_arithmetic(op: LinOp) -> None:
     for bad in (lambda: op @ jnp.ones(n_in), lambda: jnp.ones(n_out) @ op,
                 lambda: np.ones(n_out) @ op):
         e = _expect_raises(TypeError, bad, "array @ dispatch")
-        assert "matvec" in str(e) or "rmatvec" in str(e), str(e)
+        assert "matvec" in str(e), str(e)
     for bad in (lambda: jnp.ones(3) * op, lambda: np.ones(3) * op):
         e = _expect_raises(TypeError, bad, "non-scalar * op")
         assert "scalar" in str(e), str(e)
@@ -449,6 +494,20 @@ def check_family(op: LinOp) -> None:
     assert family.shape == op.shape
     assert family.supports("matvec")
     family.capabilities()
+    assert family.T.batch_shape == (3,), "T must stay a view on a family"
+
+    # Multi-axis batches must be reported in full, not just the last axis.
+    family2 = jax.tree_util.tree_unflatten(
+        treedef, [jnp.broadcast_to(leaf, (2, 3, *leaf.shape)) for leaf in leaves]
+    )
+    assert family2.batch_shape == (2, 3), family2.batch_shape
+
+    # Arithmetic is guarded: families are inert on both sides.
+    for bad in (lambda: 2.0 * family, lambda: family / 2.0,
+                lambda: family @ op, lambda: op @ family):
+        e = _expect_raises(ValueError, bad, "family arithmetic")
+        assert "vmap" in str(e), str(e)
+
     n_out, n_in = op.shape
     for name, make_args in _OPERATION_OPERANDS.items():
         if not hasattr(type(op), name):
