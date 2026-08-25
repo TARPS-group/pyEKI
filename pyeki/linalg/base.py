@@ -48,10 +48,11 @@ meant from the number of dimensions.
 Defining a new operator
 -----------------------
 Subclass the appropriate level, decorate with :func:`linop`, and implement
-the hooks: ``shape``, ``_matvec``, ``_rmatvec`` (``PSDLinOp`` provides it)
-and ``_to_dense`` are required, and ``_solve``, ``_logdet``, ``_diag``,
-``_factor`` and ``_whiten`` are optional. The public methods are defined
-once, here: they check the capability gate, validate the operand, and
+the hooks: ``shape``, ``batch_shape``, ``_matvec``, ``_rmatvec``
+(``PSDLinOp`` provides it) and ``_to_dense`` are required, and ``_solve``,
+``_logdet``, ``_diag``, ``_factor`` and ``_whiten`` are optional. The
+public methods are defined once, here: they check the family guard and the
+capability gate, validate the operand, and
 dispatch to the hook, which receives the operand unchanged — batch axes
 included. Use :func:`dense_matvec` and :func:`tri_solve` for the array work
 so the shape convention is honoured, mark non-array fields with
@@ -386,6 +387,22 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
         )
 
 
+def _broadcast_batch(op_type: str, *shapes) -> tuple[int, ...]:
+    """Combine ``batch_shape`` contributions by broadcasting.
+
+    Raises ``ValueError`` when the contributions do not broadcast — a
+    hand-assembled pytree with inconsistently stacked leaves, diagnosed
+    here rather than by downstream shape wreckage.
+    """
+    try:
+        return tuple(jnp.broadcast_shapes(*shapes))
+    except ValueError as e:
+        raise ValueError(
+            f"{op_type}: stored leaves are inconsistently batched; the "
+            f"batch-shape contributions {shapes} do not broadcast"
+        ) from e
+
+
 def _as_scalar(op: LinOp, c) -> Array:
     """Convert a scaling factor to a 0-d array, rejecting non-scalars."""
     arr = jnp.asarray(c)
@@ -420,10 +437,18 @@ class LinOp(abc.ABC):
     """A linear map, possibly rectangular.
 
     The base of the operator hierarchy. Concrete subclasses implement the
-    hooks ``shape``, ``_matvec``, ``_rmatvec`` and ``_to_dense``; the public
-    methods defined here validate operands and dispatch to the hooks. See
-    the module docstring for the shape convention and for how to define a
-    new operator.
+    hooks ``shape``, ``batch_shape``, ``_matvec``, ``_rmatvec`` and
+    ``_to_dense``; the public methods defined here validate operands and
+    dispatch to the hooks. See the module docstring for the shape
+    convention and for how to define a new operator.
+
+    A directly constructed operator always has ``batch_shape == ()``. A
+    *vmapped family* — the same pytree rebuilt with stacked leaves, as
+    ``jax.vmap`` produces at its exit boundary — reports a non-empty
+    ``batch_shape``, and every one of the twelve operations then raises
+    ``ValueError`` directing the caller to apply the family under
+    ``jax.vmap``. Introspection (``shape``, ``batch_shape``, ``supports``,
+    ``capabilities``, ``T``) remains available on families.
     """
 
     #: NumPy consults this on binary operations: ``None`` makes NumPy defer
@@ -440,6 +465,26 @@ class LinOp(abc.ABC):
         A property computed from static information, never a stored field,
         so it stays concrete under ``jit`` and is usable in shape
         expressions.
+        """
+
+    @property
+    @abc.abstractmethod
+    def batch_shape(self) -> tuple[int, ...]:
+        """Leading batch axes of the stored arrays; ``()`` unless vmapped.
+
+        Every directly constructed operator has ``batch_shape == ()``. A
+        non-empty value identifies a vmapped family, which supports
+        introspection and ``jax.vmap`` application only. Computed, like
+        :attr:`shape`, from static information: each array field
+        contributes its leading axes beyond that field's core rank, a
+        child operator contributes its own batch shape, and contributions
+        combine by broadcasting.
+
+        Raises
+        ------
+        ValueError
+            If the contributions do not broadcast — a hand-assembled
+            pytree with inconsistently stacked leaves.
         """
 
     @abc.abstractmethod
@@ -489,6 +534,7 @@ class LinOp(abc.ABC):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n_in``.
         """
+        self._check_not_family("matvec")
         return self._matvec(_check_vec(self, "matvec", x, self.shape[1]))
 
     def rmatvec(self, x) -> Array:
@@ -510,6 +556,7 @@ class LinOp(abc.ABC):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n_out``.
         """
+        self._check_not_family("rmatvec")
         return self._rmatvec(_check_vec(self, "rmatvec", x, self.shape[0]))
 
     def matmat(self, X) -> Array:
@@ -538,6 +585,7 @@ class LinOp(abc.ABC):
             If ``X`` has fewer than two axes, or axis ``-2`` is not
             ``n_in``.
         """
+        self._check_not_family("matmat")
         return self._matmat(_check_mat(self, "matmat", X, self.shape[1]))
 
     def rmatmat(self, X) -> Array:
@@ -560,6 +608,7 @@ class LinOp(abc.ABC):
             If ``X`` has fewer than two axes, or axis ``-2`` is not
             ``n_out``.
         """
+        self._check_not_family("rmatmat")
         return self._rmatmat(_check_mat(self, "rmatmat", X, self.shape[0]))
 
     def to_dense(self) -> Array:
@@ -577,6 +626,7 @@ class LinOp(abc.ABC):
         Use :func:`densify` for a size-guarded fallback that returns an
         operator instead of an array.
         """
+        self._check_not_family("to_dense")
         return self._to_dense()
 
     @property
@@ -661,6 +711,14 @@ class LinOp(abc.ABC):
                 name, type(self).__name__, tuple(sorted(self.capabilities()))
             )
 
+    def _check_not_family(self, method: str) -> None:
+        """Refuse the operation on a vmapped family, before any other check."""
+        if self.batch_shape != ():
+            raise ValueError(
+                f"{self!r}.{method}: a vmapped family cannot be applied "
+                f"directly; apply it under jax.vmap, member by member."
+            )
+
     # -- operator arithmetic ------------------------------------------------------
     def __matmul__(self, other):
         """Compose two operators: ``A @ B`` is ``product(A, B)``.
@@ -743,10 +801,13 @@ class LinOp(abc.ABC):
     def __repr__(self) -> str:
         """Return the type name and shape, as ``Dense(4, 6)``.
 
-        Deliberately omits field values, which are usually arrays too large
-        to be worth printing.
+        A vmapped family wraps that form and names its batch, as
+        ``vmapped(Dense(4, 6), batch=(100,))``. Deliberately omits field
+        values, which are usually arrays too large to be worth printing.
         """
-        return f"{type(self).__name__}{self.shape}"
+        base = f"{type(self).__name__}{self.shape}"
+        batch = self.batch_shape
+        return f"vmapped({base}, batch={batch})" if batch != () else base
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +854,7 @@ class SquareLinOp(LinOp):
         ValueError
             If ``b`` has no axes, or its trailing axis is not ``n``.
         """
+        self._check_not_family("solve")
         self._require("solve")
         return self._solve(_check_vec(self, "solve", b, self.n))
 
@@ -819,6 +881,7 @@ class SquareLinOp(LinOp):
         ValueError
             If ``B`` has fewer than two axes, or axis ``-2`` is not ``n``.
         """
+        self._check_not_family("solve_mat")
         self._require("solve_mat")
         return self._solve_mat(_check_mat(self, "solve_mat", B, self.n))
 
@@ -838,6 +901,7 @@ class SquareLinOp(LinOp):
         UnsupportedOpError
             If this operator has no cheap log-determinant.
         """
+        self._check_not_family("logdet")
         self._require("logdet")
         return self._logdet()
 
@@ -854,6 +918,7 @@ class SquareLinOp(LinOp):
         UnsupportedOpError
             If this operator has no cheap diagonal.
         """
+        self._check_not_family("diag")
         self._require("diag")
         return self._diag()
 
@@ -907,6 +972,7 @@ class PSDLinOp(SquareLinOp):
         UnsupportedOpError
             If this operator has no cheap square root.
         """
+        self._check_not_family("factor")
         self._require("factor")
         return self._factor()
 
@@ -941,6 +1007,7 @@ class PSDLinOp(SquareLinOp):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n``.
         """
+        self._check_not_family("whiten")
         self._require("whiten")
         return self._whiten(_check_vec(self, "whiten", x, self.n))
 
@@ -967,6 +1034,7 @@ class PSDLinOp(SquareLinOp):
         ValueError
             If ``X`` has fewer than two axes, or axis ``-2`` is not ``n``.
         """
+        self._check_not_family("whiten_mat")
         self._require("whiten_mat")
         return self._whiten_mat(_check_mat(self, "whiten_mat", X, self.n))
 

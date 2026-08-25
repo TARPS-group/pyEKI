@@ -23,6 +23,7 @@ function                           checks
                                    ``grad``
 :func:`check_repr`                 repr is type and shape, no array data
 :func:`check_arithmetic`           arithmetic dispatch and guided errors
+:func:`check_family`               ``batch_shape`` and family inertness
 =================================  ===========================================
 
 Checks skip operations the operator does not claim to support; capability
@@ -52,6 +53,7 @@ __all__ = [
     "check_pytree",
     "check_repr",
     "check_arithmetic",
+    "check_family",
 ]
 
 _RTOL, _ATOL = 1e-9, 1e-9
@@ -425,6 +427,40 @@ def check_arithmetic(op: LinOp) -> None:
         assert isinstance(t, Transposed) and t.T is op
 
 
+def check_family(op: LinOp) -> None:
+    """Check ``batch_shape`` legibility and family inertness.
+
+    The instance itself must report ``batch_shape == ()``. Its leaves are
+    stacked and unflattened into a vmapped family, which must report the
+    stacked batch shape, take the ``vmapped(...)`` repr form, refuse every
+    type-defined operation with ``ValueError``, and still answer
+    introspection (``shape``, ``supports``, ``capabilities``).
+    """
+    assert op.batch_shape == (), f"{op!r}.batch_shape != ()"
+    leaves, treedef = jax.tree_util.tree_flatten(op)
+    if not leaves:
+        return  # no data leaves: a family of this operator cannot exist
+    family = jax.tree_util.tree_unflatten(
+        treedef, [jnp.stack([leaf] * 3) for leaf in leaves]
+    )
+    assert family.batch_shape == (3,), family.batch_shape
+    want_repr = f"vmapped({type(op).__name__}{op.shape}, batch=(3,))"
+    assert repr(family) == want_repr, repr(family)
+    assert family.shape == op.shape
+    assert family.supports("matvec")
+    family.capabilities()
+    n_out, n_in = op.shape
+    for name, make_args in _OPERATION_OPERANDS.items():
+        if not hasattr(type(op), name):
+            continue
+        e = _expect_raises(
+            ValueError,
+            lambda n=name, f=make_args: getattr(family, n)(*f(n_out, n_in)),
+            f"family {name}",
+        )
+        assert "vmap" in str(e), str(e)
+
+
 def check_operator(op: LinOp, *, seed: int = 0) -> None:
     """Run every conformance check against one operator instance.
 
@@ -453,3 +489,4 @@ def check_operator(op: LinOp, *, seed: int = 0) -> None:
     check_pytree(op, keys[5])
     check_repr(op)
     check_arithmetic(op)
+    check_family(op)

@@ -68,8 +68,8 @@ Three rules govern the hierarchy:
    every dispatch decision available at trace time.
 
 `LinOp` is an abstract base class: instantiating a subclass that lacks any
-required piece (`shape`, `_matvec`, `_rmatvec`, `_to_dense`) fails at
-instantiation, not on first use.
+required piece (`shape`, `batch_shape`, `_matvec`, `_rmatvec`,
+`_to_dense`) fails at instantiation, not on first use.
 
 ## Shape contract
 
@@ -220,8 +220,9 @@ that constructing and returning an operator inside `vmap` round-trips.
 (contract-families)=
 ### Families: `batch_shape`, legibility, inertness
 
-Every operator has a **`batch_shape`** property, a concrete tuple of
-Python ints computed — like `shape` — from static information only:
+Every operator has a **`batch_shape`** property — required and
+implemented per class, like `shape` — a concrete tuple of Python ints
+computed from static information only:
 
 - Each data field contributes the leading axes of its stored array beyond
   that field's core rank; a child operator contributes its own
@@ -314,6 +315,7 @@ The full method set:
 | public       | hook          | level         | availability                     |
 | ------------ | ------------- | ------------- | -------------------------------- |
 | `shape`      | (property)    | `LinOp`       | required                         |
+| `batch_shape`| (property)    | `LinOp`       | required                         |
 | `matvec`     | `_matvec`     | `LinOp`       | required                         |
 | `rmatvec`    | `_rmatvec`    | `LinOp`       | required¹                        |
 | `matmat`     | `_matmat`     | `LinOp`       | derived from `_matvec`           |
@@ -1130,6 +1132,6 @@ specification, and will be deleted afterwards.
 | abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |
 | composites | direct class construction; `BlockDiag` + `BlockDiagGeneral` pair, the latter with a stub `solve` raising `AttributeError` | factories `block_diag`/`product`/`hstack` select the class; general `BlockDiag` is a plain `LinOp` with no stub methods |
 | arithmetic | none; `op @ x` fails with Python's generic unsupported-operand error; `np_array * op` silently builds an object array | `@` composes operators (guided `TypeError` on arrays); `*`/`/` return a level-preserving scaled composite; `__array_ufunc__ = None` so NumPy defers; `__jax_array__` forbidden; `+` still excluded |
-| vmapped families | exist as reconstructions; direct operation calls are undefined behaviour | `batch_shape` property, the inertness guard, and the family-aware repr ({ref}`contract-families`) — *specified here, implementation pending* |
+| vmapped families | exist as reconstructions; direct operation calls are undefined behaviour | `batch_shape` property, the inertness guard, and the family-aware repr ({ref}`contract-families`) |
 | composite anatomy | `blocks`/`ops` fields exist but are implementation detail | children and static block sizes are contract ({ref}`contract-composites`); `PSDDiagCongruence` added for localization noise inflation |
 | conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–14 above, with the monkeypatch guard and per-check keys |

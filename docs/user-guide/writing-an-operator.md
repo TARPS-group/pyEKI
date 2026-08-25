@@ -35,6 +35,10 @@ class IdentityPlusRankOne(PSDLinOp):
         n = self.u.shape[-1]
         return (n, n)
 
+    @property
+    def batch_shape(self):
+        return jnp.broadcast_shapes(self.sigma2.shape, self.u.shape[:-1])
+
     def _matvec(self, x):
         return self.sigma2 * x + self.u * jnp.sum(self.u * x, axis=-1, keepdims=True)
 
@@ -57,6 +61,13 @@ of those becomes a pytree child; any other field must be marked with
 **`shape`** is a property computed from static information, never a stored
 field, so that it stays a concrete tuple under `jit` and can be used in
 shape expressions.
+
+**`batch_shape`** is its sibling: each array field contributes its leading
+axes beyond that field's core rank, combined by broadcasting. It is `()`
+for every operator your code constructs — the constructor guarantees it —
+and non-empty only on the *vmapped families* that `jax.vmap` rebuilds at
+its exit boundary, which refuse direct method calls and must be applied
+under `vmap`.
 
 **`_matvec`** receives its operand already validated, **batch axes
 included**: it must contract the trailing axis and carry any number of

@@ -41,6 +41,7 @@ from .base import (
     LinOp,
     PSDLinOp,
     SquareLinOp,
+    _broadcast_batch,
     _check_core_rank,
     linop,
     value_check,
@@ -112,6 +113,10 @@ class Transposed(LinOp):
         return (n_in, n_out)
 
     @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return self.op.batch_shape
+
+    @property
     def T(self) -> LinOp:  # noqa: N802 - mirrors the NumPy attribute
         """The original operator: transposing a view unwraps it."""
         return self.op
@@ -163,6 +168,12 @@ class Scaled(LinOp):
     @property
     def shape(self) -> tuple[int, int]:
         return self.op.shape
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch(
+            type(self).__name__, self.op.batch_shape, self.c.shape
+        )
 
     def supports(self, name: str) -> bool:
         return super().supports(name) and self.op.supports(name)
@@ -265,6 +276,10 @@ class Product(LinOp):
     def shape(self) -> tuple[int, int]:
         return (self.ops[0].shape[0], self.ops[-1].shape[1])
 
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch("Product", *[op.batch_shape for op in self.ops])
+
     def _matvec(self, x: Array) -> Array:
         for op in reversed(self.ops):
             x = op.matvec(x)
@@ -321,6 +336,10 @@ class HStack(LinOp):
     @property
     def shape(self) -> tuple[int, int]:
         return (self.ops[0].shape[0], sum(op.shape[1] for op in self.ops))
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch("HStack", *[op.batch_shape for op in self.ops])
 
     @property
     def block_shapes(self) -> tuple[tuple[int, int], ...]:
@@ -381,6 +400,10 @@ class BlockDiag(LinOp):
         )
 
     @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch("BlockDiag", *[b.batch_shape for b in self.blocks])
+
+    @property
     def block_shapes(self) -> tuple[tuple[int, int], ...]:
         """The blocks' shapes, in order along the diagonal."""
         return tuple(b.shape for b in self.blocks)
@@ -433,6 +456,12 @@ class PSDBlockDiag(PSDLinOp):
     def shape(self) -> tuple[int, int]:
         n = sum(b.shape[0] for b in self.blocks)
         return (n, n)
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch(
+            "PSDBlockDiag", *[b.batch_shape for b in self.blocks]
+        )
 
     @property
     def block_shapes(self) -> tuple[tuple[int, int], ...]:
@@ -530,6 +559,12 @@ class PSDDiagCongruence(PSDLinOp):
     @property
     def shape(self) -> tuple[int, int]:
         return self.op.shape
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch(
+            "PSDDiagCongruence", self.op.batch_shape, self.scale.shape[:-1]
+        )
 
     def supports(self, name: str) -> bool:
         return super().supports(name) and self.op.supports(name)

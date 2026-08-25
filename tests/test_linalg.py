@@ -135,6 +135,10 @@ def test_blockdiag_capabilities_are_conditional_on_children():
         def shape(self):
             return (self.size, self.size)
 
+        @property
+        def batch_shape(self):
+            return ()
+
         def _matvec(self, x):
             return x
 
@@ -176,6 +180,10 @@ def test_unsupported_raises_and_densify_always_provides():
         @property
         def shape(self):
             return (self.A.shape[-1], self.A.shape[-1])
+
+        @property
+        def batch_shape(self):
+            return tuple(self.A.shape[:-2])
 
         def _matvec(self, x):
             return jnp.einsum("ij,...j->...i", self.A, x)
@@ -251,8 +259,29 @@ def test_unflatten_bypasses_the_constructor():
     op = PSDDiagonal(jnp.ones(3))
     leaves, treedef = jax.tree_util.tree_flatten(op)
     fam = jax.tree_util.tree_unflatten(treedef, [jnp.ones((5, 3))])
-    assert isinstance(fam, PSDDiagonal)  # a family: pytree plumbing only
+    assert isinstance(fam, PSDDiagonal)
     jax.tree_util.tree_unflatten(treedef, [object()])  # sentinels pass too
+
+    # The family is legible and inert: it names itself and refuses
+    # direct application with a pointer to vmap.
+    assert fam.batch_shape == (5,)
+    assert repr(fam) == "vmapped(PSDDiagonal(3, 3), batch=(5,))"
+    with pytest.raises(ValueError, match="vmap"):
+        fam.matvec(jnp.ones(3))
+    with pytest.raises(ValueError, match="vmap"):
+        fam.logdet()
+
+
+def test_inconsistently_stacked_leaves_are_diagnosed_at_batch_shape():
+    """A hand-assembled pytree whose leaves disagree on the batch fails at
+    the batch_shape property, not by downstream shape wreckage."""
+    op = DenseSquare.from_matrix(jnp.asarray(np.eye(3) * 2.0))
+    leaves, treedef = jax.tree_util.tree_flatten(op)
+    bad = jax.tree_util.tree_unflatten(
+        treedef, [jnp.stack([leaf] * (3 if i else 2)) for i, leaf in enumerate(leaves)]
+    )
+    with pytest.raises(ValueError, match="batch"):
+        bad.batch_shape  # noqa: B018 - the property itself raises
 
 
 def test_vmap_over_scalars_builds_a_scaled_family():

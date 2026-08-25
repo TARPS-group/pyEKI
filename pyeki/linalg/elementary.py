@@ -38,6 +38,7 @@ from .base import (
     LinOp,
     PSDLinOp,
     SquareLinOp,
+    _broadcast_batch,
     _check_core_rank,
     dense_matvec,
     linop,
@@ -106,6 +107,10 @@ class Identity(PSDLinOp):
     def shape(self) -> tuple[int, int]:
         return (self.size, self.size)
 
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return ()
+
     def _matvec(self, x: Array) -> Array:
         return x
 
@@ -164,6 +169,10 @@ class PSDDiagonal(PSDLinOp):
         n = self.diagonal.shape[-1]
         return (n, n)
 
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.diagonal.shape[:-1])
+
     def _matvec(self, x: Array) -> Array:
         return self.diagonal * x
 
@@ -207,6 +216,10 @@ class Dense(LinOp):
     @property
     def shape(self) -> tuple[int, int]:
         return (self.A.shape[-2], self.A.shape[-1])
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.A.shape[:-2])
 
     def _matvec(self, x: Array) -> Array:
         return dense_matvec(self.A, x)
@@ -276,6 +289,15 @@ class DenseSquare(SquareLinOp):
     def shape(self) -> tuple[int, int]:
         n = self.A.shape[-1]
         return (n, n)
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return _broadcast_batch(
+            "DenseSquare",
+            self.A.shape[:-2],
+            self.lu.shape[:-2],
+            self.piv.shape[:-1],
+        )
 
     def _matvec(self, x: Array) -> Array:
         return dense_matvec(self.A, x)
@@ -351,6 +373,10 @@ class Triangular(SquareLinOp):
         n = self.L.shape[-1]
         return (n, n)
 
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.L.shape[:-2])
+
     def _matvec(self, x: Array) -> Array:
         return dense_matvec(self.L, x)
 
@@ -420,6 +446,10 @@ class DensePSD(PSDLinOp):
     def shape(self) -> tuple[int, int]:
         n = self.L.shape[-1]
         return (n, n)
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.L.shape[:-2])
 
     def _matvec(self, x: Array) -> Array:
         # A x = L (L^T x); never re-forms A.
