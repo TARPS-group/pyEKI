@@ -50,7 +50,8 @@ the ensemble size. *(planned)*
 
 :::{grid-item-card} The EKI algorithms
 `pyeki.eki` provides tempering schedules, ensemble updates, inflation, and the
-driver loop, plus common variants. *(planned)*
+driver loop, in both the approximate-sampling and the optimization form.
+*(contract complete; implementation planned)*
 :::
 ::::
 
@@ -105,6 +106,7 @@ user-guide/writing-an-operator
 
 linop-contract
 gaussian-contract
+eki-contract
 design
 api/index
 ```
