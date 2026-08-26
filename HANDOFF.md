@@ -19,9 +19,9 @@ Documentation builds: landing page, installation, quickstart, operator
 catalogue, a guide to writing an operator, the operator contract, design
 notes, and an API reference.
 
-**Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design for
-all three is in `docs/design.md`, which is the single most useful thing to read
-before writing any of them.
+**Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design
+background for all three is in `docs/design.md`; `pyeki.gauss` additionally
+has its full normative contract in `docs/gaussian-contract.md`.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -64,11 +64,14 @@ gain, which is the form to implement — not the algebraically equivalent
 Woodbury identity on the normal equations, which squares a condition number
 that is already the problem.
 
-Suggested shape: a `JointGaussian` protocol supplying means, a `gain_apply`,
-and joint sampling; two implementations, one from ensemble anomalies and one
-from structured operators; and two conditioning functions, moment-based and
-pathwise. The pathwise form is what EKI uses; the moment form is the reference
-the tests compare against.
+Its normative design is now `docs/gaussian-contract.md` — adversarially
+reviewed and ready to implement. The shape differs from the suggestion this
+section previously recorded: one closed `EnsembleJoint` class plus a
+`Gaussian` marginal and two array-level conditioning primitives; no
+operator-represented joint (the dense reference is hand-written in the
+tests, deliberately); and the whitened-SVD kernel as the single algorithm.
+The contract's `gauss-excluded` section records why each earlier suggestion
+was dropped.
 
 ### 3. `pyeki.eki`
 

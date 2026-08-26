@@ -55,6 +55,10 @@ equivalent alternatives — the Woodbury identity on the normal equations, and
 a dense factorization of the predictive covariance — are respectively
 rejected and deferred, with reasons, in {ref}`gauss-excluded`.
 
+The implementation PR must also add the layer's user-guide page, per the
+package rule that every user-facing feature has a user-guide home; this
+page remains the deeper reference.
+
 (gauss-notation)=
 ## Notation and conventions
 
@@ -91,9 +95,10 @@ Conventions, each normative:
   is a `(N,)` array, a mean a `(dim,)` array. The gauss classes do not
   accept batched operands the way operator methods do; a family of
   distributions or updates is expressed with `jax.vmap` over the pytree
-  ({ref}`gauss-jax`). The two conditioning *primitives* are the exception:
-  they are array-level and follow the operator layer's batch contract
-  ({ref}`gauss-primitives`).
+  ({ref}`gauss-jax`). The exceptions are the two conditioning
+  *primitives* — array-level, following the operator layer's batch
+  contract ({ref}`gauss-primitives`) — and the evaluation-point argument
+  of `Gaussian.log_density`, which is batched the same way.
 - **Noise covariances are `PSDLinOp`s.** Every `noise_cov` argument must be
   a {class}`~pyeki.linalg.PSDLinOp` of side $N$; a non-operator or an
   operator of the wrong shape is a `TypeError` / `ValueError` at call time.
@@ -143,6 +148,11 @@ Three rules govern the set:
 All conditioning in the layer is one computation, specified here once. The
 class methods ({ref}`gauss-ensemble`) are thin assemblies of these pieces;
 the two public functions ({ref}`gauss-primitives`) expose them directly.
+"Thin assembly" names the mathematics, not an obligation to call the
+public functions: the class methods share a single SVD of $S$ internally,
+while each public primitive recomputes its own — routing a class method
+through the primitives is permitted only where it preserves the
+one-SVD-per-call rule of {ref}`gauss-ensemble`.
 
 ### The whitened anomaly matrix
 
@@ -165,12 +175,14 @@ r = \min(J, N),
 $$
 
 with singular values $\sigma_1 \ge \dots \ge \sigma_r \ge 0$. Because the
-rows of $A_v$ sum to zero, $S^\top \mathbf{1} = 0$: the all-ones direction
-is in the null space of $S^\top$, so every $\sigma_i > 0$ has
-$U_{\cdot i} \perp \mathbf{1}$. Mean-centering also caps the rank at
-$J - 1$, so at least one singular value is exactly zero whenever
-$N \ge J$; every formula below is continuous at $\sigma = 0$ and needs no
-special-casing.
+member rows of $A_v$ sum to zero ($\mathbf{1}^\top A_v = 0$),
+$S^\top \mathbf{1} = 0$: the all-ones direction is in the null space of
+$S^\top$, so every $\sigma_i > 0$ has $U_{\cdot i} \perp \mathbf{1}$.
+Mean-centering also caps the rank at $J - 1$, so at least one singular
+value is exactly zero whenever $N \ge J$ — in exact arithmetic; floating
+point returns $O(\varepsilon \lVert S \rVert)$ instead. Every formula
+below is continuous at $\sigma = 0$ in value and needs no special-casing;
+differentiability is another matter ({ref}`gauss-primitives`).
 
 ### The gain
 
@@ -245,6 +257,10 @@ Two structural facts, both load-bearing and both conformance-checked:
   (each $U_{\cdot i}$ with $\sigma_i > 0$ is orthogonal to $\mathbf{1}$, and
   the modifier vanishes at $\sigma_i = 0$), so transformed anomalies still
   sum to zero and the posterior ensemble's mean is not silently shifted.
+  In floating point the numerically-zero $\sigma$'s $U$ column need not be
+  orthogonal to $\mathbf{1}$; the property survives because the modifier
+  decays *quadratically*, $(1+\sigma^2)^{-1/2} - 1 = O(\sigma^2)$, which
+  is $0.0$ exactly for $\sigma$ at rounding scale.
 - **The identity is exact in exact arithmetic**, not asymptotic in $J$. The
   conformance suite checks it to floating-point tolerance, per the
   exactness-test convention.
@@ -252,10 +268,15 @@ Two structural facts, both load-bearing and both conformance-checked:
 ### Cost
 
 Whitening costs $J$ applications of $W$; the thin SVD is
-$O(J N \min(J, N))$; forming weights is $O(J r)$ per residual and combining
-anomalies $O(JP)$ per member. A full ensemble update is
-$O(NJ^2 + PJ^2)$ for $J \le N$ — linear in both dimensions, cubic only in
-the ensemble size.
+$O(J N \min(J, N))$; forming weights is $O((N + J)\,r)$ per residual and
+combining anomalies $O(JP)$ per member. A full ensemble update is
+$O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J$ whitener applications —
+which the total absorbs for structured whiteners applying in $O(N)$, and
+which dominate ($O(JN^2)$) for a dense $W$. Linear in both dimensions for
+structured whiteners, cubic only in the ensemble size. The conditioning
+that matters degrades in the *small-noise* direction (large
+$\sigma_{\max}$, a large whitener), not the collapse direction
+($\sigma \to 0$), which is numerically pristine.
 
 (gauss-primitives)=
 ## Conditioning primitives
@@ -274,17 +295,35 @@ methods cover EKI's global update, and domain localization (the planned
 
 Rules:
 
-- **`s` is exactly 2-D** — it plays the operator's role, so it carries no
-  batch axes; a family of local analyses is a `vmap` over the function.
-  `b` follows the operator layer's batch contract: trailing core axis of
-  length $N$, any number of leading batch axes carried through. Violations
-  raise `ValueError` with the same message obligations as tier-3 operand
-  checks ({ref}`contract-validation`).
+- **`s` is exactly 2-D, with both sizes at least 1** (`ValueError`
+  otherwise; there is no lower bound of 2 on $J$ — the divisor lives in
+  the caller). It plays the operator's role, so it carries no batch axes;
+  a family of local analyses is a `vmap` over the function. `b` follows
+  the operator layer's batch contract: trailing core axis of length $N$,
+  any number of leading batch axes carried through. Violations raise
+  `ValueError` with the same message obligations as tier-3 operand checks
+  ({ref}`contract-validation`), the function's name standing in for the
+  operator repr.
 - **Both functions compute one SVD per call.** Batch the residuals into a
   single `gain_weights` call rather than looping; the $J$ per-member
   residuals of an update are one `(J, N)` operand.
-- The functions are deterministic, differentiable JAX code: safe under
-  `jit`, `vmap`, and `grad`, with no data-dependent shapes.
+- The functions are deterministic JAX code, safe under `jit` and `vmap`,
+  with no data-dependent shapes. They are differentiable wherever the
+  singular values of `s` are distinct and nonzero. At *exactly* repeated
+  or exactly zero singular values — an exactly collapsed `s`, or the
+  zero-padded columns a masked local analysis produces — the SVD's
+  gradient is `nan`, even though the functions themselves are smooth
+  there (both equal rational closed forms in `s`; see below). The
+  float-generic degeneracy of mean-centering ($\sigma_{\min} \sim
+  10^{-16}$ when $N \ge J$) is not an exact tie and differentiates
+  finitely. No conditioning path in this layer differentiates the
+  primitives with respect to `s` ({ref}`gauss-jax`); an implementation
+  may restore gradients everywhere with a custom JVP routed through the
+  closed forms, but is not required to.
+- Both return values are functions of `s` alone, invariant to the SVD's
+  sign and degenerate-rotation freedom — they equal the closed forms of
+  {ref}`gauss-kernel` — so any correct thin SVD gives the same output
+  elementwise.
 - Callers own the semantics of `s`. For conditioning, `s` must be the
   *scaled, whitened* anomaly matrix of {ref}`gauss-kernel`, and `b` a
   *whitened* residual; the functions cannot check this, which is why the
@@ -316,7 +355,9 @@ Returns a `(n_samples, n)` array of independent draws. Requires
 `cov.supports("factor")`.
 
 - `n_samples` must be a Python `int`, at least 1 — it determines an output
-  shape, so it can never be traced.
+  shape, so it can never be traced. Anything that is not an `int` —
+  including `bool` and NumPy integers — is a `TypeError`; an `int` below 1
+  is a `ValueError`.
 - The draw is **pinned elementwise**, not merely distributionally: with `L`
   the operator `cov.factor()` returns and `k` its width, the result is
   exactly
@@ -337,7 +378,8 @@ Returns a `(n_samples, n)` array of independent draws. Requires
 
 Returns the log-density at `x`, batched: `(..., n) -> (...)`, each element a
 0-d real JAX scalar (never a Python float). Requires
-`cov.supports("whiten")` and `cov.supports("logdet")`. The value is
+`cov.supports("whiten")` and `cov.supports("logdet")`, checked in that
+order. The value is
 
 $$
 \log p(x) \;=\; -\tfrac{1}{2}\Bigl(\, n\log 2\pi \;+\; \log\det C \;+\;
@@ -388,17 +430,22 @@ documents. One method call, one SVD.
 
 All three conditioning methods condition on the same observation model —
 $y = v + \eta$ with $\eta \sim \mathcal{N}(0, R)$ — and share two trailing
-arguments: `y`, the observation, a `(N,)` array (tier-3 core-shape check),
-and `noise_cov`, a `PSDLinOp` of side $N$ supporting `whiten`
-(`UnsupportedOpError` from the inner call otherwise). The two update
-methods return a `(J, P)` array of updated members — they update $u$ only,
-since EKI re-evaluates the forward model to get the next step's $v$ — while
-`condition` returns the same posterior as a distribution. All are
-deterministic functions of their arguments (`pathwise_update` includes the
-key among them), safe under `jit`, and all degrade gracefully when the
-prediction anomalies are zero: the updates return `u_samples` unchanged and
-`condition` returns the prior marginal's moments — a collapsed ensemble is
-a no-op, not `nan`.
+arguments: `y`, the observation, an array of rank exactly 1 and length $N$
+(unlike operator operands, no batch axes — a family of updates is
+`jax.vmap` over the method), and `noise_cov`, a `PSDLinOp` of side $N$
+supporting `whiten` (`UnsupportedOpError` from the inner call otherwise).
+Precondition: `noise_cov` is nonsingular — `whiten`'s own precondition.
+The whitened formulation requires it even though $\widehat{C}_{vv} + R$
+is invertible for singular $R$; a singular noise operator that nonetheless
+types as whitening-capable yields `nan` per tier 4. The two update methods
+return a `(J, P)` array of updated members, row $j$ updating member $j$ —
+they update $u$ only, since EKI re-evaluates the forward model to get the
+next step's $v$ — while `condition` returns the same posterior as a
+distribution. All are deterministic functions of their arguments
+(`pathwise_update` includes the key among them), safe under `jit`, and all
+degrade gracefully when the prediction anomalies are zero: the updates
+return `u_samples` unchanged and `condition` returns the prior marginal's
+moments — a collapsed ensemble is a no-op, not `nan`, for finite inputs.
 
 ### `pathwise_update(key, y, noise_cov)`
 
@@ -455,10 +502,17 @@ $T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centred, so
 the two summands above really are the posterior mean and posterior
 anomalies.
 
-`transform_update` and `pathwise_update` produce ensembles with the same
-first and second moments in expectation; they differ in that the transform
-is exact per-realization while the pathwise form is exact in distribution.
-Which to use is the EKI layer's decision, not this layer's.
+`transform_update`'s output has sample moments equal to the posterior
+moments exactly, per realization. `pathwise_update`'s output has sample
+mean and sample covariance (divisor $J-1$) that are *unbiased estimators*
+of the same posterior moments, with per-realization spread of order
+$K R K^\top / J$; the unbiasedness of the covariance is particular to the
+$J-1$ divisor, whose centring of the perturbations cancels exactly.
+Individual pathwise members are not posterior draws — conditional on the
+ensemble, member $j$ is distributed
+$\mathcal{N}\bigl(u_j + K(y - v_j),\, K R K^\top\bigr)$ — so no
+"exact in distribution" claim is made. Which update to use is the EKI
+layer's decision, not this layer's.
 
 ### `condition(y, noise_cov)`
 
@@ -487,26 +541,34 @@ $$
 The returned covariance is honest about rank:
 $\operatorname{rank}(C_{\text{post}}) \le J - 1$, so it is singular
 whenever $J - 1 < P$ — the usual EKI regime. The posterior `Gaussian`
-therefore supports `sample` (the factor is the stored representation) but
-not `log_density`, which raises `UnsupportedOpError` from the covariance:
-a rank-deficient Gaussian has no density on $\mathbb{R}^P$, and the
-capability system says so instead of returning `-inf` or `nan`.
+supports `sample` (the factor is the stored representation) but not
+`log_density`, which raises `UnsupportedOpError` from the covariance. In
+the usual regime that is forced: a rank-deficient Gaussian has no density
+on $\mathbb{R}^P$, and the capability system says so instead of returning
+`-inf` or `nan`. When $J - 1 \ge P$ the posterior is typically full-rank
+and the density exists mathematically — the class's static capability
+choice still raises, and a caller wanting that density densifies the
+covariance deliberately.
 
 :::{admonition} Prerequisite: `PSDLowRank` in `pyeki.linalg`
 :class: note
 
 This method needs one new elementary operator, sketched here and to be
 specified in the operator contract when it is added. `PSDLowRank` holds a
-single data field, a factor `F` of shape `(n, k)` with no relation imposed
-between `n` and `k`, and represents $F F^\top$. It implements `matvec`
-($F(F^\top x)$, two trailing-axis contractions), `diag` (rowwise
-$\sum_j F_{ij}^2$), `to_dense` ($FF^\top$ assembled from the stored array,
-never via `matvec`), and `factor` (wrapping `F` as a `Dense`); it
-implements **no** `_solve`, `_whiten`, or `_logdet` — it is the operator
-contract's singular-by-construction class made concrete, the static
-class-level decision that contract already anticipates. Nothing is
-computed at construction: the stored field *is* the factorization. Like
-every operator, it must pass `check_operator` before merging.
+single data field, a factor `F` of shape `(n, k)` with $k \ge 1$ and no
+other relation imposed between `n` and `k`, and represents $F F^\top$. It
+implements the required pieces — `shape` ($(n, n)$ from `F`),
+`batch_shape` (the leading axes of `F` beyond rank 2), and the delegating
+PSD `rmatvec` — plus `matvec` ($F(F^\top x)$, two trailing-axis
+contractions), `diag` (rowwise $\sum_j F_{ij}^2$), `to_dense` ($FF^\top$
+assembled from the stored array, never via `matvec`), and `factor`
+(wrapping `F` as a `Dense`). It implements **no** `_solve`, `_whiten`, or
+`_logdet`: a static class-level capability decision — which the operator
+contract's singular-by-construction rule *requires* whenever the stored
+factor is thin ($k < n$), and which this class extends to every width.
+Nothing is computed at construction: the stored field *is* the
+factorization. Like every operator, it must pass `check_operator` before
+merging.
 :::
 
 (gauss-prng)=
@@ -519,9 +581,13 @@ every operator, it must pass `check_operator` before merging.
 - The two draws in the layer are **pinned by this contract**:
   `Gaussian.sample` draws `normal(key, (n_samples, k))` with `k` the factor
   width, and `pathwise_update` draws `normal(key, (J, N))`. Same key, same
-  arguments, same representation ⇒ identical output arrays, across
-  releases. Changing either draw is a breaking change and must be treated
-  as one.
+  arguments, same representation ⇒ identical output arrays across *pyEKI*
+  releases, **for a fixed JAX version and PRNG configuration** — the bit
+  stream itself belongs to JAX and has changed across JAX releases and
+  flags (`jax_threefry_partitionable`, x64 mode, PRNG implementation).
+  pyEKI never changes the draw on its side; doing so is a breaking change.
+  The test suite snapshots both draws so a JAX-side stream change is
+  detected rather than silently absorbed.
 - Everything else is deterministic. There is exactly one source of
   randomness per stochastic call, which is what makes EKI runs resumable
   from a stored key — a requirement the EKI layer inherits and this layer
@@ -531,14 +597,16 @@ every operator, it must pass `check_operator` before merging.
 ## Validation and errors
 
 The four-tier scheme of the operator contract ({ref}`contract-validation`)
-applies unchanged: everything static is checked always, values only on
-request. What each tier means here:
+applies with one extension: everything static is checked always, values
+only on request — and, unlike the operator layer, tier 4 here also runs at
+*call* time: in debug mode the conditioning methods check `y`, and the
+primitives their operands, for finiteness. What each tier means here:
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
 | 2. construction | ranks, static sizes, operator types, cross-field shape agreement | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
 | 3. call | operand core shapes and operator arguments | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of samples, means, and observations | violations yield `nan` or a silently wrong posterior outside debug mode |
+| 4. value (debug) | finiteness of samples, means, and observations; a singular `noise_cov` (caught at the operator's own construction) | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
@@ -576,9 +644,8 @@ as operators, and every rule of the operator contract's JAX section
 - **Unflattening bypasses the constructor**, so tier-2 validation is strict
   at genuine construction and absent at trace boundaries; `vmap`-ed
   families reconstruct exactly as operator families do
-  ({ref}`contract-batching-operators`), are legible but inert in the same
-  way ({ref}`contract-families`), and the same conformance round-trip
-  applies.
+  ({ref}`contract-batching-operators`), and behave as the Families
+  subsection below specifies.
 - **Identity semantics**: `eq=False`, hash by identity, never
   `static_argnums` — a joint is always a traced argument.
 - **Constructors store and validate; classmethods compute.** Nothing in the
@@ -592,7 +659,36 @@ as operators, and every rule of the operator contract's JAX section
 - Conditioning methods and primitives must be `jit`- and `vmap`-safe with
   no data-dependent shapes, and `log_density` must be differentiable with
   respect to `x` and the array leaves (hyperparameter estimation
-  differentiates through it; the updates carry no such requirement).
+  differentiates through it; the updates carry no such requirement — see
+  the differentiability caveat in {ref}`gauss-primitives`).
+
+### Families
+
+The operator contract's family machinery ({ref}`contract-families`) is
+per-class; here is its gauss instantiation:
+
+- **Both classes have a required `batch_shape` property**, computed like
+  the operators' — each array field contributes its leading axes beyond
+  its core rank, and an operator field contributes its own `batch_shape`,
+  combined by broadcasting with `ValueError` on mismatch. Core ranks:
+  `Gaussian.mean` 1 (with `cov` contributing its own); `u_samples` and
+  `v_samples` 2. Directly constructed objects always report `()`.
+- **Genuine construction rejects families**: `Gaussian(mean, cov)` with
+  `cov.batch_shape != ()` is a tier-2 `ValueError` (the batch shape is
+  static information), and a family `noise_cov` at a conditioning call is
+  a tier-3 `ValueError` — apply a family of noise operators with
+  `jax.vmap`, not directly.
+- **Inertness**: when `batch_shape` is non-empty, every method and every
+  array-computing property (`sample`, `log_density`, the three
+  conditioning methods, the means and anomalies) raises `ValueError`
+  naming the object, the operation, the batch shape, and the remedy —
+  apply the family under `jax.vmap` — before any capability or operand
+  check. The static `int` properties (`n`, `n_members`, `u_dim`,
+  `v_dim`), `batch_shape` itself, and `repr` still answer.
+- **Family repr** wraps the ordinary form, as for operators:
+  `vmapped(EnsembleJoint(n_members=100, u_dim=12, v_dim=40), batch=(8,))`;
+  and `repr` never raises, falling back to the operator contract's marker
+  form on unreadable leaves.
 
 (gauss-consumers)=
 ## How the layers above consume this one
@@ -619,6 +715,20 @@ scaling — a traced increment flows through the 0-d scalar field, so the
 adaptive schedule never re-factorizes the noise. The deterministic variant
 is the same loop with `transform_update(y, noise_cov / dbeta)` and no key.
 
+Two facts the driver can exploit without any extra surface here. First, a
+candidate tempering increment rescales the kernel, not the data:
+$S(R/\delta) = \sqrt{\delta}\,S(R)$, so an adaptive-step search reuses
+one SVD across candidates through the primitives
+($\sigma_i \mapsto \sqrt{\delta}\,\sigma_i$) instead of recomputing
+it per candidate. Second, forward-model failures are handled by *sample
+preprocessing*, not by a masked joint: with validity mask $m_j$ and $J_v$
+valid members, replacing each member by
+$\hat u + m_j\,(u_j - \hat u)\,\sqrt{(J-1)/(J_v-1)}$ (with $\hat u$
+the valid-member mean, and likewise for $v$) makes the fixed-$J$ joint's
+moments equal the masked moments exactly, keeps shapes static under
+`jit`, and lets failed members rejoin at the posterior mean. This is why
+the anomaly divisor stays fixed ({ref}`gauss-excluded`).
+
 **Domain localization** (`pyeki.localize`, planned) runs one small analysis
 per parameter block against its nearby observations, with per-observation
 noise inflation by the reciprocal taper. It consumes the conditioning
@@ -629,17 +739,28 @@ prediction anomalies and residuals, build the local noise covariance as
 apply to its own $u$-anomalies. The primitives' array-purity, their
 one-SVD-per-call rule, and the block anatomy that
 {ref}`contract-composites` makes contractual are what this plan relies on.
+Two idioms make the fixed-size-neighbourhood plan exact: zeroing column
+$i$ of `s` and entry $i$ of each residual reproduces the analysis with
+observation $i$ removed, elementwise, so padded slots mask to exact no-ops
+under static shapes; and the per-block noise must align with the noise
+operator's contractual `block_shapes` — extracting a principal submatrix
+of a *correlated* block is not an operator-layer operation, so
+partial-block neighbourhoods require diagonal noise or block-aligned
+neighbourhoods.
 
 **The test suite** holds the reference implementation. On small problems
 the dense Bayes formulas are written out in the tests themselves — plain
 dense linear algebra over the empirical moments, independent of this
 layer's code — and every conditioning method is checked against them
 ({ref}`gauss-conformance`). Exact-moment fixtures extend the comparison to
-analytic posteriors: for any target joint, an ensemble of
-$J = P + N + 1$ members can be constructed (simplex-sigma-point style,
-from a factor of the target's joint covariance) whose empirical moments
-equal the target's exactly, so closed-form linear-Gaussian posteriors are
-reachable through `EnsembleJoint` alone. A tempered run's posterior
+analytic posteriors: for any target joint with a **square or thin**
+covariance factor $G$ of width $k \le P + N$ (reduce a wide `factor()`
+output first), an ensemble of $J \ge k + 1$ members whose empirical
+moments equal the target's exactly can be constructed — concretely, take
+the complete QR of $\mathbf{1} \in \mathbb{R}^J$, let $E$ be its last
+$k$ columns (orthonormal, each $\perp \mathbf{1}$), and set the members
+to $\mu + \sqrt{J-1}\,E\,G^\top$ — so closed-form linear-Gaussian
+posteriors are reachable through `EnsembleJoint` alone. A tempered run's posterior
 telescoping to the one-shot posterior is the EKI layer's test; the
 per-step exactness it composes from lives here.
 
@@ -676,11 +797,21 @@ must verify at least:
    the dense $K r$ elementwise on small random problems, in all three shape
    regimes $N > J$, $N = J$, $N < J$, with `b` at batch ranks 0, 1, and 2.
 2. **Whitener invariance**: two noise operators representing the same $R$
-   with different whiteners yield identical weights.
+   with different whiteners yield identical weights. (No shipped operator
+   pair differs — Cholesky uniqueness makes every in-package whitener
+   identical — so the test defines a local operator whose `_whiten`
+   applies a fixed orthogonal rotation of a valid whitener.)
 3. **Transform against dense**: `sqrt_transform` matches a dense
-   `eigh`-based $(I + ss^\top)^{-1/2}$ — including the rank-deficient case
-   $r < J$ that the naive thin-SVD formula gets wrong — and satisfies
-   $T = T^\top$ and $T\mathbf{1} = \mathbf{1}$.
+   `eigh`-based $(I + ss^\top)^{-1/2}$ at moderate scale
+   ($\sigma_{\max} \lesssim 10^2$, where that reference is trustworthy —
+   forming $I + ss^\top$ squares the conditioning, so at large
+   $\sigma_{\max}$ the *reference* is the inaccurate side), including the
+   rank-deficient case $r < J$ that the naive thin-SVD formula gets wrong;
+   satisfies the invariant $T\,(I + ss^\top)\,T^\top = I$ at large
+   $\sigma_{\max}$, with tolerances scaling as
+   $\varepsilon \max(1, \sigma_{\max})$; and satisfies $T = T^\top$
+   and $T\mathbf{1} = \mathbf{1}$ (the latter to a tolerance scaling
+   with $\sigma_{\max}$).
 4. **Moment exactness of the posterior**: `transform_update`'s output has
    sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;
@@ -691,7 +822,8 @@ must verify at least:
 5. **Pathwise against dense, elementwise**: with $\varepsilon$ recomputed
    from the same key (the pinned draw), `pathwise_update` equals
    $u_j + K(y - v_j - W^{-1}\varepsilon_j)$ computed densely, with $W$
-   recovered by whitening the columns of $I_N$.
+   recovered as the transpose of `noise_cov.whiten(jnp.eye(N))` — the
+   row-wise batch contract returns $W^\top$.
 6. **Exact-moment fixtures**: on an ensemble constructed so that its
    empirical moments equal an analytic linear-Gaussian joint
    ({ref}`gauss-consumers`), `condition` and `transform_update` reproduce
@@ -699,15 +831,18 @@ must verify at least:
 7. **Marginal formulas**: `sample` matches its pinned elementwise
    definition; `log_density` matches the dense closed form at batch ranks
    0, 1, and 2 and differentiates.
-8. **Degeneracy**: zero prediction anomalies make both updates the
-   identity on `u_samples` and `condition` return the prior marginal's
-   moments; $J = 2$ and $N = 1$ work; a collapsed ensemble produces no
-   `nan`.
+8. **Degeneracy**: zero prediction anomalies (constructed directly — an
+   exactly collapsed ensemble yields exactly zero anomalies only when the
+   mean rounds exactly) make both updates the identity on `u_samples` —
+   bit-exact for `pathwise_update`, to round-off for `transform_update`,
+   which reconstructs $\bar u + a_j$ — and `condition` return the prior
+   marginal's moments; $J = 2$ and $N = 1$ work; a collapsed ensemble
+   with finite inputs produces no `nan`.
 9. **Capability propagation**: a noise covariance without `whiten`, and a
    covariance without `factor` or `logdet`, raise `UnsupportedOpError`
    from the conditioning methods, `sample`, and `log_density`
-   respectively — and `log_density` on the singular posterior `condition`
-   returns raises the same way.
+   respectively — and `log_density` on the posterior `condition` returns
+   raises the same way, regardless of $J$ versus $P$.
 10. **Validation**: every tier-2 and tier-3 rule of
     {ref}`gauss-validation` raises as specified.
 11. **JAX round trips**: flatten/unflatten preserves type and behaviour for
@@ -716,12 +851,21 @@ must verify at least:
     joints agrees with a Python loop; sentinel-leaf unflattening succeeds.
 12. **Reproducibility and repr**: same key, same output, elementwise;
     different keys differ; reprs match {ref}`gauss-repr` with no array
-    data.
+    data; and the pinned draws are snapshotted so a JAX-side PRNG stream
+    change is detected ({ref}`gauss-prng`).
+13. **Families**: stacking either class's leaves and unflattening yields a
+    family that reports its batch shape, takes the `vmapped(...)` repr
+    form, and refuses every method and array-computing property with the
+    family `ValueError`, while the static `int` properties and
+    `batch_shape` still answer; genuine construction with a family
+    covariance raises ({ref}`gauss-jax`).
 
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
 a mixed-representation perturbation, a mean shift from an uncentred
-transform — under the same do-not-delete rule as the operator layer's.
+transform, a `nan` gradient at an exactly collapsed `s`, and a singular
+noise covariance turning an update into silent `nan` — under the same
+do-not-delete rule as the operator layer's.
 
 (gauss-excluded)=
 ## Deliberately excluded
@@ -751,9 +895,12 @@ only some base types can do.
 **The Woodbury route.** Applying the Woodbury identity to
 $(\widehat{C}_{vv} + R)^{-1}$ is the same algebra as the whitened SVD with
 worse arithmetic: it forms
-$(J-1)I + A_v^\top R^{-1} A_v = (J-1)(I + S S^\top)$, whose condition
-number is $\kappa(S)^2$ — and $\kappa(S)$ degrading as the ensemble
-collapses is the failure mode this layer is designed around. The SVD route
+$(J-1)I_J + A_v R^{-1} A_v^\top = (J-1)(I + S S^\top)$ — and *forming*
+the Gram rounds away singular values below
+$\sqrt{\varepsilon}\,\sigma_{\max}$: the effective conditioning of the
+formation is $\kappa(S)^2$, even though the assembled matrix itself is
+regularized by the shift. $\kappa(S)$ degrading is the failure mode this
+layer is designed around. The SVD route
 gets the bounded multiplier $\sigma/(1+\sigma^2)$ for free; a factorization
 of the formed Gram matrix does not. Its one advantage — needing `solve` on
 the noise instead of `whiten` — has no consumer, since `whiten` is the
@@ -778,8 +925,17 @@ updates — multiple observations, multiple noise levels — is `jax.vmap`
 over the method, consistent with the layer-wide batching story.
 
 **A configurable anomaly divisor.** $J - 1$ everywhere. A $1/J$ convention
-changes every formula's scaling for no consumer; inflation, which is the
-principled way to widen an ensemble, belongs to `pyeki.eki`.
+changes every formula's scaling for no consumer — the masked-ensemble
+consumer is served by sample preprocessing in `pyeki.eki`
+({ref}`gauss-consumers`); inflation, which is the principled way to widen
+an ensemble, belongs to `pyeki.eki`.
+
+**An ensemble marginal-likelihood accessor.**
+$\log\det(\widehat{C}_{vv} + R) = \log\det R + \sum_i \log(1 + \sigma_i^2)$
+falls out of the update's own SVD, and a future evidence or
+tempering-diagnostic consumer may want it. Excluded until that consumer
+exists; recorded so its absence reads as a decision and the identity is
+not rediscovered.
 
 **Perturbation injection.** `pathwise_update` takes no `eps` argument; see
 the warning in {ref}`gauss-ensemble`. Determinism needs are met by the

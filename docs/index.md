@@ -38,8 +38,9 @@ planned — is exploited rather than materialized.
 :::
 
 :::{grid-item-card} Gaussian conditioning
-`pyeki.gauss` provides joint Gaussian distributions and conditioning methods
-that select an algorithm appropriate to the problem's dimensions. *(planned)*
+`pyeki.gauss` provides the Gaussian machinery of the ensemble update —
+sampling, whitened-SVD conditioning, and the square-root transform.
+*(contract complete; implementation planned)*
 :::
 
 :::{grid-item-card} Localization

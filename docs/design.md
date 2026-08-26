@@ -41,7 +41,10 @@ something callers assemble from `cholesky`.
 ## The conditioning kernel
 
 Let $\Theta'$ and $G'$ be mean-centred parameter and prediction anomalies, $J$
-the ensemble size, and define the **whitened anomaly matrix**
+the ensemble size, and define the **whitened anomaly matrix**. (This page
+writes members as *columns*, $G' \in \mathbb{R}^{N \times J}$; the
+normative {doc}`gaussian-contract` writes them as rows — its $U$ and $V$
+are this page's $V$ and $U$.)
 
 $$
 S := \frac{1}{\sqrt{J-1}}\,R^{-1/2}G', \qquad S = U\Sigma V^\top \ \text{(thin SVD)}.
@@ -64,13 +67,17 @@ equivalent Woodbury identity applied to the normal equations. Four reasons:
   for all $\sigma \ge 0$, so the gain cannot blow up however ill-conditioned
   the ensemble becomes, and no regularization parameter needs tuning.
 - **It is one object away from the deterministic variant.** The square-root
-  transform is $T = V(I+\Sigma^2)^{-1/2}V^\top$, reusing the same
-  decomposition.
+  transform is $T = I_J + V\bigl((I+\Sigma^2)^{-1/2} - I\bigr)V^\top$,
+  reusing the same decomposition. The identity completion matters: the
+  naive $V(I+\Sigma^2)^{-1/2}V^\top$ omits the identity on the orthogonal
+  complement and is wrong whenever the thin SVD's rank is below $J$ — see
+  the {doc}`gaussian-contract` for the normative form.
 - **The update stays in the ensemble span**, $\theta^{(j)} \mapsto \theta^{(j)}
   + \Theta' w^{(j)}$ with $w^{(j)} \in \mathbb{R}^J$, so no matrix of parameter
   or observation dimension is ever formed.
 
-Cost is $O(NJ)$ to whiten, $O(NJ^2)$ for the thin SVD and $O(PJ)$ to apply
+Cost is $O(NJ)$ to whiten (for a whitener applying in $O(N)$ per vector;
+a dense whitener costs $O(N^2)$ each), $O(NJ^2)$ for the thin SVD and $O(PJ)$ to apply
 $\Theta'$ — linear in both the observation dimension $N$ and parameter
 dimension $P$, cubic only in the ensemble size.
 
