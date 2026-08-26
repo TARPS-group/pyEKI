@@ -18,8 +18,8 @@ common variants, built on:
 
 - **Structured linear operators** so covariance structure is exploited rather
   than materialized as dense arrays.
-- **A joint Gaussian abstraction** with conditioning methods that pick an
-  algorithm appropriate to the problem's dimensions.
+- **A joint Gaussian abstraction** providing sampling, the whitened-SVD
+  ensemble update, and the posterior as a distribution.
 - **Localization** for problems where the parameter dimension far exceeds the
   ensemble size.
 - **The EKI algorithms themselves** — tempering schedules, ensemble updates,

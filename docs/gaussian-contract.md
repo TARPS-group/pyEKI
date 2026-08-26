@@ -23,6 +23,12 @@ implementation begins. Once the module ships, this page remains as the
 normative reference for its behaviour.
 :::
 
+Readers after precision rather than implementation want
+{ref}`gauss-notation`, {ref}`gauss-kernel`, and the method sections; the
+remainder — validation, JAX integration, conformance, exclusions — binds
+implementers.
+
+(gauss-scope)=
 ## Scope
 
 The layer represents joint Gaussian distributions over a pair of blocks — in
@@ -70,9 +76,9 @@ One convention set governs the whole layer. Symbols used throughout:
 | $v$    | the observed block (in EKI: the predicted observations), dimension $N$ |
 | $y$    | the observation, a vector of length $N$ |
 | $R$    | the observation-noise covariance, an $N \times N$ PSD operator |
-| $W$    | a whitener of $R$: the fixed matrix `noise_cov.whiten` applies, $W R W^\top = I_N$ |
+| $W$    | a whitener: the fixed matrix an operator's `whiten` applies, $W C W^\top = I$ for that operator's $C$; in conditioning, of $R$ |
 | $J$    | the number of ensemble members |
-| $r$    | a residual $y - v$, of length $N$ |
+| $r$    | a residual $y - v$, of length $N$ (the thin SVD's width is written $\rho$) |
 
 Conventions, each normative:
 
@@ -117,7 +123,7 @@ The public surface is two classes and two functions.
 | --------------- | ------------------------------------- | --------------------------------------------- | ----------- |
 | `Gaussian`      | one Gaussian distribution             | mean vector + `PSDLinOp` covariance           | the prior; the posterior `condition` returns |
 | `EnsembleJoint` | the joint Gaussian with an ensemble's empirical moments | $J$ paired samples                | every conditioning operation |
-| `gain_weights`  | the Kalman gain, in whitened variables| pure array function                           | the shared conditioning core; localization's entry point |
+| `gain_weights`  | ensemble weights for one whitened residual | pure array function                      | the shared conditioning core; localization's entry point |
 | `sqrt_transform`| the square-root update transform      | pure array function                           | the shared conditioning core; localization's entry point |
 
 Three rules govern the set:
@@ -169,12 +175,12 @@ batch contract. Let
 
 $$
 S = U \Sigma V^\top \quad \text{(thin SVD)}, \qquad
-U \in \mathbb{R}^{J \times r},\;
-V \in \mathbb{R}^{N \times r},\;
-r = \min(J, N),
+U \in \mathbb{R}^{J \times \rho},\;
+V \in \mathbb{R}^{N \times \rho},\;
+\rho = \min(J, N),
 $$
 
-with singular values $\sigma_1 \ge \dots \ge \sigma_r \ge 0$. Because the
+with singular values $\sigma_1 \ge \dots \ge \sigma_\rho \ge 0$. Because the
 member rows of $A_v$ sum to zero ($\mathbf{1}^\top A_v = 0$),
 $S^\top \mathbf{1} = 0$: the all-ones direction is in the null space of
 $S^\top$, so every $\sigma_i > 0$ has $U_{\cdot i} \perp \mathbf{1}$.
@@ -234,13 +240,13 @@ the anomalies. Define
 
 $$
 T \;=\; (I_J + S S^\top)^{-1/2}
-\;=\; I_J + U\bigl((I_r+\Sigma^2)^{-1/2} - I_r\bigr)U^\top
+\;=\; I_J + U\bigl((I_\rho+\Sigma^2)^{-1/2} - I_\rho\bigr)U^\top
 \;\in\; \mathbb{R}^{J \times J},
 $$
 
 symmetric, built from the same SVD. The second form is the normative one:
 for a thin SVD the naive $U(I+\Sigma^2)^{-1/2}U^\top$ *omits the identity on
-the orthogonal complement* and is simply wrong whenever $r < J$ — the
+the orthogonal complement* and is simply wrong whenever $\rho < J$ — the
 $I_J + U(\cdot - I)U^\top$ form is exact for every rank.
 
 Transformed anomalies $T A_u$ have empirical covariance exactly equal to the
@@ -259,20 +265,23 @@ Two structural facts, both load-bearing and both conformance-checked:
   sum to zero and the posterior ensemble's mean is not silently shifted.
   In floating point the numerically-zero $\sigma$'s $U$ column need not be
   orthogonal to $\mathbf{1}$; the property survives because the modifier
-  decays *quadratically*, $(1+\sigma^2)^{-1/2} - 1 = O(\sigma^2)$, which
-  is $0.0$ exactly for $\sigma$ at rounding scale.
+  decays *quadratically*: the induced mean shift is
+  $O\bigl((\varepsilon\sigma_{\max})^2\bigr)$ rather than
+  $O(\varepsilon\sigma_{\max})$ — the modifier is exactly $0.0$ while
+  $\varepsilon\sigma_{\max} \lesssim 10^{-8}$, and negligible above it.
 - **The identity is exact in exact arithmetic**, not asymptotic in $J$. The
-  conformance suite checks it to floating-point tolerance, per the
-  exactness-test convention.
+  conformance suite checks it to floating-point tolerance
+  ({ref}`gauss-conformance`).
 
 ### Cost
 
 Whitening costs $J$ applications of $W$; the thin SVD is
-$O(J N \min(J, N))$; forming weights is $O((N + J)\,r)$ per residual and
+$O(J N \min(J, N))$; forming weights is $O((N + J)\,\rho)$ per residual and
 combining anomalies $O(JP)$ per member. A full ensemble update is
 $O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J$ whitener applications —
 which the total absorbs for structured whiteners applying in $O(N)$, and
-which dominate ($O(JN^2)$) for a dense $W$. Linear in both dimensions for
+which dominate ($O(JN^2)$) for a dense $W$ whenever $P \lesssim N^2/J$; at
+larger $P$ the $O(PJ^2)$ anomaly combination dominates instead. Linear in both dimensions for
 structured whiteners, cubic only in the ensemble size. The conditioning
 that matters degrades in the *small-noise* direction (large
 $\sigma_{\max}$, a large whitener), not the collapse direction
@@ -311,15 +320,27 @@ Rules:
   with no data-dependent shapes. They are differentiable wherever the
   singular values of `s` are distinct and nonzero. At *exactly* repeated
   or exactly zero singular values — an exactly collapsed `s`, or the
-  zero-padded columns a masked local analysis produces — the SVD's
+  zero-padded columns a masked local analysis may produce when the masking
+  drops the rank below $\min(J, N)$ — the SVD's
   gradient is `nan`, even though the functions themselves are smooth
-  there (both equal rational closed forms in `s`; see below). The
+  there — `gain_weights` equals the rational $s(s^\top s + I)^{-1}b$, and
+  `sqrt_transform` is real-analytic, the spectrum of $I + ss^\top$ being
+  bounded below by 1. The
   float-generic degeneracy of mean-centering ($\sigma_{\min} \sim
   10^{-16}$ when $N \ge J$) is not an exact tie and differentiates
-  finitely. No conditioning path in this layer differentiates the
-  primitives with respect to `s` ({ref}`gauss-jax`); an implementation
-  may restore gradients everywhere with a custom JVP routed through the
-  closed forms, but is not required to.
+  finitely. No conditioning path in this layer *requires* differentiation
+  with respect to `s` ({ref}`gauss-jax`) — a caller who differentiates an
+  update with respect to `v_samples` does differentiate through the SVD,
+  and inherits these cases. An implementation may restore gradients
+  everywhere with a custom JVP routed through the closed forms, but is not
+  required to; note that for `sqrt_transform` that means a Fréchet
+  derivative of $A \mapsto A^{-1/2}$, materially more work than
+  `gain_weights`'s rational form.
+- `sqrt_transform` imposes no centring requirement on `s`. The
+  $T\mathbf{1} = \mathbf{1}$ property of {ref}`gauss-kernel` follows from
+  $\mathbf{1}^\top s = 0$ and holds only for such `s`; on general `s` the
+  transform is still $(I + ss^\top)^{-1/2}$, and $T\mathbf{1}$ is
+  whatever that matrix makes it.
 - Both return values are functions of `s` alone, invariant to the SVD's
   sign and degenerate-rotation freedom — they equal the closed forms of
   {ref}`gauss-kernel` — so any correct thin SVD gives the same output
@@ -340,7 +361,7 @@ supplies, and the posterior that `EnsembleJoint.condition` returns
 **Fields.** `mean`, a `(n,)` array, and `cov`, a
 {class}`~pyeki.linalg.PSDLinOp` of side `n`. Construction validates the rank
 of `mean`, the operator type of `cov`, and their agreement
-(tier 2, shape-only). `n` is a property computed from `mean`.
+(tier 2, shape-only — {ref}`gauss-validation`). `n` is a property computed from `mean`.
 
 **Capabilities delegate to the covariance.** `Gaussian` defines no
 capability system of its own: each method requires specific operations of
@@ -377,7 +398,10 @@ Returns a `(n_samples, n)` array of independent draws. Requires
 ### `log_density(x)`
 
 Returns the log-density at `x`, batched: `(..., n) -> (...)`, each element a
-0-d real JAX scalar (never a Python float). Requires
+0-d real JAX scalar (never a Python float). `x` is a tier-3 operand: its
+trailing axis must be exactly `n` and its rank at least 1, checked before
+anything is computed — without that check a shorter `x` broadcasts and
+returns a finite, plausible, wrong number. Requires
 `cov.supports("whiten")` and `cov.supports("logdet")`, checked in that
 order. The value is
 
@@ -436,7 +460,9 @@ arguments: `y`, the observation, an array of rank exactly 1 and length $N$
 supporting `whiten` (`UnsupportedOpError` from the inner call otherwise).
 Precondition: `noise_cov` is nonsingular — `whiten`'s own precondition.
 The whitened formulation requires it even though $\widehat{C}_{vv} + R$
-is invertible for singular $R$; a singular noise operator that nonetheless
+is generically invertible for singular $R$ (it fails only when
+$\operatorname{nullity}(R) + \operatorname{nullity}(\widehat{C}_{vv}) > N$);
+a singular noise operator that nonetheless
 types as whitening-capable yields `nan` per tier 4. The two update methods
 return a `(J, P)` array of updated members, row $j$ updating member $j$ —
 they update $u$ only, since EKI re-evaluates the forward model to get the
@@ -502,12 +528,17 @@ $T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centred, so
 the two summands above really are the posterior mean and posterior
 anomalies.
 
-`transform_update`'s output has sample moments equal to the posterior
-moments exactly, per realization. `pathwise_update`'s output has sample
+`pathwise_update`'s output has sample
 mean and sample covariance (divisor $J-1$) that are *unbiased estimators*
-of the same posterior moments, with per-realization spread of order
-$K R K^\top / J$; the unbiasedness of the covariance is particular to the
-$J-1$ divisor, whose centring of the perturbations cancels exactly.
+of the same posterior moments. The sample mean has variance exactly
+$K R K^\top / J$; the sample covariance fluctuates at the usual
+$O(J^{-1/2})$ rate, with entrywise standard deviation of order
+$\bigl(C^{\text{post}}_{ii}(KRK^\top)_{jj} +
+C^{\text{post}}_{jj}(KRK^\top)_{ii} +
+2(KRK^\top)_{ij}^2\bigr)^{1/2}\!/\sqrt{J}$ — in relative terms
+$\sqrt{J}$ times looser than the mean's. The unbiasedness of the
+covariance is particular to the $J-1$ divisor, whose centring of the
+perturbations cancels exactly.
 Individual pathwise members are not posterior draws — conditional on the
 ensemble, member $j$ is distributed
 $\mathcal{N}\bigl(u_j + K(y - v_j),\, K R K^\top\bigr)$ — so no
@@ -517,7 +548,7 @@ layer's decision, not this layer's.
 ### `condition(y, noise_cov)`
 
 Moment-form conditioning: the same posterior that `transform_update`
-represents as members, returned as a {class}`Gaussian` — for sampling the
+represents as members, returned as a `Gaussian` — for sampling the
 posterior at any size, and for diagnostics. The result has
 
 $$
@@ -555,20 +586,30 @@ covariance deliberately.
 
 This method needs one new elementary operator, sketched here and to be
 specified in the operator contract when it is added. `PSDLowRank` holds a
-single data field, a factor `F` of shape `(n, k)` with $k \ge 1$ and no
-other relation imposed between `n` and `k`, and represents $F F^\top$. It
+single data field — `PSDLowRank(factor_array)`, an `Array` of shape
+`(n, k)` with $n, k \ge 1$ and no other relation imposed between them —
+and represents $F F^\top$. Its `capabilities()` is
+`frozenset({"diag", "factor"})` plus the derived matrix siblings. It
 implements the required pieces — `shape` ($(n, n)$ from `F`),
 `batch_shape` (the leading axes of `F` beyond rank 2), and the delegating
 PSD `rmatvec` — plus `matvec` ($F(F^\top x)$, two trailing-axis
 contractions), `diag` (rowwise $\sum_j F_{ij}^2$), `to_dense` ($FF^\top$
 assembled from the stored array, never via `matvec`), and `factor`
 (wrapping `F` as a `Dense`). It implements **no** `_solve`, `_whiten`, or
-`_logdet`: a static class-level capability decision — which the operator
-contract's singular-by-construction rule *requires* whenever the stored
-factor is thin ($k < n$), and which this class extends to every width.
-Nothing is computed at construction: the stored field *is* the
-factorization. Like every operator, it must pass `check_operator` before
-merging.
+`_logdet`. Omitting `_solve` and `_whiten` is *required* by the operator
+contract's singular-by-construction rule whenever the stored factor is
+thin ($k < n$); extending the omission to every width, and to `_logdet`,
+is this class's own static decision. Nothing is computed at construction:
+the stored field *is* the factorization.
+
+Two process obligations come with it. It must pass `check_operator` — but
+that is not a sufficient gate here: a literal-minimum implementation
+passes while accepting a rank-3 factor (reporting a non-empty
+`batch_shape` on a directly constructed operator) and $k = 0$, so the
+tier-2 rank and positivity checks must be written in by hand. And it must
+be added to the operator contract's public-surface list
+({ref}`contract-surface`), which is exhaustive and does not yet name
+it.
 :::
 
 (gauss-prng)=
@@ -587,7 +628,9 @@ merging.
   flags (`jax_threefry_partitionable`, x64 mode, PRNG implementation).
   pyEKI never changes the draw on its side; doing so is a breaking change.
   The test suite snapshots both draws so a JAX-side stream change is
-  detected rather than silently absorbed.
+  detected rather than silently absorbed. The pinning is over evaluation
+  in one mode: `jit`-compiled and eager evaluation of the same call may
+  differ in the last bits, as anywhere in JAX.
 - Everything else is deterministic. There is exactly one source of
   randomness per stochastic call, which is what makes EKI runs resumable
   from a stored key — a requirement the EKI layer inherits and this layer
@@ -600,18 +643,27 @@ The four-tier scheme of the operator contract ({ref}`contract-validation`)
 applies with one extension: everything static is checked always, values
 only on request — and, unlike the operator layer, tier 4 here also runs at
 *call* time: in debug mode the conditioning methods check `y`, and the
-primitives their operands, for finiteness. What each tier means here:
+primitives their operands, for finiteness. Like the operator layer's,
+these checks read array values and are therefore skipped on tracers: under
+`jit` or `vmap` they do not run, in debug mode or otherwise. A singular
+`noise_cov` is not among them — nothing here can detect it cheaply; it
+surfaces as `nan`. What each tier means here:
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
-| 2. construction | ranks, static sizes, operator types, cross-field shape agreement | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
-| 3. call | operand core shapes and operator arguments | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of samples, means, and observations; a singular `noise_cov` (caught at the operator's own construction) | violations yield `nan` or a silently wrong posterior outside debug mode |
+| 2. construction | ranks, static sizes, operator types, cross-field shape agreement; a vmapped-family `cov` | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
+| 3. call | operand core shapes, operator arguments, and static non-array arguments; a vmapped-family `noise_cov` — `ValueError` for shape violations, `TypeError` for type violations, per the taxonomy below | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
+| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y` and the primitives' `s` and `b` at call | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
 obligations: name the object (its `repr`), the method, the expectation, and
 the offending value's shape or type.
+
+Within a method the checks run in the operator layer's order: the family
+guard ({ref}`gauss-jax`) first, then the required-capability checks in the
+order the method names them, then tier-3 operand and operator-argument
+validation, then — in debug mode — tier-4 value checks.
 
 The layer defines **no new exception types**. `UnsupportedOpError` arises
 only from the operator layer, propagated unmodified from the covariance
@@ -624,10 +676,12 @@ The explicit escape hatch is the same one as everywhere:
 | --------- | ------ |
 | wrong rank / disagreeing shapes at construction | `ValueError` |
 | non-operator or wrong-level covariance field | `TypeError` |
-| `y`, `s`, or `b` core shape mismatch at call | `ValueError` |
+| `y`, `x`, `s`, or `b` core shape mismatch at call | `ValueError` |
 | `noise_cov` not a `PSDLinOp` / wrong side | `TypeError` / `ValueError` |
 | `n_samples` not a positive Python `int` | `TypeError` / `ValueError` |
 | covariance lacking `factor` / `whiten` / `logdet` where required | `UnsupportedOpError`, from the operator layer |
+| any operation or array-computing property on a vmapped family | `ValueError`, at call — apply the family under `jax.vmap` |
+| a vmapped-family `cov` at construction, or `noise_cov` at call | `ValueError` |
 | violated value precondition | `ValueError` in debug mode; `nan` or a silently wrong result otherwise |
 
 (gauss-jax)=
@@ -684,11 +738,13 @@ per-class; here is its gauss instantiation:
   naming the object, the operation, the batch shape, and the remedy —
   apply the family under `jax.vmap` — before any capability or operand
   check. The static `int` properties (`n`, `n_members`, `u_dim`,
-  `v_dim`), `batch_shape` itself, and `repr` still answer.
-- **Family repr** wraps the ordinary form, as for operators:
-  `vmapped(EnsembleJoint(n_members=100, u_dim=12, v_dim=40), batch=(8,))`;
-  and `repr` never raises, falling back to the operator contract's marker
-  form on unreadable leaves.
+  `v_dim`), `batch_shape` itself, and `repr` still answer — and the size
+  properties report **core** (trailing) sizes, never batch sizes, exactly
+  as an operator's `shape` does: `Gaussian.n` is `mean.shape[-1]`, and
+  `EnsembleJoint`'s three are `u_samples.shape[-2]`, `u_samples.shape[-1]`
+  and `v_samples.shape[-1]`.
+- **Family repr** wraps the ordinary form, as for operators; the form and
+  the never-raises rule are in {ref}`gauss-repr`.
 
 (gauss-consumers)=
 ## How the layers above consume this one
@@ -715,19 +771,39 @@ scaling — a traced increment flows through the 0-d scalar field, so the
 adaptive schedule never re-factorizes the noise. The deterministic variant
 is the same loop with `transform_update(y, noise_cov / dbeta)` and no key.
 
-Two facts the driver can exploit without any extra surface here. First, a
-candidate tempering increment rescales the kernel, not the data:
-$S(R/\delta) = \sqrt{\delta}\,S(R)$, so an adaptive-step search reuses
-one SVD across candidates through the primitives
-($\sigma_i \mapsto \sqrt{\delta}\,\sigma_i$) instead of recomputing
-it per candidate. Second, forward-model failures are handled by *sample
-preprocessing*, not by a masked joint: with validity mask $m_j$ and $J_v$
-valid members, replacing each member by
+Two facts shape how the driver uses this layer. First, a candidate
+tempering increment rescales the kernel, not the data: the whitener of
+$R/\delta$ is $\sqrt{\delta}\,W$, so
+$S(R/\delta) = \sqrt{\delta}\,S(R)$ **and** the whitened residual
+becomes $\sqrt{\delta}\,Wr$. Both rescalings enter, giving weight
+multipliers $\delta\sigma_i/(1+\delta\sigma_i^2)$ and transform
+modifiers $(1+\delta\Sigma^2)^{-1/2} - I$ from a single base SVD —
+rescaling $\sigma_i$ alone is wrong by $1/\sqrt{\delta}$. The public
+primitives cannot exploit this, since each recomputes its own SVD
+({ref}`gauss-kernel`); an adaptive search that wants the saving needs an
+internal entry point, which this layer does not currently expose
+({ref}`gauss-excluded`).
+
+Second, forward-model failures are handled by *sample preprocessing*, not
+by a masked joint: with validity mask $m_j$ and $J_v \ge 2$ valid
+members, replacing each member by
 $\hat u + m_j\,(u_j - \hat u)\,\sqrt{(J-1)/(J_v-1)}$ (with $\hat u$
-the valid-member mean, and likewise for $v$) makes the fixed-$J$ joint's
-moments equal the masked moments exactly, keeps shapes static under
-`jit`, and lets failed members rejoin at the posterior mean. This is why
-the anomaly divisor stays fixed ({ref}`gauss-excluded`).
+the valid-member mean, and the *same* mask applied to $v$ — a failed
+evaluation invalidates the pair) makes the fixed-$J$ joint's moments,
+cross-covariance included, equal the masked moments exactly, and keeps
+shapes static under `jit`. Failed members rejoin at the posterior mean
+under `transform_update` and `condition`; under `pathwise_update` they
+land at the posterior mean plus their own perturbation, a
+$\mathcal{N}(0, KRK^\top)$ draw about it. Surviving members are moved
+outward by the factor $\sqrt{(J-1)/(J_v-1)} > 1$ relative to a genuinely
+$J_v$-member analysis — that is the moment matching working, but it is a
+real change to the parameters handed to the next forward-model
+evaluation. Two preconditions are the driver's to enforce, because both
+fail silently here: $J_v \ge 2$ (at $J_v \le 1$ the rescale is `inf` or
+`nan` and the whole ensemble becomes `nan`), and mask identity between
+$u$ and $v$ (differing masks corrupt $\widehat{C}_{uv}$ with no
+exception). This is why the anomaly divisor stays fixed
+({ref}`gauss-excluded`).
 
 **Domain localization** (`pyeki.localize`, planned) runs one small analysis
 per parameter block against its nearby observations, with per-observation
@@ -739,28 +815,34 @@ prediction anomalies and residuals, build the local noise covariance as
 apply to its own $u$-anomalies. The primitives' array-purity, their
 one-SVD-per-call rule, and the block anatomy that
 {ref}`contract-composites` makes contractual are what this plan relies on.
-Two idioms make the fixed-size-neighbourhood plan exact: zeroing column
-$i$ of `s` and entry $i$ of each residual reproduces the analysis with
-observation $i$ removed, elementwise, so padded slots mask to exact no-ops
-under static shapes; and the per-block noise must align with the noise
-operator's contractual `block_shapes` — extracting a principal submatrix
-of a *correlated* block is not an operator-layer operation, so
-partial-block neighbourhoods require diagonal noise or block-aligned
-neighbourhoods.
+Two idioms make the fixed-size-neighbourhood plan exact. Zeroing column
+$i$ of `s` and entry $i$ of each *whitened* residual is exactly the
+analysis in which whitened coordinate $i$ is absent — elementwise, for
+both primitives — so padded slots mask to exact no-ops under static
+shapes. That is "observation $i$ removed" only when the whitener does not
+mix coordinate $i$ with the kept ones: for correlated noise a within-block
+mask is not an observation removal. Hence the second idiom: the per-block
+noise must align with the noise operator's contractual `block_shapes` —
+extracting a principal submatrix of a *correlated* block is not an
+operator-layer operation, so partial-block neighbourhoods require diagonal
+noise or block-aligned neighbourhoods.
 
 **The test suite** holds the reference implementation. On small problems
 the dense Bayes formulas are written out in the tests themselves — plain
 dense linear algebra over the empirical moments, independent of this
 layer's code — and every conditioning method is checked against them
 ({ref}`gauss-conformance`). Exact-moment fixtures extend the comparison to
-analytic posteriors: for any target joint with a **square or thin**
-covariance factor $G$ of width $k \le P + N$ (reduce a wide `factor()`
-output first), an ensemble of $J \ge k + 1$ members whose empirical
+analytic posteriors: for any target joint with a covariance factor $G$ of
+width $k$, an ensemble of $J \ge k + 1$ members whose empirical
 moments equal the target's exactly can be constructed — concretely, take
 the complete QR of $\mathbf{1} \in \mathbb{R}^J$, let $E$ be its last
 $k$ columns (orthonormal, each $\perp \mathbf{1}$), and set the members
 to $\mu + \sqrt{J-1}\,E\,G^\top$ — so closed-form linear-Gaussian
-posteriors are reachable through `EnsembleJoint` alone. A tempered run's posterior
+posteriors are reachable through `EnsembleJoint` alone. Only $J \ge k + 1$
+binds (at $J = k$ the construction fails, and silently); reducing a wide
+factor first — a thin QR of $G^\top$, or an eigendecomposition of
+$GG^\top$, never a Cholesky, which raises on the rank-deficient targets
+that matter — merely lowers the ensemble size that condition demands. A tempered run's posterior
 telescoping to the one-shot posterior is the EKI layer's test; the
 per-step exactness it composes from lives here.
 
@@ -769,7 +851,12 @@ per-step exactness it composes from lives here.
 
 Type name and static sizes, never array contents, matching the operator
 rule ({ref}`contract-repr`): `Gaussian(n=12)`,
-`EnsembleJoint(n_members=100, u_dim=12, v_dim=40)`.
+`EnsembleJoint(n_members=100, u_dim=12, v_dim=40)`. A vmapped family wraps
+that form and names its batch —
+`vmapped(EnsembleJoint(n_members=100, u_dim=12, v_dim=40), batch=(8,))`
+({ref}`gauss-jax`) — and `repr` never raises: an instance whose sizes
+cannot be read falls back to a marker form, unspecified beyond its not
+raising.
 
 (gauss-surface)=
 ## Public surface
@@ -786,7 +873,9 @@ own test suite, since the class set is closed.
 The layer has no user-extension point, so conformance is not a public
 harness but a set of obligations on `tests/`. Two rules govern the
 reference: exactness tests check against closed forms, not tolerances
-chosen to pass ({doc}`linop-contract` sets the convention), and **the dense
+chosen to pass — where a closed form exists the suite compares against it,
+at a tolerance of a few $\varepsilon$ times the natural scale of the
+quantity — and **the dense
 reference is hand-written in the tests** — plain dense linear algebra over
 means, anomalies, and materialized operators, never routed through
 `gain_weights`, `sqrt_transform`, or any other code of this layer — so
@@ -797,7 +886,10 @@ must verify at least:
    the dense $K r$ elementwise on small random problems, in all three shape
    regimes $N > J$, $N = J$, $N < J$, with `b` at batch ranks 0, 1, and 2.
 2. **Whitener invariance**: two noise operators representing the same $R$
-   with different whiteners yield identical weights. (No shipped operator
+   with different whiteners yield the same weights to floating-point
+   tolerance — the invariance is exact in exact arithmetic, but the two
+   routes round differently, so this is not the bit-exact SVD invariance
+   of {ref}`gauss-primitives`. (No shipped operator
    pair differs — Cholesky uniqueness makes every in-package whitener
    identical — so the test defines a local operator whose `_whiten`
    applies a fixed orthogonal rotation of a valid whitener.)
@@ -806,12 +898,20 @@ must verify at least:
    ($\sigma_{\max} \lesssim 10^2$, where that reference is trustworthy —
    forming $I + ss^\top$ squares the conditioning, so at large
    $\sigma_{\max}$ the *reference* is the inaccurate side), including the
-   rank-deficient case $r < J$ that the naive thin-SVD formula gets wrong;
-   satisfies the invariant $T\,(I + ss^\top)\,T^\top = I$ at large
-   $\sigma_{\max}$, with tolerances scaling as
-   $\varepsilon \max(1, \sigma_{\max})$; and satisfies $T = T^\top$
-   and $T\mathbf{1} = \mathbf{1}$ (the latter to a tolerance scaling
-   with $\sigma_{\max}$).
+   case $\rho < J$, i.e. $N < J$, that the naive thin-SVD formula gets wrong.
+   At large $\sigma_{\max}$ it instead satisfies the invariant in its
+   **stably formed** version,
+   $T T^\top + (Ts)(Ts)^\top = I$, to a tolerance scaling as
+   $\varepsilon \max(1, \sigma_{\max})$ — the algebraically equivalent
+   $T\,(I + ss^\top)\,T^\top = I$ must not be used, because forming
+   $ss^\top$ reintroduces the $\sigma_{\max}^2$-sized intermediate whose
+   rounding this check exists to avoid, pushing the achievable residual to
+   $\varepsilon\sigma_{\max}^2$. It satisfies $T = T^\top$ for every
+   `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centred `s`**
+   ($\mathbf{1}^\top s = 0$, which is the only case the conditioning
+   kernel produces) to a tolerance scaling as
+   $\varepsilon^2 \sigma_{\max}^2$; for general `s` no such identity
+   holds ({ref}`gauss-primitives`).
 4. **Moment exactness of the posterior**: `transform_update`'s output has
    sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;
@@ -831,14 +931,18 @@ must verify at least:
 7. **Marginal formulas**: `sample` matches its pinned elementwise
    definition; `log_density` matches the dense closed form at batch ranks
    0, 1, and 2 and differentiates.
-8. **Degeneracy**: zero prediction anomalies (constructed directly — an
-   exactly collapsed ensemble yields exactly zero anomalies only when the
-   mean rounds exactly) make both updates the identity on `u_samples` —
+8. **Degeneracy**: zero prediction anomalies — every row of `v_samples`
+   given the *same, exactly representable* value, since a collapsed
+   ensemble of arbitrary values leaves anomalies at $O(\varepsilon)$
+   rather than bit-zero — make both updates the identity on `u_samples` —
    bit-exact for `pathwise_update`, to round-off for `transform_update`,
    which reconstructs $\bar u + a_j$ — and `condition` return the prior
    marginal's moments; $J = 2$ and $N = 1$ work; a collapsed ensemble
    with finite inputs produces no `nan`.
-9. **Capability propagation**: a noise covariance without `whiten`, and a
+9. **Capability propagation** (no shipped `PSDLinOp` disclaims any
+   operation: `PSDLowRank` supplies the missing `whiten` and `logdet`, and
+   the `factor` case needs a test-local `PSDLinOp` implementing no
+   `_factor`): a noise covariance without `whiten`, and a
    covariance without `factor` or `logdet`, raise `UnsupportedOpError`
    from the conditioning methods, `sample`, and `log_density`
    respectively — and `log_density` on the posterior `condition` returns
@@ -860,11 +964,18 @@ must verify at least:
     `batch_shape` still answer; genuine construction with a family
     covariance raises ({ref}`gauss-jax`).
 
+Beyond the tests, the implementation PR owes two deliverables named
+earlier: the layer's user-guide page ({ref}`gauss-scope`) and the
+`PSDLowRank` operator with its operator-contract entry
+({ref}`gauss-ensemble`).
+
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
 a mixed-representation perturbation, a mean shift from an uncentred
 transform, a `nan` gradient at an exactly collapsed `s`, and a singular
-noise covariance turning an update into silent `nan` — under the same
+noise covariance turning an update into an all-`nan` result with no
+exception (assert the `nan`, so the day it starts raising is visible) —
+under the same
 do-not-delete rule as the operator layer's.
 
 (gauss-excluded)=
@@ -897,10 +1008,13 @@ $(\widehat{C}_{vv} + R)^{-1}$ is the same algebra as the whitened SVD with
 worse arithmetic: it forms
 $(J-1)I_J + A_v R^{-1} A_v^\top = (J-1)(I + S S^\top)$ — and *forming*
 the Gram rounds away singular values below
-$\sqrt{\varepsilon}\,\sigma_{\max}$: the effective conditioning of the
-formation is $\kappa(S)^2$, even though the assembled matrix itself is
-regularized by the shift. $\kappa(S)$ degrading is the failure mode this
-layer is designed around. The SVD route
+$\sqrt{\varepsilon}\,\sigma_{\max}$, even though the assembled matrix
+itself is regularized by the shift. The loss is governed by
+$\sigma_{\max}$, not by $\kappa(S)$: collapse ($\sigma \to 0$) costs the
+Gram route nothing, while at $\sigma_{\max} = 10^8$ it destroys every
+singular value below $1.5$ — the largest gain multipliers
+$\sigma/(1+\sigma^2)$ among them — for a relative error around $10^{-1}$
+where the SVD route holds $10^{-8}$. The SVD route
 gets the bounded multiplier $\sigma/(1+\sigma^2)$ for free; a factorization
 of the formed Gram matrix does not. Its one advantage — needing `solve` on
 the noise instead of `whiten` — has no consumer, since `whiten` is the
@@ -916,9 +1030,13 @@ the tests.
 
 **A reified gain object.** Computing the SVD once and reusing it across
 conditioning methods on the same `(joint, noise_cov)` pair would need a
-returned decomposition object. Each EKI step calls exactly one method once,
-so today it would be surface without a consumer; the conditioning
-primitives already serve anyone assembling custom flows.
+returned decomposition object. Each EKI step calls exactly one method
+once, so today it would be surface without a consumer; the conditioning
+primitives already serve anyone assembling custom flows. The one
+prospective consumer is an adaptive-step search, which could reuse a
+single SVD across candidate increments ({ref}`gauss-consumers`); it pays
+one SVD per candidate until that consumer exists and justifies the
+object.
 
 **Batched observations.** `y` is one observation vector. A family of
 updates — multiple observations, multiple noise levels — is `jax.vmap`
