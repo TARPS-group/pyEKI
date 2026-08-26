@@ -41,7 +41,10 @@ something callers assemble from `cholesky`.
 ## The conditioning kernel
 
 Let $\Theta'$ and $G'$ be mean-centred parameter and prediction anomalies, $J$
-the ensemble size, and define the **whitened anomaly matrix**
+the ensemble size, and define the **whitened anomaly matrix**. (This page
+writes members as *columns*, $G' \in \mathbb{R}^{N \times J}$; the
+normative {doc}`gaussian-contract` writes them as rows — its $U$ and $V$
+are this page's $V$ and $U$.)
 
 $$
 S := \frac{1}{\sqrt{J-1}}\,R^{-1/2}G', \qquad S = U\Sigma V^\top \ \text{(thin SVD)}.
@@ -57,33 +60,43 @@ This is the form pyEKI will implement, in preference to the algebraically
 equivalent Woodbury identity applied to the normal equations. Four reasons:
 
 - **Nothing is squared.** The competing route forms
-  $(J-1)I + G'^\top R^{-1} G'$ and factorizes it, squaring the condition number
-  of $S$ — which is exactly the quantity that degrades as the ensemble
-  collapses in late tempering steps.
+  $(J-1)I + G'^\top R^{-1} G'$ and factorizes it. *Forming* that Gram
+  rounds away every singular value of $S$ below
+  $\sqrt{\varepsilon}\,\sigma_{\max}$ — and those are the ones carrying
+  the largest gain multipliers. The loss is governed by $\sigma_{\max}$
+  (small noise, a large whitener), not by $\kappa(S)$: ensemble collapse
+  alone, which drives $\sigma_{\min} \to 0$, costs neither route
+  accuracy.
 - **The multiplier is bounded unconditionally.** $\sigma/(1+\sigma^2) \le 1/2$
   for all $\sigma \ge 0$, so the gain cannot blow up however ill-conditioned
   the ensemble becomes, and no regularization parameter needs tuning.
 - **It is one object away from the deterministic variant.** The square-root
-  transform is $T = V(I+\Sigma^2)^{-1/2}V^\top$, reusing the same
-  decomposition.
+  transform is $T = I_J + V\bigl((I+\Sigma^2)^{-1/2} - I\bigr)V^\top$,
+  reusing the same decomposition. The identity completion matters: the
+  naive $V(I+\Sigma^2)^{-1/2}V^\top$ omits the identity on the orthogonal
+  complement and is wrong whenever the thin SVD's rank is below $J$ — see
+  the {doc}`gaussian-contract` for the normative form.
 - **The update stays in the ensemble span**, $\theta^{(j)} \mapsto \theta^{(j)}
   + \Theta' w^{(j)}$ with $w^{(j)} \in \mathbb{R}^J$, so no matrix of parameter
   or observation dimension is ever formed.
 
-Cost is $O(NJ)$ to whiten, $O(NJ^2)$ for the thin SVD and $O(PJ)$ to apply
+Cost is $O(NJ)$ to whiten (for a whitener applying in $O(N)$ per vector;
+a dense whitener costs $O(N^2)$ each), $O(NJ^2)$ for the thin SVD and $O(PJ)$ to apply
 $\Theta'$ — linear in both the observation dimension $N$ and parameter
-dimension $P$, cubic only in the ensemble size.
+dimension $P$ for a structured whitener, cubic only in the ensemble size;
+a dense whitener adds its own $O(N^2J)$.
 
-### Choosing a variant
+### The algorithm space
+
+A survey, not a dispatch plan: `pyeki.gauss` routes everything through the
+whitened SVD and selects nothing at runtime ({doc}`gaussian-contract`).
 
 | regime | method | cost |
 | --- | --- | --- |
-| $N \le J$ | dense factorization of the predictive covariance | $O(N^3)$ |
-| $J < N$, noise whitenable | whitened SVD (the default) | $O(NJ^2)$ |
+| $J < N$, noise whitenable | whitened SVD — what pyEKI implements | $O(NJ^2)$ |
 | $N$ very large, noise block diagonal | same, whitening per block | $O(NJ^2)$ |
 | localized | per-block whitened SVD on local data | $O(n N_{\text{loc}} J^2)$ |
-| exact joint, small | direct factorization | $O(N^3)$ |
-| exact joint, large | iterative solve | iterations $\times$ `matvec` |
+| $N \le J$ | dense factorization of the predictive covariance — deferred as a possible internal optimization behind the same signatures | $O(N^3)$ |
 
 ## Localization
 

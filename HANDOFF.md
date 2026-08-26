@@ -16,12 +16,12 @@ six elementary operators, nine composites with factory functions, a debug
 mode for value
 preconditions, and a 14-check conformance harness; the full test suite passes.
 Documentation builds: landing page, installation, quickstart, operator
-catalogue, a guide to writing an operator, the operator contract, design
-notes, and an API reference.
+catalogue, a guide to writing an operator, the operator contract, the
+joint Gaussian contract, design notes, and an API reference.
 
-**Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design for
-all three is in `docs/design.md`, which is the single most useful thing to read
-before writing any of them.
+**Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design
+background for all three is in `docs/design.md`; `pyeki.gauss` additionally
+has its full normative contract in `docs/gaussian-contract.md`.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -32,7 +32,8 @@ pyEKI. Nothing domain-specific should come back across.
 
 ### 1. `Kron` (start here)
 
-The one operator whose absence blocks the rest. Two variants, and they are not
+The operator that blocks the rest of the linalg roadmap (`pyeki.gauss` has
+its own linalg prerequisite, `PSDLowRank`, listed under step 2). Two variants, and they are not
 the same code:
 
 - **Square** `Kron(A, B)` representing $A \otimes B$. Convention: the first
@@ -59,16 +60,22 @@ their preconditions, including a log-determinant term that is easy to omit.
 
 ### 2. `pyeki.gauss`
 
-The conditioning layer. `docs/design.md` gives the kernel: the whitened-SVD
-gain, which is the form to implement — not the algebraically equivalent
-Woodbury identity on the normal equations, which squares a condition number
-that is already the problem.
+The conditioning layer. Its normative design is
+`docs/gaussian-contract.md` — adversarially reviewed and ready to
+implement; `docs/design.md` is background, giving the whitened-SVD kernel
+and why it beats the Woodbury route on the normal equations. The shape
+differs from the suggestion this section previously recorded: one closed `EnsembleJoint` class plus a
+`Gaussian` marginal and two array-level conditioning primitives; no
+operator-represented joint (the dense reference is hand-written in the
+tests, deliberately); and the whitened-SVD kernel as the single algorithm.
+The contract's *Deliberately excluded* section records why each earlier
+suggestion was dropped.
 
-Suggested shape: a `JointGaussian` protocol supplying means, a `gain_apply`,
-and joint sampling; two implementations, one from ensemble anomalies and one
-from structured operators; and two conditioning functions, moment-based and
-pathwise. The pathwise form is what EKI uses; the moment form is the reference
-the tests compare against.
+Two deliverables the contract names and this list previously did not: the
+layer needs a new operator, **`PSDLowRank`** (specified in the Gaussian
+contract, to be added to `pyeki.linalg` and to the operator contract's
+public surface, with tier-2 validation `check_operator` will not catch),
+and the implementation PR must add the layer's user-guide page.
 
 ### 3. `pyeki.eki`
 
