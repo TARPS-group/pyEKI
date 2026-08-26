@@ -13,13 +13,12 @@ default that a documented reason may override, and *may* states a
 permission. {doc}`design` records *why* the load-bearing decisions were
 made; this page records *what* they require.
 
-:::{admonition} Status: specification ahead of code
-:class: important
+:::{admonition} Status
+:class: note
 
-This document describes the design the implementation is being brought to,
-not the layer as currently shipped. Where the two disagree, this document
-wins. {ref}`contract-changes` lists every difference. The section will be
-removed once the implementation conforms.
+This page is normative and the implementation conforms to it. Where the
+two are ever found to disagree, this page wins and the implementation is
+defective; substantive changes to the layer change this page first.
 :::
 
 ## Scope
@@ -68,8 +67,8 @@ Three rules govern the hierarchy:
    every dispatch decision available at trace time.
 
 `LinOp` is an abstract base class: instantiating a subclass that lacks any
-required piece (`shape`, `_matvec`, `_rmatvec`, `_to_dense`) fails at
-instantiation, not on first use.
+required piece (`shape`, `batch_shape`, `_matvec`, `_rmatvec`,
+`_to_dense`) fails at instantiation, not on first use.
 
 ## Shape contract
 
@@ -83,17 +82,19 @@ then columns, matching the dense array `to_dense()` returns.
 - `SquareLinOp` adds `n`, the side length, equal to both entries of
   `shape`.
 - **Operators are unbatched.** Every stored array has exactly its core
-  rank: a `Dense` stores a 2-D array, a `Diagonal` a 1-D array. The
-  user-facing constructors — classmethods like `from_matrix` and the
-  factories — enforce this exactly; the storing constructor enforces only
-  a rank *floor*, for reasons the pytree machinery imposes (see
-  {ref}`contract-validation` and {ref}`contract-batching-operators`). A
-  "batch of operators" is expressed with `jax.vmap` over the operator
-  pytree, never by handing arrays with extra leading axes to a strict
-  constructor.
+  rank: a `Dense` stores a 2-D array, a `PSDDiagonal` a 1-D array. Every
+  constructor enforces this exactly — which is safe because pytree
+  unflattening bypasses the constructor (see {ref}`contract-validation`
+  and {ref}`contract-batching-operators`). A "batch of operators" is
+  expressed with `jax.vmap` over the operator pytree, never by passing
+  arrays with extra leading axes.
 - **Shapes are strictly positive.** Both entries of `shape` are at least
   1; the strict constructors reject empty operators. (The `k` axis of a
   matrix *operand* may be 0 — see the batch contract.)
+- **`batch_shape` names the batch axes.** A second static property,
+  `()` for every directly constructed operator and non-empty only on the
+  vmapped families that pytree reconstruction produces — see
+  {ref}`contract-families`.
 
 (contract-batch)=
 ## Batch contract
@@ -200,22 +201,85 @@ This is the only supported way to batch an operator. Handing batched
 arrays to a strict constructor (`Dense.from_matrix` on a 3-D array) is
 rejected.
 
-The mechanics deserve precision, because they dictate where validation
-may live. *Inside* a `vmap` trace, each leaf is presented at its unbatched
-core shape, so strict checks would pass there. But at the **vmap exit
-boundary** — and on every other unflatten of a batched family — the
-operator is reconstructed through its *storing constructor* with fully
-batched concrete leaves, outside any trace. Exact-rank enforcement in the
-storing constructor would therefore make the family above unconstructible.
-Hence the split stated in the shape contract: **classmethods and
-factories, which are never on an unflatten path, enforce exact core rank;
-the storing constructor rejects only rank below the core** and accepts
-extra leading axes. An operator whose leaves carry extra leading axes is a
-*vmapped family*: it is valid as a `vmap` argument and for pytree
-operations, and nothing else — the contract defines no behaviour for
-calling its methods directly (its `shape` reads only the trailing core
-axes). The conformance suite checks that constructing and returning an
-operator inside `vmap` round-trips.
+The mechanics deserve precision. *Inside* a `vmap` trace, each leaf is
+presented at its unbatched core shape, so constructor validation passes
+everywhere user code actually constructs an operator — eagerly, under
+`jit`, or inside `vmap`. At the **vmap exit boundary** — and on every
+other pytree unflatten — the family is rebuilt with fully batched
+concrete leaves, outside any trace; that reconstruction **bypasses the
+constructor entirely** (`@linop` registers an unflatten that allocates
+the instance and sets its fields directly), so strict validation and
+batched reconstruction never meet. An operator whose leaves carry extra
+leading axes is therefore constructible only as a pytree reconstruction —
+a *vmapped family*. Families are **legible but inert**: they identify
+themselves through `batch_shape` and refuse direct operation calls with a
+specified error ({ref}`contract-families`). The conformance suite checks
+that constructing and returning an operator inside `vmap` round-trips.
+
+(contract-families)=
+### Families: `batch_shape`, legibility, inertness
+
+Every operator has a **`batch_shape`** property — required and
+implemented per class, like `shape` — a concrete tuple of Python ints
+computed from static information only:
+
+- Each data field contributes the leading axes of its stored array beyond
+  that field's core rank; a child operator contributes its own
+  `batch_shape`. The contributions combine by broadcasting
+  (`jnp.broadcast_shapes` semantics), and incompatible contributions raise
+  `ValueError` — a hand-assembled pytree with inconsistently stacked
+  leaves is diagnosed at the property, not by downstream shape wreckage.
+- An operator with no data leaves (`Identity`) has `batch_shape == ()`
+  always.
+- Directly constructed operators always have `batch_shape == ()` — the
+  strict constructors guarantee it. Non-empty batch shapes arise only
+  from pytree reconstruction. Inside a `vmap` trace, leaves are presented
+  at core shape, so `batch_shape == ()` there and every operation works,
+  member by member.
+
+**Inertness.** When `batch_shape` is non-empty, every operation the type
+defines raises `ValueError`, with a message naming the operator, the
+operation, the batch shape, and the remedy — apply the family under
+`jax.vmap`. (Operations below the operator's level stay absent from the
+type and raise `AttributeError`, as always.) The arithmetic dunders are
+guarded the same way, on either operand: scaling or composing a family
+raises rather than building an inert wrapper. This *family guard* runs
+before the capability gate, which runs before operand validation.
+Introspection stays available, because introspection is how a family is
+recognized: `shape` (the core shape), `n`, `batch_shape`, `supports`,
+`capabilities`, and the `T` property (a view whose `batch_shape` is the
+wrapped operator's) all work on families — structured `T` overrides
+included, which must rebuild through the constructor-bypassing path
+rather than the strict constructor.
+
+**Legibility.** A family's `repr` wraps the ordinary type-and-shape form
+and names the batch — `vmapped(DensePSD(3, 3), batch=(100,))` — so a
+family is visible in a debugger and in error messages instead of
+impersonating a single operator, and the wrapper itself says how the
+object is meant to be used.
+
+:::{admonition} Future extension: implicit batching (auto-vmap)
+:class: note
+
+The inertness guard is designed to be *loosened*, never worked around. A
+future revision may define direct operation calls on families by
+`vmap`-ing the hook in the public layer, with gufunc-style broadcasting
+between `batch_shape` and the operand's leading batch axes — member `i`
+applied to vector `i` when they align, one vector broadcast across all
+members otherwise. Hooks would stay written for the unbatched case (the
+batching lives once, in the public layer), constructors would stay
+strict, and the upgrade is backward compatible by construction: code that
+was correct under the guard only ever saw `batch_shape == ()`, so turning
+errors into behaviour breaks nothing.
+
+It is deferred, not rejected, for three reasons: no planned consumer
+calls operations on a family directly (every roadmap use applies families
+under `jax.vmap`, which is already fully defined); the semantics carry
+real specification cost (broadcast-alignment rules, `logdet` and `diag`
+returning `batch_shape`-shaped arrays, a conformance suite doubled over
+batched instances); and eager-mode auto-`vmap` adds per-call dispatch
+overhead. If a consumer emerges, this box becomes a contract section.
+:::
 
 ## Method contracts
 
@@ -241,20 +305,22 @@ Three clauses pin the division of labour:
   implements the full batch contract itself — usually one broadcasting
   expression, which the helpers encode. The base classes never loop or
   `vmap` on a hook's behalf.
-- **The capability gate runs before operand validation**, so an
-  unsupported operation raises `UnsupportedOpError` regardless of the
-  operand.
-- **The two properties, `shape` and `T`, are exempt from the no-override
-  rule.** They take no operand, so there is nothing to validate or gate —
-  and `T` is expressly overridden where the transpose is structured
-  (`Triangular`), by `PSDLinOp` (returns `self`), and by `Transposed`
-  (returns the wrapped operator).
+- **The family guard runs first, then the capability gate, then operand
+  validation.** An operator with a non-empty `batch_shape` refuses every
+  operation ({ref}`contract-families`); after that, an unsupported
+  operation raises `UnsupportedOpError` regardless of the operand.
+- **The properties — `shape`, `batch_shape`, and `T` — are exempt from
+  the no-override rule.** They take no operand, so there is nothing to
+  validate or gate — and `T` is expressly overridden where the transpose
+  is structured (`Triangular`, `DenseSquare`), by `PSDLinOp` (returns
+  `self`), and by `Transposed` (returns the wrapped operator).
 
 The full method set:
 
 | public       | hook          | level         | availability                     |
 | ------------ | ------------- | ------------- | -------------------------------- |
 | `shape`      | (property)    | `LinOp`       | required                         |
+| `batch_shape`| (property)    | `LinOp`       | required                         |
 | `matvec`     | `_matvec`     | `LinOp`       | required                         |
 | `rmatvec`    | `_rmatvec`    | `LinOp`       | required¹                        |
 | `matmat`     | `_matmat`     | `LinOp`       | derived from `_matvec`           |
@@ -336,7 +402,7 @@ Returns the operator as a dense `(n_out, n_in)` array.
   would make that comparison vacuous. The suite enforces this mechanically
   ({ref}`contract-conformance`), not by convention.
 - It has no size guard: it is the honest primitive that tests and
-  {func}`densify` build on. The guard belongs to `densify`, the
+  `densify` builds on. The guard belongs to `densify`, the
   user-facing escape hatch.
 
 ### `solve`, `solve_mat`
@@ -376,8 +442,9 @@ the sampling interface: for standard normal `eps` of length `k`,
   — must not implement `_solve` or `_whiten`: support is static, so this
   is a design rule for the class, not a runtime reaction to array values.
 - The factorization is computed when the *operator* is constructed, not
-  when `factor()` is called ({ref}`contract-jax`); `factor()` only wraps
-  stored arrays, so it is cheap and stable across calls.
+  when `factor()` is called ({ref}`contract-jax`); `factor()` does no more
+  than elementwise work over stored arrays, so it is cheap and stable
+  across calls.
 
 ### `whiten`, `whiten_mat`
 
@@ -536,7 +603,10 @@ the operation that just raised:
   case: a tier-4 value violation, on which `supports` still answers `True`
   — support is static — and the result is `nan`.
 
-`DenseSquare` is the LU-backed square leaf this mapping requires.
+`DenseSquare` is the LU-backed elementary square operator this mapping
+requires. Its pivot array is integer pytree data (it must batch under
+`vmap`), so differentiating with respect to a pytree containing a
+`DenseSquare` requires `jax.grad(..., allow_int=True)`.
 `DenseSquare.from_matrix(A)` computes the LU factorization once and stores
 `A` together with the factors; `to_dense` returns the stored `A`; it
 supports `solve`, `solve_mat`, `logdet` ($\log\lvert\det\rvert$ from the
@@ -556,13 +626,13 @@ is impossible on tracers and forces a device sync on concrete arrays.
 | tier | what is checked | when | cost | on failure |
 | ---- | --------------- | ---- | ---- | ---------- |
 | 1. class definition | every dataclass field is declared data or static correctly | `import` time | free | `TypeError` |
-| 2. construction | structural validity: array ranks, block shape agreement, block types | every construction, including pytree unflatten | O(#fields) Python | `ValueError` / `TypeError` |
+| 2. construction | structural validity: exact array ranks, block shape agreement, block types | every construction; pytree unflatten bypasses the constructor and is not re-validated | O(#fields) Python | `ValueError` / `TypeError` |
 | 3. call | operand core shape matches the operator | every public method call | free (shapes are static) | `ValueError` |
 | 4. value (debug) | positivity, finiteness, definiteness preconditions | opt-in, concrete arrays only | a device sync | `ValueError` |
 
 Tier 3 exists because structured operators otherwise fail *silently*:
 `Identity(6).matvec(ones(3))` would happily return the wrong-shaped array,
-and `Diagonal` would broadcast a length-1 operand. Precisely: the vector
+and `PSDDiagonal` would broadcast a length-1 operand. Precisely: the vector
 methods require `ndim >= 1` and `shape[-1]` equal to the core length; the
 matrix methods require `ndim >= 2` and `shape[-2]` equal to the core
 length, with `shape[-1]` — the `k` axis, possibly 0 — unconstrained.
@@ -572,41 +642,34 @@ Python over static information, so they cost nothing under `jit` and are
 therefore unconditional. Error messages must name the operator (its
 `repr`), the method, the expected core shape, and the offending shape.
 
-Tier 2 has three rules imposed by JAX's pytree machinery, which
-reconstructs operators through their storing constructor on every
-`jit`/`vmap` boundary ({ref}`contract-jax`):
+Tier 2 has two rules:
 
 - **Shape-only.** Constructor validation may inspect `ndim`, `shape` and
-  Python-level structure. It must never read values (tracers pass through
-  constructors routinely).
-- **Sentinel-tolerant, transitively.** Any field that does not expose
-  `ndim` passes validation untouched: JAX internals unflatten pytrees with
-  placeholder objects — `jax.custom_vjp`, for one, rebuilds arguments with
-  bare `object()` leaves — and validation must not break them. The rule
-  extends through composites: any check that reads a *child operator's*
-  `shape` must first verify the child's stored arrays expose `ndim` and
-  skip the check otherwise, because a child built around sentinel leaves
-  constructs successfully but cannot answer `shape`.
-- **Rank floor, not exact rank.** The storing constructor rejects arrays
-  whose rank is *below* the field's core rank and accepts extra leading
-  axes — a vmapped family, reconstructed at `vmap` exit boundaries with
-  batched concrete leaves ({ref}`contract-batching-operators`). Exact core
-  rank, and the positivity of core sizes, are enforced by the classmethods
-  and factories, which are never on an unflatten path.
+  Python-level structure. It must never read values: user code constructs
+  operators under `jit` and `vmap`, where fields are tracers.
+- **Exact core rank.** Every array field must have exactly its core rank,
+  and core sizes must be positive. This is enforceable in the constructor
+  because JAX's pytree reconstruction never calls it: `@linop` registers
+  an unflatten that allocates the instance and sets its fields directly,
+  so tier 2 runs only at genuine construction. The batched leaves of a
+  vmap-exit reconstruction ({ref}`contract-batching-operators`) never
+  reach validation, and neither do placeholder leaves — JAX internals
+  occasionally unflatten with bare `object()` sentinels (`jax.custom_vjp`
+  rebuilds arguments that way), which the bypass renders harmless.
 
-Tier-2 and tier-3 code runs in Python on every eager call, and — because
-unflatten calls the constructor — tier 2 runs again on every
-reconstruction of a `jit` *output*; under `jit` the call-site checks run
-at trace time only. Both tiers must therefore stay O(#fields) of pure
-Python, with no array work.
+Tier-3 checks run in Python on every eager call; under `jit` they run at
+trace time only. Tier 2 runs once per constructed operator, never at
+`jit`/`vmap` boundaries. Both tiers must stay O(#fields) of pure Python,
+with no array work.
 
-Tier 4 covers preconditions that are *values*: `Diagonal` entries strictly
+Tier 4 covers preconditions that are *values*: `PSDDiagonal` entries strictly
 positive, `from_matrix` arguments actually positive definite, factors
 finite. Outside debug mode these are the caller's responsibility, and
 violating them yields `nan` (or `±inf` — `logdet` of a singular operator)
 downstream rather than an exception — silently, which is why the debug
-mode exists. Debug mode is a process-global boolean, toggled by a public
-function and usable as a context manager (name provisional); it is
+mode exists. Debug mode is a process-global boolean, toggled by
+`set_debug_checks` and usable as the `debug_checks` context manager, with
+`value_check` the helper that consults it inside constructors; it is
 consulted when constructors and `from_matrix`-style classmethods execute —
 call-time value checks are out of scope. `densify`'s singular-PSD hazard
 is caught this way: `densify` routes through `from_matrix`, which in debug
@@ -620,6 +683,7 @@ The full error taxonomy:
 | field neither array-like nor marked static | `TypeError`, at class definition |
 | structural mismatch (wrong array rank, disagreeing block shapes) | `ValueError`, at construction |
 | wrong block *type* (non-PSD block in a PSD composite) | `TypeError`, at construction |
+| operation called on a vmapped family (non-empty `batch_shape`) | `ValueError`, at call — apply the family under `jax.vmap` instead |
 | operand core shape mismatch | `ValueError`, at call |
 | unsupported operation (type defines it, no cheap implementation) | `UnsupportedOpError`, at call/trace |
 | operation below the operator's level (type does not define it) | `AttributeError`, at call — see {ref}`contract-capabilities` |
@@ -653,6 +717,13 @@ explicitly separated data and metadata:
 - **Static metadata must be hashable and cheap to compare** — ints, bools,
   strings, tuples of those. Never arrays (a NumPy array as metadata
   poisons the compilation cache).
+- **Pytree unflattening bypasses the constructor.** The registered
+  unflatten allocates the instance and sets its fields directly;
+  `__init__`/`__post_init__` run only where code constructs an operator
+  explicitly. Consequences: constructor validation may be strict without
+  breaking JAX's reconstruction boundaries, boundaries pay no validation
+  cost, and behaviour must never live in the constructor — the fields are
+  the whole state.
 - `eq=False`: operators compare by identity. Dataclass equality would
   compare arrays elementwise and raise on the ambiguous truth value.
 - `repr=False`: the generated dataclass `__repr__` would shadow the
@@ -665,13 +736,14 @@ The dataclass constructor **must only store and validate** — never
 factorize, never allocate more than trivially. Anything computed from the
 inputs (a Cholesky factor, an eigendecomposition, LU) is done in an
 alternate constructor (`DensePSD.from_matrix(A)`), which computes once and
-passes the results to the storing constructor.
+passes the results to the field-storing constructor.
 
 Two independent reasons, either sufficient:
 
-- JAX **reconstructs pytrees through the constructor** on every
-  `jit`/`vmap`/`grad` boundary. A constructor that computes would
-  silently recompute at each of them.
+- Pytree reconstruction rebuilds instances **from their stored fields
+  alone**, bypassing `__init__` — so the fields are the operator's whole
+  state, and anything the operator needs at use time must be sitting in
+  them when the constructor finishes.
 - The lazy alternative — caching a factorization on first use — does not
   work at all under JAX: a cache written inside a traced function lands on
   a temporary copy and is discarded, so the operator re-factorizes on
@@ -713,7 +785,7 @@ class**:
 | `product(*ops)`         | `Product` (a square variant will be added when an EKI consumer needs `solve`/`logdet` through a product) |
 | `hstack(*ops)`          | `HStack`                                     |
 | `kron(A, B)`            | the PSD Kron variant if both children are `PSDLinOp`, else the general variant — the rectangular factor-Kron is the general one *(classes arrive with the Kron milestone)* |
-| `diag_congruence(op, s)`| `DiagCongruence` (see below)                 |
+| `diag_congruence(op, scale)`| `PSDDiagCongruence` (see below)             |
 
 Variadic factories require at least one operand (`ValueError` otherwise);
 applied to a single operand, `block_diag`, `product` and `hstack` return
@@ -738,7 +810,7 @@ Semantics fixed by this contract:
 - **Composite anatomy is contract, not implementation detail.** The
   children are a public data field — `blocks` on the block-diagonal
   classes, `ops` on `Product` and `HStack` — and the block classes expose
-  the per-block sizes (split points) as a static property, computed like
+  the per-block shapes as a static `block_shapes` property, computed like
   `shape`. The consumer is domain localization, which must align
   sub-vectors of the observation space with the noise operator's blocks.
 - `HStack(ops)` is a block **row** `[A_1 ... A_m]`: it splits the operand's
@@ -752,14 +824,14 @@ Semantics fixed by this contract:
 - Composites do not track definiteness through composition: a `Product` of
   PSD operators is not PSD in general, and the layer never infers PSD-ness
   from structure. An operator family that *is* closed under a composition
-  gets its own class — which is exactly what `DiagCongruence` is.
+  gets its own class — which is exactly what `PSDDiagCongruence` is.
 
 ### Diagonal congruence
 
-`diag_congruence(op, s)` represents $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$
+`diag_congruence(op, scale)` represents $\mathrm{diag}(s)\,A\,\mathrm{diag}(s)$
 for a `PSDLinOp` $A$ and a strictly positive vector $s$ (a tier-4
-precondition, like every value constraint), returning `DiagCongruence`, a
-`PSDLinOp` holding $s$ as a 1-D data field. Like scalar scaling, every
+precondition, like every value constraint), returning `PSDDiagCongruence`, a
+`PSDLinOp` holding the scale as a 1-D data field (`scale`). Like scalar scaling, every
 capability delegates to the base operator with the diagonal folded in:
 
 | operation on $SAS$, $S = \mathrm{diag}(s)$ | in terms of $A$              |
@@ -887,22 +959,29 @@ the second already has a name.
 `repr(op)` is the type name and shape — `Dense(200, 300)`,
 `PSDBlockDiag(5, 5)` — and never includes array contents. Reprs appear in
 tracebacks, pytest ids, and error messages of this very contract, where a
-dumped array would bury the signal. Composites may append a summary of
-their structure (block count) but never recurse into children's arrays.
+dumped array would bury the signal. A vmapped family wraps that form and
+names its batch — `vmapped(DensePSD(3, 3), batch=(100,))`
+({ref}`contract-families`). `repr` never raises: an instance whose shapes
+cannot be read — a transient placeholder reconstruction, or
+inconsistently stacked leaves — falls back to a marker form, since a
+raising repr would mask the very failure being printed. Composites may
+append a summary of their structure (block count) but never recurse into
+children's arrays.
 
 (contract-surface)=
 ## Public surface
 
 For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
-`LinOp`, `SquareLinOp`, `PSDLinOp`; the leaves `Identity`,
-`ScaledIdentity`, `Diagonal`, `Dense`, `DenseSquare`, `Triangular`,
+`LinOp`, `SquareLinOp`, `PSDLinOp`; the elementary operators `Identity`,
+`PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
 `DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
-`DiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
+`PSDDiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
 (with the Kron classes, once that milestone lands), `diag_congruence`; the
 helpers `dense_matvec` and `tri_solve`; `densify`, `UnsupportedOpError`,
-`linop`, `static_field`, and the debug switch. The conformance suite lives
-in `pyeki.linalg.testing`. Anything else is private, and no consumer may
+`linop`, `static_field`, and the debug switch (`set_debug_checks`, the
+`debug_checks` context manager, and the `value_check` helper it gates). The
+conformance suite lives in `pyeki.linalg.testing`. Anything else is private, and no consumer may
 depend on it.
 
 (contract-conformance)=
@@ -920,10 +999,11 @@ enough to densify, before it is merged. It must verify at least:
    column identity of the batch contract — a dense reference for
    `whiten_mat` does not exist, since the contract fixes no particular
    $W$), each batched and unbatched.
-3. **Transpose**: `op.T` itself passes checks 1–2, with its dense
-   reference the dense transpose, and `op.T.T` matches `op`'s dense form.
-   (A structured `T` override with a correct `_to_dense` and a wrong-axis
-   `_matvec` must not slip through on the dense comparison alone.)
+3. **Transpose**: `op.T` itself passes the core, solve, scalar, and
+   capability checks (1–2, 4, 7, 9), with its dense reference the dense
+   transpose, and `op.T.T` matches `op`'s dense form. (A structured `T`
+   override with a correct dense form but a broken `_matvec`, `solve`, or
+   `logdet` must not slip through on the dense comparison alone.)
 4. **Solve**: `solve` against the dense inverse at batch ranks 0, 1 and 2,
    when claimed.
 5. **Square roots**: `factor()` returns an `L` whose dense form satisfies
@@ -940,13 +1020,15 @@ enough to densify, before it is merged. It must verify at least:
    particular factorization — the contract does not promise one.
 7. **Scalars**: `diag` and `logdet` against the dense reference; `logdet`
    is a 0-d real JAX array.
-8. **`to_dense` independence, enforced**: with the class-level `matvec`,
-   `_matvec`, `matmat` and `_matmat` all temporarily replaced by raising
-   stubs (instances are frozen, so the patch must be on the class),
-   `to_dense()` still succeeds. (A check that merely inspects where
-   `to_dense` is *defined* can be satisfied by an implementation that
-   routes through `matvec` — or through `matmat` — which would make every
-   dense comparison above compare `matvec` with itself.)
+8. **`to_dense` independence, enforced**: with the class-level
+   application methods and hooks — all eight names, `matvec`/`rmatvec`/
+   `matmat`/`rmatmat` and their hooks — temporarily replaced by raising
+   stubs on the class of *every* operator in the pytree, `to_dense()`
+   still succeeds. (Stubbing only the outermost class would let a
+   composite route its `to_dense` through a child's application; a check
+   that merely inspects where `to_dense` is *defined* can be satisfied by
+   routing, either of which would make the dense comparisons above compare
+   application with itself.)
 9. **Capability honesty, both directions, at the operator's level**: every
    operation with `supports(name) == True` runs without
    `UnsupportedOpError`; every type-defined operation with
@@ -963,8 +1045,8 @@ enough to densify, before it is merged. It must verify at least:
 11. **Pytree round trip**: flatten/unflatten preserves type and behaviour;
     unflattening with bare `object()` sentinel leaves succeeds for every
     operator type, composites included; the operator works under `jit`;
-    `vmap` over the *operand* agrees with native batching; constructing
-    and returning the operator inside `jax.vmap` round-trips (the
+    `vmap` over the *operand* agrees with native batching; rebuilding the
+    operator inside `jax.vmap` and returning it round-trips (the
     vmap-exit reconstruction of {ref}`contract-batching-operators`), and
     `vmap` over the resulting family agrees with a Python loop; `grad` of
     a fixed scalar (the sum of `matvec` on a fixed operand) through array
@@ -975,6 +1057,13 @@ enough to densify, before it is merged. It must verify at least:
     reflected dunders — `x @ op` and `array * op` raise the guided
     `TypeError`, and `scalar * op` returns the scaled composite — pinning
     the `__array_ufunc__ = None` deferral the guided errors depend on.
+14. **Family legibility and inertness**: the instance itself reports
+    `batch_shape == ()`; stacking its leaves and unflattening yields a
+    family whose `batch_shape` is the stacked shape — for a multi-axis
+    stack too, `(2, 3)` — whose repr takes the `vmapped(...)` form, whose
+    type-defined operations and arithmetic each raise `ValueError`, and
+    whose `T` stays a view on the family, while `shape`, `supports` and
+    `capabilities` still answer.
 
 The suite skips what `supports()` disclaims (that is check 9's other
 half), so the same driver applies to every operator type unchanged.
@@ -994,7 +1083,7 @@ Recorded so their absence reads as a decision, not an oversight.
 ({ref}`contract-arithmetic`); addition is not. A sum is only worth
 representing when its structure survives — the factor of a sum of PSD
 operators is a horizontal stack, but its `solve` and `logdet` require
-either a simplification rule per pair of types (`Diagonal + Diagonal`,
+either a simplification rule per pair of types (two `PSDDiagonal`s,
 low-rank plus diagonal) or a dedicated class per structured sum. A
 registry of such rules is machinery the current type count does not
 justify, and a generic sum class would advertise almost nothing. Structured
@@ -1007,12 +1096,11 @@ the reasoning is in {ref}`contract-arithmetic`.
 **`cholesky()`.** Removed from the contract; see the square-roots section
 for the reasoning.
 
-**Batched operators.** One operator holds one matrix; families are
-`vmap`ed pytrees ({ref}`contract-batching-operators`). Supporting stored
-batch axes would force every `shape`, `split`, and validation rule to
-carry a second convention through the whole layer. (The storing
-constructor's tolerance of extra leading axes is `vmap` plumbing only —
-the contract defines no direct-call behaviour for such a family.)
+**Direct operation calls on batched operators.** One operator holds one
+matrix; families are `vmap`ed pytrees, legible through `batch_shape` and
+inert to direct calls ({ref}`contract-families`). Defining those calls —
+implicit batching via auto-`vmap` — is a designed-for future extension,
+deferred until a consumer needs it; see the box in that section.
 
 **dtype tracking.** The package runs float64 end to end (enabled at
 import). A per-operator dtype attribute and promotion rules would be
@@ -1031,34 +1119,3 @@ returns new arrays. This is the only sane convention under JAX.
 when EKI needs it. The catalogue of shipped operators lives in
 {doc}`user-guide/operators`; this contract constrains *how* any of them
 behave, not *which* exist.
-
-(contract-changes)=
-## Appendix: changes from the implemented layer
-
-:::{admonition} Temporary section
-:class: note
-
-This appendix exists while the implementation is brought up to this
-specification, and will be deleted afterwards.
-:::
-
-| area | implemented today | specified here |
-| ---- | ----------------- | -------------- |
-| naming | `PSDOperator`; `@operator` (shadows the stdlib module) | `PSDLinOp`; `@linop` |
-| implementation surface | subclasses override public methods; base classes hold raising defaults, detected by comparing against a snapshot | subclasses implement `_`-prefixed hooks; public methods validate, gate on `supports`, and dispatch |
-| transpose | none; `factor()`'s result cannot be transposed without densifying | `rmatvec`/`rmatmat` required; `T` on every operator; `Transposed` view |
-| `cholesky()` | in the PSD interface; contract already unhonourable for `BlockDiag` (returns a non-triangular, non-solving factor) | removed; `factor()` + `whiten()` cover both roles |
-| `whiten` | derived from `cholesky().solve()` | primitive optional hook; contract is $W A W^\top = I$ for a fixed, otherwise unspecified $W$; `whiten_mat` added |
-| `supports()` | reports `False` for working derived methods (`solve_mat`, `whiten`); returns `False` for unknown names | derived operations resolve through their dependencies; unknown names raise `ValueError`; invariant "supports ⟺ succeeds" enforced by the public-method gate |
-| `_WITHDRAWN` | class variable consulted by `supports` but unenforced, and unused | removed; monotone-capability rule replaces it |
-| unsupported-op error | not reconstructible from `args`; not picklable | picklable, rebuilds from `args` |
-| `densify` of a square non-PSD operator | returns `Dense`, which has no `solve` — the advertised fallback fails | returns `DenseSquare` (new LU-backed leaf); mapping preserves the hierarchy level |
-| operand validation | none; `Identity(6).matvec(ones(3))` returns the wrong shape silently | tier-3 core-shape checks on every public method |
-| constructor validation | none; batched arrays accepted then misbehave | tier-2 structural checks — exact core rank in classmethods/factories, a rank floor in the storing constructor (vmap-exit reconstruction requires it); `vmap`-over-pytree is the batching story |
-| value preconditions | documented only; violations yield `nan` | opt-in debug mode checks them on concrete inputs |
-| field classification | denylist heuristic over annotation strings (misses `int \| None`, `Optional[int]`, `Literal`, `np.ndarray`) | allowlist: data iff `Array` / `LinOp` / tuples thereof; everything else must be static |
-| abstractness | missing required methods surface on first use | `LinOp` is an ABC; instantiation fails |
-| composites | direct class construction; `BlockDiag` + `BlockDiagGeneral` pair, the latter with a stub `solve` raising `AttributeError` | factories `block_diag`/`product`/`hstack` select the class; general `BlockDiag` is a plain `LinOp` with no stub methods |
-| arithmetic | none; `op @ x` fails with Python's generic unsupported-operand error; `np_array * op` silently builds an object array | `@` composes operators (guided `TypeError` on arrays); `*`/`/` return a level-preserving scaled composite; `__array_ufunc__ = None` so NumPy defers; `__jax_array__` forbidden; `+` still excluded |
-| composite anatomy | `blocks`/`ops` fields exist but are implementation detail | children and static block sizes are contract ({ref}`contract-composites`); `DiagCongruence` added for localization noise inflation |
-| conformance | `to_dense` independence checked by definition site (bypassable); one PRNG key reused; no transpose, capability-honesty, operand-validation, or vmap-over-operator checks | checks 1–13 above, with the monkeypatch guard and per-check keys |

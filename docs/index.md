@@ -33,8 +33,8 @@ internals.
 
 :::{grid-item-card} Structured operators
 `pyeki.linalg` represents covariance matrices by how they act on vectors, so
-that block, diagonal, Kronecker and low-rank structure is exploited rather than
-materialized.
+that structure — block, diagonal, triangular today; Kronecker and low-rank
+planned — is exploited rather than materialized.
 :::
 
 :::{grid-item-card} Gaussian conditioning
@@ -66,12 +66,12 @@ calibrated.
 ```python
 import pyeki  # enables float64; import before creating arrays
 import jax.numpy as jnp
-from pyeki.linalg import BlockDiag, Diagonal, DensePSD
+from pyeki.linalg import PSDDiagonal, DensePSD, block_diag
 
-noise = BlockDiag((
-    Diagonal(jnp.array([0.5, 0.5, 2.0])),      # independent errors
+noise = block_diag(
+    PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),      # independent errors
     DensePSD.from_matrix(jnp.eye(2) + 0.3),    # correlated block
-))
+)
 
 noise.shape          # (5, 5)
 noise.logdet()       # summed over blocks, never forms a 5x5 matrix

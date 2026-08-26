@@ -1,16 +1,23 @@
 # Handoff
 
-Written 2026-08-24, at the point where the package core exists and development
-moves to a fresh session. Read `CLAUDE.md` first for conventions, then this for
-state and next steps.
+Written 2026-08-24 and updated 2026-08-25, after the operator layer was
+reworked against the normative contract. Read `CLAUDE.md` first for
+conventions, then this for state and next steps.
 
 ## Where things stand
 
-**Done.** `pyeki.linalg` is implemented, documented and tested — the three-level
-operator hierarchy, six leaf operators, four composites, and a conformance
-harness. 22 tests pass. Documentation builds: landing page, installation,
-quickstart, operator catalogue, a guide to writing an operator, design notes,
-and an API reference.
+**Done.** `pyeki.linalg` is implemented to the specification in
+`docs/linop-contract.md` — the normative reference for the layer's behaviour,
+written and adversarially reviewed before this implementation. Three-level
+hierarchy (`LinOp`/`SquareLinOp`/`PSDLinOp`) with template methods (public
+methods gate and validate; authors implement `_`-prefixed hooks), transposes
+(`rmatvec`, `T`), operator arithmetic (`@` composition, scalar `*`/`/`),
+six elementary operators, nine composites with factory functions, a debug
+mode for value
+preconditions, and a 14-check conformance harness; the full test suite passes.
+Documentation builds: landing page, installation, quickstart, operator
+catalogue, a guide to writing an operator, the operator contract, design
+notes, and an API reference.
 
 **Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design for
 all three is in `docs/design.md`, which is the single most useful thing to read
@@ -100,15 +107,10 @@ than binary nesting; and a way for a rule to decline. A reasonable alternative
 is not to simplify on addition at all, and instead dispatch on structure inside
 `solve` and `logdet`.
 
-**Capability declaration.** `supports()` compares the resolved method against
-the base class's raising default, and composites override it to intersect over
-their children. This works, but it is implicit. If it becomes a problem, derive
-it at class creation from `cls.__dict__` instead.
-
-**Whitening versus triangularity.** `cholesky()` requires a square triangular
-factor, but whitening only needs a square invertible one. Some structures have
-the latter without the former. If that becomes limiting, decouple `whiten` from
-`cholesky` rather than forcing triangularity.
+(Two decisions previously listed here — capability declaration and whitening
+versus triangularity — were settled by the operator contract: `supports()` is
+defined by hook presence with derived-dependency resolution, and `cholesky()`
+was removed in favour of `factor()` plus a primitive `whiten()`.)
 
 ## Things not to rediscover
 

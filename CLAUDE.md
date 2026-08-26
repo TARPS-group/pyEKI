@@ -105,9 +105,11 @@ linear algebra. Size guards raise before allocating.
 **Return JAX scalars, not Python floats.** Converting fails on a tracer under
 `jit`, and on any complex intermediate.
 
-**Factorize in the constructor.** Never cache a factorization lazily — a cache
-written inside a traced function is discarded, so the operator silently
-re-factorizes on every call.
+**Factorize at construction time, in `from_matrix`-style classmethods.** The
+dataclass constructor only stores: pytree reconstruction rebuilds operators
+from their stored fields alone, bypassing the constructor. Never cache a
+factorization lazily — a cache written inside a traced function is discarded,
+so the operator silently re-factorizes on every call.
 
 **Every new operator gets `check_operator`.** The conformance suite in
 `pyeki.linalg.testing` catches the batch-rank and square-root bugs that
@@ -117,8 +119,9 @@ otherwise produce wrong numbers without raising.
 
 - Float64 is enabled in `pyeki/__init__.py`. Worker processes do not inherit
   it; that needs `JAX_ENABLE_X64=1` in the environment.
-- Operators are pytrees via `jax.tree_util.register_dataclass`, with data and
-  metadata fields declared explicitly.
+- Operators are pytrees via the `@linop` decorator, with data and metadata
+  fields declared explicitly; its unflatten bypasses the constructor, so
+  validation runs only at genuine construction.
 - Operators compare by identity and are never `static_argnums`.
 - `shape` is a property, not a stored field, so it stays concrete under `jit`.
 - JAX has no generalized `eigh`; use a Cholesky whitening reformulation.
