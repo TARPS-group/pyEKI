@@ -1547,12 +1547,14 @@ def test_18_every_tier_two_and_tier_three_rule_raises_as_specified():
     with pytest.raises(ValueError, match="strictly positive"):
         run(state, problem.forward, y, noise, schedule=_NonPositive())
 
-    # -- unsupported operations propagate unmodified --------------------------
-    singular = Gaussian(jnp.zeros(problem.P), PSDLowRank(jnp.zeros((problem.P, 2))))
+    # -- unsupported operations propagate unmodified, before any evaluation ---
+    before = len(problem.calls)
     with pytest.raises(UnsupportedOpError):
         run(state, problem.forward, y, PSDLowRank(jnp.eye(problem.N)),
             schedule=ladder)
-    del singular
+    assert len(problem.calls) == before, (
+        "a covariance without whiten must cost no forward-model evaluations"
+    )
 
     # -- repair_failed_members ------------------------------------------------
     with pytest.raises(ValueError, match="at least 2 valid"):

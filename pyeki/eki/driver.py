@@ -54,6 +54,7 @@ termination, validation and adaptive increments to be ordinary Python.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import warnings
@@ -781,25 +782,8 @@ def _terminal_record(evaluation: Evaluation) -> HistoryRecord:
     therefore means "evaluated, then stopped".
     """
     record = _record(evaluation, jnp.zeros_like(evaluation.beta))
-    return HistoryRecord(
-        **{
-            **{
-                name: getattr(record, name)
-                for name in (
-                    "step",
-                    "n_valid",
-                    "beta",
-                    "increment",
-                    "beta_next",
-                    "misfit_mean",
-                    "misfit_min",
-                    "misfit_max",
-                    "centre_misfit",
-                    "spread",
-                )
-            },
-            "ess": jnp.asarray(float(evaluation.n_members)),
-        }
+    return dataclasses.replace(
+        record, ess=jnp.asarray(float(evaluation.n_members))
     )
 
 
@@ -845,6 +829,11 @@ def _check_problem(where: str, y, noise_cov):
             f"{where}: {noise_cov!r} is a vmapped family; a run binds one noise "
             f"covariance."
         )
+    # Demanded here rather than at the first whitening, so that a covariance
+    # without a cheap whitener costs no forward-model evaluations. The
+    # UnsupportedOpError is constructed by the operator that lacks the
+    # operation and propagated unmodified.
+    noise_cov._require("whiten")
     n_obs = noise_cov.shape[0]
     y = jnp.asarray(y)
     if y.ndim != 1 or y.shape[0] != n_obs:
