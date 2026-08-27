@@ -441,6 +441,9 @@ the sampling interface: for standard normal `eps` of length `k`,
   A class that is singular *by construction* — its factor statically thin
   — must not implement `_solve` or `_whiten`: support is static, so this
   is a design rule for the class, not a runtime reaction to array values.
+  `PSDLowRank` ({ref}`contract-psd-low-rank`) is the shipped class in
+  this position: its thin-factor instances are the case the rule forces,
+  and it withholds both hooks at every width.
 - The factorization is computed when the *operator* is constructed, not
   when `factor()` is called ({ref}`contract-jax`); `factor()` does no more
   than elementwise work over stored arrays, so it is cheap and stable
@@ -595,8 +598,8 @@ the operation that just raised:
 - Densifying a *singular* PSD operator is a caller error: the Cholesky of
   a singular matrix is `nan` without an exception (see
   {ref}`contract-validation` for how debug mode catches this). Singular
-  PSD operators are legitimate — as instances of classes that are singular
-  *by construction* and therefore implement `factor` but not
+  PSD operators are legitimate — a thin-factor `PSDLowRank` (below) is
+  one, and a class in that position implements `factor` but not
   `_solve`/`_whiten` — and `densify` cannot manufacture what does not
   exist. Feeding a singular matrix to a class that *does* advertise
   `solve` (`DensePSD.from_matrix` of a rank-deficient array) is the other
@@ -614,6 +617,56 @@ LU diagonal — pivot signs are irrelevant under the log-magnitude
 convention), and `diag`; and it overrides `T` to return the transposed
 operator backed by the same factorization, so transposition does not cost
 it its `solve`.
+
+(contract-psd-low-rank)=
+### The singular-by-construction case: `PSDLowRank`
+
+`PSDLowRank(F)` represents $F F^\top$ for a stored factor $F$. It is the
+layer's one shipped class subject to the singular-by-construction rule
+stated under `factor` above — its thin-factor instances are what that rule
+governs — and the covariance representation `pyeki.gauss` returns from
+conditioning, where the posterior's rank is bounded by the ensemble size.
+
+- **One data field**, `F`, an `Array` of shape `(n, k)` with $n, k \ge 1$.
+  **No relation is imposed between $n$ and $k$**: the factor may be thin,
+  square, or wide. `shape` is `(n, n)`, and `batch_shape` is `F`'s leading
+  axes beyond rank 2.
+- **Its capabilities are exactly `{"diag", "factor"}`** —
+  `capabilities()` returns that frozen set — alongside the five
+  always-available operations. It implements no `_solve`, no `_whiten`,
+  and no `_logdet`, so `solve`, `solve_mat`, `whiten`, `whiten_mat` and
+  `logdet` each raise `UnsupportedOpError`, and `supports` answers `False`
+  for all five.
+- **Omitting `_solve` and `_whiten` is *required*, not chosen, whenever
+  $k < n$.** The factor is then statically thin, so the operator is
+  singular by construction and the `factor` rule forbids both hooks.
+  Extending the omission to *every* width, and to `_logdet`, follows from
+  what a capability asserts: not that the operation is *defined* but that
+  it has a **cheap** implementation (hierarchy rule 1,
+  {ref}`contract-hierarchy`). At $k \ge n$ the operator is generically
+  nonsingular, so all three are defined — but none is cheap. Each needs
+  the $n \times n$ Gram matrix $F F^\top$ formed, $O(n^2 k)$, and
+  factorized, $O(n^3)$, which is exactly what `densify` does. There is no
+  width at which this class has a cheap solve, whitener or
+  log-determinant, so the honest static answer is the same at every width.
+  Rank supplies a second reason and not the primary one: support is a
+  property of the type ({ref}`contract-capabilities`), and capabilities
+  that varied with $k$ would advertise a `solve` that is `nan` for every
+  rank-deficient wide factor, which no shape can rule out. A caller who
+  wants those operations on a particular instance densifies deliberately.
+- **Nothing is computed at construction**, because the stored field *is*
+  the factorization. `factor()` returns `Dense(F)`, `to_dense()` assembles
+  $F F^\top$ from `F` alone, and `diag()` is the rowwise sum of squares
+  $\sum_j F_{ij}^2$. The constructors-store rule of {ref}`contract-jax`
+  is met with nothing left over to compute.
+
+Constructor validation is tier 2 and shape-only: `F` must have rank
+exactly 2, and both core sizes at least 1. Neither violation is caught by
+the conformance suite, which is why they are named here — a rank-3 `F`
+produces a *directly constructed* operator reporting a non-empty
+`batch_shape`, which {ref}`contract-families` forbids, and $k = 0$
+violates the strictly-positive shape rule. Both are constructor checks,
+and both need targeted tests.
 
 (contract-validation)=
 ## Validation and errors
@@ -974,7 +1027,7 @@ children's arrays.
 For the avoidance of doubt, `pyeki.linalg` exports exactly: the levels
 `LinOp`, `SquareLinOp`, `PSDLinOp`; the elementary operators `Identity`,
 `PSDDiagonal`, `Dense`, `DenseSquare`, `Triangular`,
-`DensePSD`; the composites `Product`, `HStack`, `BlockDiag`,
+`DensePSD`, `PSDLowRank`; the composites `Product`, `HStack`, `BlockDiag`,
 `PSDBlockDiag`, `Transposed`, `Scaled`, `SquareScaled`, `PSDScaled`,
 `PSDDiagCongruence`; the factories `block_diag`, `product`, `hstack`, `kron`
 (with the Kron classes, once that milestone lands), `diag_congruence`; the

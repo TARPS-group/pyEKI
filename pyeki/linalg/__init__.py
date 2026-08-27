@@ -58,6 +58,7 @@ from .elementary import (
     DenseSquare,
     Identity,
     PSDDiagonal,
+    PSDLowRank,
     Triangular,
 )
 
@@ -82,6 +83,7 @@ __all__ = [
     "DenseSquare",
     "Triangular",
     "DensePSD",
+    "PSDLowRank",
     # composites
     "Transposed",
     "Scaled",

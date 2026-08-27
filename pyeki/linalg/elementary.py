@@ -9,6 +9,7 @@ class                        represents
 :class:`DenseSquare`         a dense square matrix, stored with its LU
 :class:`Triangular`          a square triangular matrix
 :class:`DensePSD`            a dense PSD matrix, stored as its Cholesky
+:class:`PSDLowRank`          ``F F.T`` for a stored factor ``F``
 ===========================  ===============================================
 
 Elementary operators at the PSD level whose unrestricted mathematical
@@ -56,6 +57,7 @@ __all__ = [
     "DenseSquare",
     "Triangular",
     "DensePSD",
+    "PSDLowRank",
 ]
 
 
@@ -508,3 +510,68 @@ class DensePSD(PSDLinOp):
 
     def _to_dense(self) -> Array:
         return self.L @ self.L.swapaxes(-1, -2)
+
+
+@linop
+class PSDLowRank(PSDLinOp):
+    """``F @ F.T`` for a stored factor ``F``, which may be thin, square or wide.
+
+    Singular whenever ``F`` is thin, and typed accordingly: it provides
+    ``diag`` and ``factor`` and nothing else, so ``solve``, ``whiten`` and
+    ``logdet`` raise :class:`~.base.UnsupportedOpError` at every width.
+
+    Parameters
+    ----------
+    F
+        The factor, of shape ``(n, k)``, both sizes at least 1. No relation
+        between ``n`` and ``k`` is required. The operator it represents has
+        side ``n`` and rank at most ``k``.
+
+    Notes
+    -----
+    Nothing is computed at construction, because the stored field *is* the
+    factorization: ``factor()`` wraps ``F`` as a :class:`Dense`, and
+    ``matvec`` applies ``F (F.T x)`` rather than ever forming ``F F.T``.
+
+    Withholding ``solve`` and ``whiten`` is forced when ``k < n``: a
+    statically thin factor makes the operator singular by construction. It
+    extends to ``k >= n``, and to ``logdet``, because a capability asserts
+    a *cheap* implementation, and none of the three is cheap at any width:
+    each needs the ``(n, n)`` Gram matrix ``F F.T`` formed and factorized,
+    which is what :func:`~pyeki.linalg.densify` already does.
+    Rank is a second reason: capabilities that varied with the stored width
+    would advertise a ``solve`` that is ``nan`` for every rank-deficient
+    wide factor, which no shape can rule out.
+
+    Densifying is therefore the route to those operations, and it is only
+    valid on an instance known to be full rank. Densifying a thin-factor
+    instance returns ``nan`` without raising, except under
+    :func:`~pyeki.linalg.debug_checks`.
+    """
+
+    F: Array
+
+    def __post_init__(self) -> None:
+        _check_core_rank("PSDLowRank", "F", self.F, 2)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        n = self.F.shape[-2]
+        return (n, n)
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.F.shape[:-2])
+
+    def _matvec(self, x: Array) -> Array:
+        # A x = F (F^T x); never forms A.
+        return dense_matvec(self.F, dense_matvec(self.F.swapaxes(-1, -2), x))
+
+    def _diag(self) -> Array:
+        return jnp.sum(self.F * self.F, axis=-1)
+
+    def _factor(self) -> LinOp:
+        return Dense(self.F)
+
+    def _to_dense(self) -> Array:
+        return self.F @ self.F.swapaxes(-1, -2)

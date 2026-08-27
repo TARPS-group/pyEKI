@@ -581,35 +581,17 @@ and the density exists mathematically — the class's static capability
 choice still raises, and a caller wanting that density densifies the
 covariance deliberately.
 
-:::{admonition} Prerequisite: `PSDLowRank` in `pyeki.linalg`
+:::{admonition} `PSDLowRank` in `pyeki.linalg`
 :class: note
 
-This method needs one new elementary operator, sketched here and to be
-specified in the operator contract when it is added. `PSDLowRank` holds a
-single data field — `PSDLowRank(factor_array)`, an `Array` of shape
-`(n, k)` with $n, k \ge 1$ and no other relation imposed between them —
-and represents $F F^\top$. Its `capabilities()` is
-`frozenset({"diag", "factor"})` plus the derived matrix siblings. It
-implements the required pieces — `shape` ($(n, n)$ from `F`),
-`batch_shape` (the leading axes of `F` beyond rank 2), and the delegating
-PSD `rmatvec` — plus `matvec` ($F(F^\top x)$, two trailing-axis
-contractions), `diag` (rowwise $\sum_j F_{ij}^2$), `to_dense` ($FF^\top$
-assembled from the stored array, never via `matvec`), and `factor`
-(wrapping `F` as a `Dense`). It implements **no** `_solve`, `_whiten`, or
-`_logdet`. Omitting `_solve` and `_whiten` is *required* by the operator
-contract's singular-by-construction rule whenever the stored factor is
-thin ($k < n$); extending the omission to every width, and to `_logdet`,
-is this class's own static decision. Nothing is computed at construction:
-the stored field *is* the factorization.
-
-Two process obligations come with it. It must pass `check_operator` — but
-that is not a sufficient gate here: a literal-minimum implementation
-passes while accepting a rank-3 factor (reporting a non-empty
-`batch_shape` on a directly constructed operator) and $k = 0$, so the
-tier-2 rank and positivity checks must be written in by hand. And it must
-be added to the operator contract's public-surface list
-({ref}`contract-surface`), which is exhaustive and does not yet name
-it.
+This method's return type is specified by the operator contract, at
+{ref}`contract-psd-low-rank`; that entry governs. In outline:
+`PSDLowRank(F)` holds a single data field, an `Array` of shape `(n, k)`
+with $n, k \ge 1$ and no relation imposed between them, and represents
+$F F^\top$. Its `capabilities()` is exactly `frozenset({"diag",
+"factor"})` — `solve`, `solve_mat`, `logdet`, `whiten` and `whiten_mat`
+all raise `UnsupportedOpError`, at every width — and nothing is computed
+at construction, because the stored field *is* the factorization.
 :::
 
 (gauss-prng)=
@@ -939,10 +921,10 @@ must verify at least:
    which reconstructs $\bar u + a_j$ — and `condition` return the prior
    marginal's moments; $J = 2$ and $N = 1$ work; a collapsed ensemble
    with finite inputs produces no `nan`.
-9. **Capability propagation** (no shipped `PSDLinOp` disclaims any
-   operation: `PSDLowRank` supplies the missing `whiten` and `logdet`, and
-   the `factor` case needs a test-local `PSDLinOp` implementing no
-   `_factor`): a noise covariance without `whiten`, and a
+9. **Capability propagation** (`PSDLowRank` is the one shipped
+   `PSDLinOp` that disclaims operations, and it covers the `whiten` and
+   `logdet` cases; the `factor` case needs a test-local `PSDLinOp`
+   implementing no `_factor`): a noise covariance without `whiten`, and a
    covariance without `factor` or `logdet`, raise `UnsupportedOpError`
    from the conditioning methods, `sample`, and `log_density`
    respectively — and `log_density` on the posterior `condition` returns
