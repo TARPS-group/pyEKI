@@ -642,6 +642,78 @@ def test_6_exact_moment_ensemble_reaches_the_analytic_posterior():
 # --- 7. marginal formulas ----------------------------------------------------
 
 
+def test_7_from_samples_matches_the_empirical_moments():
+    """from_samples reproduces the sample mean and the J-1 covariance exactly."""
+    J, n = 6, 3
+    samples = jnp.asarray(RNG.normal(size=(J, n)))
+
+    got = Gaussian.from_samples(samples)
+
+    ref_mean = np.mean(np.asarray(samples), axis=0)
+    ref_cov = np.cov(np.asarray(samples).T, ddof=1)
+    np.testing.assert_allclose(
+        got.mean, ref_mean, rtol=0, atol=1e3 * EPS * np.abs(ref_mean).max()
+    )
+    np.testing.assert_allclose(
+        got.cov.to_dense(), ref_cov, rtol=0, atol=1e3 * EPS * np.abs(ref_cov).max()
+    )
+    np.testing.assert_allclose(
+        got.cov.diag(), np.diag(ref_cov), rtol=0, atol=1e3 * EPS * np.abs(ref_cov).max()
+    )
+
+
+def test_7_from_samples_holds_a_low_rank_factor_and_never_forms_the_matrix():
+    """The covariance is PSDLowRank of width J: diag and factor, nothing else."""
+    J, n = 4, 9
+    samples = jnp.asarray(RNG.normal(size=(J, n)))
+
+    cov = Gaussian.from_samples(samples).cov
+
+    assert isinstance(cov, PSDLowRank)
+    assert cov.shape == (n, n)
+    assert cov.F.shape == (n, J)
+    assert cov.supports("diag") and cov.supports("factor")
+    for op in ("solve", "whiten", "logdet"):
+        assert not cov.supports(op)
+    # Singular at J - 1 < n, so a density is undefined and must raise.
+    with pytest.raises(UnsupportedOpError):
+        Gaussian.from_samples(samples).log_density(jnp.zeros(n))
+
+
+def test_7_from_samples_agrees_with_the_joint_it_is_the_one_block_case_of():
+    """Its moments equal EnsembleJoint's u-block moments, from the same members."""
+    J, P, N = 7, 4, 3
+    u = jnp.asarray(RNG.normal(size=(J, P)))
+    v = jnp.asarray(RNG.normal(size=(J, N)))
+
+    fit = Gaussian.from_samples(u)
+    joint = EnsembleJoint(u_samples=u, v_samples=v)
+
+    np.testing.assert_array_equal(fit.mean, joint.u_mean)
+    want = np.asarray(joint.u_anomalies).T @ np.asarray(joint.u_anomalies) / (J - 1)
+    np.testing.assert_allclose(
+        fit.cov.to_dense(), want, rtol=0, atol=1e3 * EPS * np.abs(want).max()
+    )
+
+
+def test_7_from_samples_gives_identical_members_exactly_zero_spread():
+    """The stable centring, not jnp.mean: a collapsed sample has no anomalies."""
+    collapsed = jnp.tile(jnp.asarray([1e23, 2e23, 3e23]), (5, 1))
+
+    cov = Gaussian.from_samples(collapsed).cov
+
+    np.testing.assert_array_equal(cov.F, np.zeros_like(cov.F))
+    np.testing.assert_array_equal(cov.to_dense(), np.zeros((3, 3)))
+
+
+def test_7_from_samples_validates_rank_and_member_count():
+    with pytest.raises(ValueError, match="rank 2"):
+        Gaussian.from_samples(jnp.zeros(5))
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        Gaussian.from_samples(jnp.zeros((1, 3)))
+
+
+
 def test_7_sample_matches_its_pinned_elementwise_definition():
     """sample is exactly mean + L.matvec(normal(key, (n_samples, k)))."""
     n = 4

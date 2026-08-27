@@ -1637,10 +1637,24 @@ labelled rather than merged into the result's other fields precisely so that
 which ensemble it belongs to cannot be misread:
 `result.last_evaluated[0]` is *not* `result.ensemble`.
 
-Moments beyond the mean are one line through the layer below —
-`EnsembleJoint(result.ensemble, preds).condition(...)` gives the structured
-posterior, and `jnp.cov` gives the raw one — so the result carries `mean` for
-convenience and stops there.
+Moments beyond the mean are one line through the layer below:
+
+```python
+fit = Gaussian.from_samples(result.ensemble)
+fit.cov.diag()                       # (P,) per-coordinate variances
+fit.sample(key, 1000)                # draws from the fitted moments
+```
+
+{meth}`~pyeki.gauss.Gaussian.from_samples` holds the covariance as a
+{class}`~pyeki.linalg.PSDLowRank` of width $J$, so nothing $P \times P$ is ever
+formed and the rank ceiling of {ref}`eki-subspace` is visible in the type. The
+result therefore carries `mean` for convenience and stops there.
+
+Two things that line is **not**. It is not a further conditioning step:
+`EnsembleJoint.condition` would apply another Kalman update and return an
+ensemble shrunk one extra rung, which is the over-confident direction. And it
+is not a posterior, whatever the run's configuration — it is the fit to the
+terminal ensemble, under every caveat of {ref}`eki-honesty`.
 
 `EKIResult.status` is one of exactly three strings, exported as module-level
 constants so that a comparison cannot be misspelled. `run` produces only the

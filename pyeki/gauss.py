@@ -303,6 +303,75 @@ class Gaussian:
             )
         _check_finite("Gaussian", "mean", self.mean)
 
+    @classmethod
+    def from_samples(cls, samples) -> Gaussian:
+        """The Gaussian fit to a set of samples: their empirical moments.
+
+        The one-block counterpart of :class:`EnsembleJoint`, which fits a
+        joint to two member-aligned blocks. Use it to read an ensemble's
+        moments as a distribution — per-coordinate variances through
+        ``cov.diag()``, fresh draws through :meth:`sample`.
+
+        Parameters
+        ----------
+        samples
+            A ``(J, n)`` array, one sample per row, with :math:`J \\ge 2`.
+
+        Returns
+        -------
+        Gaussian
+            Mean the sample mean; covariance the empirical covariance with
+            the package's :math:`J-1` divisor, held as a
+            :class:`~pyeki.linalg.PSDLowRank` whose factor is
+            :math:`A^\\top/\\sqrt{J-1}`.
+
+        Raises
+        ------
+        ValueError
+            If ``samples`` is not rank 2, or if :math:`J < 2` — a single
+            sample has no anomalies. In debug mode, also if it is not finite.
+
+        Notes
+        -----
+        The covariance is never formed as an :math:`n \\times n` matrix. The
+        stored factor is the scaled anomaly matrix, so the operator *is* the
+        empirical covariance exactly, and costs :math:`O(nJ)` to hold rather
+        than :math:`O(n^2)`.
+
+        Its rank is at most :math:`J-1`, so it is singular whenever
+        :math:`J - 1 < n` — the usual ensemble regime — and
+        :class:`~pyeki.linalg.PSDLowRank` accordingly provides ``diag`` and
+        ``factor`` and withholds ``solve``, ``whiten`` and ``logdet``.
+        :meth:`log_density` therefore raises
+        :class:`~pyeki.linalg.UnsupportedOpError` on the result, which is
+        correct rather than restrictive: a density against a singular
+        covariance is not defined.
+
+        Anomalies are formed with the same centring the conditioning methods
+        use, so identical samples give exactly zero spread rather than
+        round-off, and the cancellation is governed by the spread rather than
+        by the magnitude.
+
+        This is a *fit*, not a conditioning result. Nothing about the samples
+        is assumed beyond their shape, and a Gaussian fit to a non-Gaussian
+        sample describes only its first two moments.
+        """
+        samples = jnp.asarray(samples)
+        if samples.ndim != 2:
+            raise ValueError(
+                f"Gaussian.from_samples: samples must be rank 2, got shape "
+                f"{samples.shape}"
+            )
+        n_samples = samples.shape[0]
+        if n_samples < 2:
+            raise ValueError(
+                f"Gaussian.from_samples: at least 2 samples are required, got "
+                f"{n_samples}. A single sample has no anomalies."
+            )
+        _check_finite("Gaussian.from_samples", "samples", samples)
+        factor = _centered(samples).T / math.sqrt(n_samples - 1)
+        return cls(jnp.mean(samples, axis=-2), PSDLowRank(factor))
+
     @property
     def n(self) -> int:
         """The dimension, the trailing core size of ``mean``."""

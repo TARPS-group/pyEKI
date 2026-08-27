@@ -121,7 +121,7 @@ The public surface is two classes and two functions.
 
 | object          | represents                            | representation                                | role in EKI |
 | --------------- | ------------------------------------- | --------------------------------------------- | ----------- |
-| `Gaussian`      | one Gaussian distribution             | mean vector + `PSDLinOp` covariance           | the prior; the posterior `condition` returns |
+| `Gaussian`      | one Gaussian distribution             | mean vector + `PSDLinOp` covariance           | the prior; what `condition` returns; an ensemble's moments, via `from_samples` |
 | `EnsembleJoint` | the joint Gaussian with an ensemble's empirical moments | $J$ paired samples                | every conditioning operation |
 | `gain_weights`  | ensemble weights for one whitened residual | pure array function                      | the shared conditioning core; localization's entry point |
 | `sqrt_transform`| the square-root update transform      | pure array function                           | the shared conditioning core; localization's entry point |
@@ -394,6 +394,39 @@ capability system of its own: each method requires specific operations of
 `UnsupportedOpError`, unmodified, from the inner call. `gaussian.cov`
 is a public field, so callers gate exactly as they do on operators:
 `gaussian.cov.supports("factor")`.
+
+### `Gaussian.from_samples(samples)`
+
+The Gaussian fit to a `(J, n)` array of samples, $J \ge 2$: mean the sample
+mean, covariance the empirical covariance with this layer's fixed $J-1$
+divisor, held as a {class}`~pyeki.linalg.PSDLowRank` whose factor is
+$A^\top/\sqrt{J-1}$. A classmethod rather than logic in the constructor, per
+{ref}`contract-jax`'s rule that constructors store and classmethods compute.
+
+It is the **one-block counterpart of {class}`EnsembleJoint`**, which fits a
+joint to two member-aligned blocks; the two agree on the $u$ block by
+construction, and the conformance suite pins that. Its purpose is to let a
+caller read an ensemble's moments as a distribution: `cov.diag()` gives the
+per-coordinate variances, and `sample` draws from the fit.
+
+The covariance is never formed as an $n \times n$ matrix — the stored factor
+*is* the empirical covariance, at $O(nJ)$ rather than $O(n^2)$. Its rank is at
+most $J-1$, so it is singular whenever $J - 1 < n$, which is the usual ensemble
+regime; `PSDLowRank` accordingly provides `diag` and `factor` and withholds
+`solve`, `whiten` and `logdet`, so {meth}`log_density` raises
+`UnsupportedOpError` on the result. That is correct rather than restrictive: a
+density against a singular covariance is not defined.
+
+Anomalies are formed with the same centring the conditioning methods use
+({ref}`gauss-kernel`), so identical samples give exactly zero spread rather
+than round-off.
+
+:::{note}
+This is a **fit**, not a conditioning result, and the distinction is the
+caller's to keep. `pyeki.eki` uses it to report the moments of a terminal
+ensemble, and states there what such an ensemble does and does not represent;
+nothing here licenses calling the result a posterior.
+:::
 
 ### `sample(key, n_samples)`
 
@@ -876,7 +909,28 @@ evaluation. Two preconditions are the driver's to enforce, because both
 fail silently here: $J_v \ge 2$ (at $J_v \le 1$ the rescale is `inf` or
 `nan` and the whole ensemble becomes `nan`), and mask identity between
 $u$ and $v$ (differing masks corrupt $\widehat{C}_{uv}$ with no
-exception). This is why the anomaly divisor stays fixed
+exception).
+
+:::{important}
+**`pyeki.eki` does not ship this construction, and the reason is worth
+recording here rather than only there.** The rescaling is applied to the
+*surviving* members too, so each is moved outward from the centre by a
+data-dependent factor at every step — $\sqrt{99/89} \approx 1.055$ at
+$J = 100$ with a tenth of the members failing, which is larger than the
+multiplicative inflation practitioners actually use, applied silently and by
+default. The pair $(u_j, v_j)$ also stops being forward-model-consistent.
+`pyeki.eki` therefore uses the undamped map
+$u_j \mapsto \hat u + m_j (u_j - \hat u)$, accepting a covariance damped by
+$(J_v-1)/(J-1)$ in exchange for leaving valid members bit-identical.
+
+What is written above is the *moment-exact* option and its arithmetic, which
+this layer records because its fixed divisor is what makes the option
+available at all. It is not a recommendation to the driver. The two
+preconditions named above bind either map, since both concern the mask rather
+than the scaling.
+:::
+
+This is why the anomaly divisor stays fixed
 ({ref}`gauss-excluded`).
 
 **Domain localization** (`pyeki.localize`, planned) runs one small analysis
@@ -936,7 +990,8 @@ raising.
 ## Public surface
 
 `pyeki.gauss` exports exactly: the classes `Gaussian` and `EnsembleJoint`,
-and the conditioning primitives `gain_weights` and `sqrt_transform`.
+including `Gaussian.from_samples`, and the conditioning primitives
+`gain_weights` and `sqrt_transform`.
 Anything else is private, and no consumer may depend on it. There is no
 `pyeki.gauss.testing`: the conformance obligations below bind the package's
 own test suite, since the class set is closed.
@@ -1025,7 +1080,12 @@ must verify at least:
    that joint's closed-form posterior moments.
 7. **Marginal formulas**: `sample` matches its pinned elementwise
    definition; `log_density` matches the dense closed form at batch ranks
-   0, 1, and 2 and differentiates.
+   0, 1, and 2 and differentiates. `from_samples` reproduces the sample mean
+   and the $J-1$ covariance exactly against a dense reference, agrees with
+   `EnsembleJoint`'s $u$-block moments from the same members, holds a
+   `PSDLowRank` of width $J$ that withholds `solve`, `whiten` and `logdet`,
+   gives identical samples exactly zero spread, and validates rank and
+   member count.
 8. **Degeneracy**: zero prediction anomalies — every row of `v_samples`
    given the *same, exactly representable* value, since a collapsed
    ensemble of arbitrary values leaves anomalies at $O(\varepsilon)$
