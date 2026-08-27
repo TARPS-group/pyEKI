@@ -415,9 +415,17 @@ scalar dunders do; `beta` must not be negative.
 **Derived attributes.** `n_members` and `u_dim` are `int` properties, named as
 in {doc}`gaussian-contract`.
 
-**`EKIState.from_prior(key, prior, n_members)`** is the classmethod that
-computes, per the operator layer's constructors-store rule. `prior` is a
-{class}`~pyeki.gauss.Gaussian`; the draw is pinned as
+**`EKIState.from_prior(key, prior, n_members)`** draws the initial ensemble
+from the prior — the layer's one piece of work that is neither storing a field
+nor validating one, and therefore the only reason the class has an alternate
+constructor at all. It is a classmethod rather than logic inside `EKIState`,
+per the operator layer's rule that constructors store and classmethods compute
+({ref}`contract-jax`): the dataclass constructor is what pytree unflattening
+bypasses, so anything it computed would silently vanish at a trace boundary.
+Sampling in particular must not live there, since it would redraw the ensemble
+on every reconstruction.
+
+`prior` is a {class}`~pyeki.gauss.Gaussian`; the draw is pinned as
 
 ```python
 key_sample, key_state = jax.random.split(key)
@@ -671,7 +679,10 @@ per realization, and adds no Monte Carlo noise, at the cost of a deterministic
 member-to-member coupling. The stochastic update's output has those moments in
 expectation, with per-realization spread of order $KRK^\top/J$, and is the form
 for which the pathwise-sampling reading of the run is available; it is also the
-form most of the ensemble-Kalman-inversion literature is written in.
+form most of the ensemble-Kalman-inversion literature is written in. The
+deterministic alternative descends from the perturbation-free ensemble
+square-root filters of Whitaker and Hamill and their successors
+({ref}`eki-references`); {doc}`gaussian-contract` owns the transform itself.
 
 **`SquareRootUpdate` is the default**, and the reason is the layer's own
 claims. Telescoping holds exactly under it and only in expectation under the
@@ -834,10 +845,12 @@ implementation cannot satisfy one schedule's version of it and not the other's.
 ### `AdaptiveESSSchedule`
 
 Measures the move by the effective sample size of the importance weights that
-would carry the ensemble from one target to the next. The construction is
-standard in adaptive tempering, and is used here purely as a **step-size
-heuristic**: pyEKI computes no importance weights, does no resampling, and
-makes no importance-sampling correctness claim. Its extra field is `target`,
+would carry the ensemble from one target to the next. The construction is the
+standard ESS-based adaptive tempering of the sequential Monte Carlo literature
+(Jasra and co-authors; convergence theory in Beskos and co-authors —
+{ref}`eki-references`), and is used here purely as a **step-size heuristic**:
+pyEKI computes no importance weights, does no resampling, and makes no
+importance-sampling correctness claim. Its extra field is `target`,
 the ESS level sought as a fraction of $J$, in $(0, 1)$, default `0.5`; and
 `n_bisect`, a static `int` bisection count, default `50`.
 
@@ -926,6 +939,17 @@ Its one extra field is `theta`, a static override for the benchmark scale,
 default `None` meaning $N/2$ — and with that default the schedule has **no
 tuning parameter at all**, which is its main attraction.
 
+This is the **data misfit controller** of Iglesias and Yang
+({ref}`eki-references`), reproduced here rather than invented: their equation
+for $\alpha_n^{-1}$ is the criterion below, their $\theta = M/2$ is this
+section's $\theta = N/2$, and their budget clamp $1 - t_n$ is
+{ref}`eki-adaptive`'s. Two things this contract adds are presentational rather
+than mathematical — the criterion is expressed in increments rather than in the
+inflation factors $\alpha_n$ that the multiple-data-assimilation literature
+uses, and the clamps are specified with an explicit precedence — and one is a
+genuine requirement the source does not need: the guarded divisions below,
+because pyEKI must not return `nan` on a collapsed ensemble.
+
 The criterion. Write $\chi_j = 2\,\delta\,\Phi_j$ for member $j$'s whitened
 misfit measured at *this step's own* noise level $R/\delta$, rather than at
 the base level. If the step's target were well specified and the ensemble were
@@ -955,16 +979,47 @@ clamped as {ref}`eki-adaptive` specifies — where the budget clamp
 $\beta_{\text{final}} - \beta$ is what makes a run terminate exactly at
 $\beta_{\text{final}}$ with the increments summing to it.
 
-**The `max` is deliberate and is not a `min`.** The two lines are separate
-sufficient benchmarks, not joint requirements, so taking the larger admits the
-longest step meeting at least one of them. Which one binds is decided by the
-misfits' coefficient of variation: the mean bound is the larger exactly when
-$\sigma_\Phi/\overline{\Phi} > \sqrt{2/N}$, so for any appreciable $N$ the
-mean bound normally sets the step and the variance bound takes over only for
-an unusually tightly clustered ensemble — where it correctly permits a longer
-step than the mean alone would. A `min` would let whichever bound is
-momentarily pessimistic stall the ladder; a caller who wants that conservative
-reading writes a four-line schedule of their own.
+**The `max` is deliberate and is not a `min`.** Read as two independent
+benchmarks the `max` looks merely permissive — take the longest step meeting at
+least one of them — but the source's derivation makes it forced, and that
+derivation is worth recording because the inversion is an easy and silent
+mistake.
+
+Iglesias and Yang obtain the criterion by controlling the **Jeffreys
+(symmetrized Kullback–Leibler) divergence between consecutive tempered
+measures**, requiring it to stay below $\theta$. That divergence cannot be
+evaluated at step $t$, since it depends on the next measure, so it is
+approximated in two regimes: dropping the unknown term gives the upper bound
+$\delta\,\overline{\Phi}$, accurate when the mean misfit falls substantially
+across the rung; and a first-order expansion of $\overline{\Phi}$ in $\delta$
+gives $\delta^2\sigma^2_\Phi$, accurate when it barely moves. Neither is valid
+throughout, so the divergence is approximated by the **smaller** of the two,
+
+$$
+D_{\mathrm{J}} \;\approx\; \min\bigl\{\, \delta\,\overline{\Phi},\ \
+\delta^2 \sigma^2_\Phi \,\bigr\} \;\le\; \theta ,
+$$
+
+and a `min` bounded by $\theta$ is satisfied exactly when $\delta$ is below the
+**larger** of the two thresholds. The `max` in the criterion is that `min`
+turned inside out; writing `min` there would impose both approximations at
+once, including whichever one is invalid in the current regime, and would stall
+the ladder on the invalid one.
+
+The threshold $\theta = N/2$ is then fixed by a *statistical discrepancy
+principle* rather than tuned. At the step's own noise level the whitened misfit
+$\chi_j$ would be $\chi^2_N$ if the target were well specified, so requiring the
+mean below $N$ and the variance below $2N$ — the two benchmarks stated above —
+is exactly $\theta = N/2$ in both bounds. That is the sense in which the
+schedule has no free parameter: the observation dimension supplies it.
+
+Which bound binds is decided by the misfits' coefficient of variation: the mean
+bound is the larger exactly when $\sigma_\Phi/\overline{\Phi} > \sqrt{2/N}$. For
+any appreciable $N$ that is the common case — the source reports it holding
+throughout its own experiments, and notes that it corresponds to a prior wide
+enough to contain the truth. The variance bound takes over for an unusually
+tightly clustered ensemble, or a prior centred far from the truth with little
+spread, where it correctly permits a longer step than the mean alone would.
 
 **How this differs from the ESS criterion — and why both ship.** The two are
 not variants of one idea, and they do not agree. Under the small-increment
@@ -1009,8 +1064,10 @@ ensemble that is then returned unchanged. That evaluation is visible in the
 history as the terminal record ({ref}`eki-diagnostics`), and it is inherent,
 not an implementation artifact.
 
-**`DiscrepancyStop(tau=1.0)`** implements the discrepancy principle: stop as
-soon as the ensemble centre fits the data to within the noise level,
+**`DiscrepancyStop(tau=1.0)`** implements Morozov's discrepancy principle,
+in the form Iglesias adapted to ensemble Kalman methods
+({ref}`eki-references`): stop as soon as the ensemble centre fits the data to
+within the noise level,
 
 $$
 2\,\Phi(\bar v) \;\le\; \tau^2 N ,
@@ -1093,8 +1150,9 @@ read any external formula's definition before transcribing it.
 | `MultiplicativeInflation(anomaly_factor)` | 0-d array | $u_j \mapsto \bar u + r\,(u_j - \bar u)$ |
 | `AdditiveInflation(cov)` | a `PSDLinOp` of side $P$ | adds centred draws from `cov` |
 
-**`MultiplicativeInflation`** scales the anomalies, so the empirical covariance
-is multiplied by $r^2$, the field **squared**. The field is therefore named
+**`MultiplicativeInflation`** is the classical covariance inflation of Anderson
+and Anderson ({ref}`eki-references`). It scales the anomalies, so the empirical
+covariance is multiplied by $r^2$, the field **squared**. The field is therefore named
 `anomaly_factor` rather than `factor`: the literature is genuinely split
 between the anomaly convention and the covariance convention $C \mapsto \gamma C$,
 uses the same symbols for both, and the two are related by $\gamma = r^2$.
@@ -1723,15 +1781,15 @@ revisit the design.
 
 | variant | expressed as |
 | ------- | ------------ |
-| approximate posterior sampling by tempering (multiple data assimilation) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_final=1.0)`, with the default `SquareRootUpdate` |
+| approximate posterior sampling by tempering (the ensemble smoother with multiple data assimilation of Emerick and Reynolds) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_final=1.0)`, with the default `SquareRootUpdate` |
 | the same, in its classical perturbed-observation form | those schedules with `update=StochasticUpdate()` |
 | a single Kalman update (the one-step linearized approximation) | `FixedSchedule.constant(1.0, 1)` |
 | EKI as an iterative regularization method | `FixedSchedule.constant(1.0, n)` with `stop=DiscrepancyStop()` |
-| adaptive-regularization EKI | `AdaptiveMisfitSchedule(beta_final=None)` with `stop=DiscrepancyStop()` |
+| adaptive-regularization EKI (the EKI-DMC scheme of Iglesias and Yang) | `AdaptiveMisfitSchedule` with `stop=DiscrepancyStop()` |
 | inflation-stabilized variants | any of the above with `inflation=` |
 | Tikhonov-regularized EKI | an augmented problem; see below — no new code |
 | localized EKI | `update=` an update rule from `pyeki.localize` |
-| a Langevin-type ensemble sampler | a custom `EnsembleUpdate` holding the prior, using `increment` as its step size |
+| a Langevin-type ensemble sampler (the ensemble Kalman sampler of Garbuno-Iñigo and co-authors) | a custom `EnsembleUpdate` holding the prior, using `increment` as its step size |
 
 **Two of these deserve detail**, because they are where the design either
 earns its keep or does not.
@@ -1782,8 +1840,9 @@ $\tfrac{\lambda}{2}\lVert C_0^{-1/2}(u - m_0)\rVert^2$, a
 Centring at $m_0$ rather than at the origin is a choice, and the origin is
 recovered by passing a zero mean.
 
-*A Langevin-type update fits the protocol.* Such rules add a prior-drift and a
-diffusion term to the Kalman-like term and are driven by a step size rather
+*A Langevin-type update fits the protocol.* Such rules — the ensemble Kalman
+sampler and its affine-invariant relatives ({ref}`eki-references`) — add a
+prior-drift and a diffusion term to the Kalman-like term and are driven by a step size rather
 than a temperature budget. They need the ensemble, the predictions, $y$, the
 noise, a step size, a key, and the prior — which is exactly the update
 signature plus a field on the rule, and it is why `increment` is passed
@@ -2061,6 +2120,34 @@ that counts its own calls (and so breaks resumption), an increment baked in as
 a Python constant (and so recompiles every step), a `StepRecord` field declared
 static (and so unstackable), and the safety bound checked before ladder
 exhaustion (and so raising on a completed run).
+
+(eki-references)=
+## References
+
+Where a shipped policy reproduces a published method, this is the source. The
+list is deliberately short: it covers what the layer *implements*, not the
+ensemble-Kalman literature at large, and it is the one place in the package
+that points outside the repository — the docstring rule that keeps
+documentation self-contained applies to the API, and a design contract that
+implemented someone else's criterion without saying so would be worse for being
+tidy.
+
+| shipped as | source |
+| ---------- | ------ |
+| `AdaptiveMisfitSchedule` | M. A. Iglesias and Y. Yang, *Adaptive regularisation for ensemble Kalman inversion*, Inverse Problems, 2021; arXiv:2006.14980. The data misfit controller, its Jeffreys-divergence derivation, and the statistical discrepancy principle fixing $\theta = N/2$. |
+| `DiscrepancyStop` | V. A. Morozov, for the discrepancy principle itself; M. A. Iglesias, *A regularizing iterative ensemble Kalman method for PDE-constrained inverse problems*, Inverse Problems, 2016, for its use as a stopping rule in an ensemble Kalman method. |
+| `AdaptiveESSSchedule` | A. Jasra, D. A. Stephens, A. Doucet and T. Tsagaris, *Inference for Lévy-driven stochastic volatility models via adaptive sequential Monte Carlo*, Scandinavian Journal of Statistics 38(1):1–22, 2010, for ESS-based adaptive tempering; A. Beskos, A. Jasra, N. Kantas and A. H. Thiéry, *On the convergence of adaptive sequential Monte Carlo methods*, Annals of Applied Probability 26(2):1111–1146, 2016, for its convergence theory; Y. Zhou, A. M. Johansen and J. A. D. Aston, *Towards automatic model comparison: an adaptive sequential Monte Carlo approach*, Journal of Computational and Graphical Statistics 25(3):701–726, 2016, for the conditional-ESS generalization pyEKI does **not** implement. |
+| the tempered ladder as an algorithm | A. A. Emerick and A. C. Reynolds, *Ensemble smoother with multiple data assimilation*, Computers & Geosciences 55:3–15, 2013. The inflation factors $\alpha_n$ of that literature are this contract's reciprocal increments, and the requirement that they sum appropriately is {ref}`eki-iteration`'s telescoping. |
+| `MultiplicativeInflation` | J. L. Anderson and S. L. Anderson, *A Monte Carlo implementation of the nonlinear filtering problem to produce ensemble assimilations and forecasts*, Monthly Weather Review 127:2741–2758, 1999. |
+| `SquareRootUpdate`'s lineage | J. S. Whitaker and T. M. Hamill, *Ensemble data assimilation without perturbed observations*, Monthly Weather Review 130:1913–1924, 2002. The transform this layer uses is specified in {doc}`gaussian-contract`, not here. |
+| the Langevin variant of {ref}`eki-variants` | A. Garbuno-Iñigo, F. Hoffmann, W. Li and A. M. Stuart, *Interacting Langevin diffusions: gradient structure and ensemble Kalman sampler*, SIAM Journal on Applied Dynamical Systems, 2020. |
+
+Two notes on what is *not* claimed. The relaxation-to-prior inflation family and
+the damped iterative ensemble smoothers named in {ref}`eki-excluded` and
+{ref}`eki-step` are referred to by description rather than cited, because the
+layer does not ship them — it only undertakes not to foreclose them. And
+`AdaptiveESSSchedule`'s default target of `0.5` is pyEKI's choice, not a value
+any of the above prescribes.
 
 (eki-excluded)=
 ## Deliberately excluded
