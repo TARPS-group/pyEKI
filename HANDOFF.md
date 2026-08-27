@@ -1,8 +1,8 @@
 # Handoff
 
-Written 2026-08-24 and updated 2026-08-25, after the operator layer was
-reworked against the normative contract. Read `CLAUDE.md` first for
-conventions, then this for state and next steps.
+Written 2026-08-24, updated 2026-08-25 after the operator layer was reworked
+against the normative contract, and 2026-08-27 after `pyeki.eki` shipped. Read
+`CLAUDE.md` first for conventions, then this for state and next steps.
 
 ## Where things stand
 
@@ -15,14 +15,23 @@ methods gate and validate; authors implement `_`-prefixed hooks), transposes
 six elementary operators, nine composites with factory functions, a debug
 mode for value
 preconditions, and a 14-check conformance harness; the full test suite passes.
-Documentation builds: landing page, installation, quickstart, operator
-catalogue, a guide to writing an operator, the operator contract, the
-joint Gaussian contract, design notes, and an API reference.
+Documentation builds with zero warnings: landing page, installation,
+quickstart, three user-guide pages plus a guide to writing an operator, the
+three normative contracts, design notes, and an API reference.
 
-**Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design
-background for all three is in `docs/design.md`; `pyeki.gauss` and `pyeki.eki`
-additionally have their full normative contracts in
-`docs/gaussian-contract.md` and `docs/eki-contract.md`.
+`pyeki.gauss` is implemented to `docs/gaussian-contract.md`: `Gaussian`,
+`EnsembleJoint` and the two array-level conditioning primitives, all routed
+through the whitened-SVD kernel. `PSDLowRank`, the operator it needed, is in
+`pyeki.linalg`.
+
+`pyeki.eki` is implemented to `docs/eki-contract.md`: the four value classes,
+the three policy protocols with eight shipped implementations, the two public
+phases of a rung, `run` and `iterate`, the three array-level helpers, and the
+`pyeki.eki.testing` conformance harness for user-written policies. Its
+user-guide page is `docs/user-guide/running-an-inversion.md`.
+
+**Not started.** `pyeki.localize`, and the Kronecker family of operators. The
+design background for both is in `docs/design.md`.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -31,11 +40,12 @@ pyEKI. Nothing domain-specific should come back across.
 
 ## Next steps, in order
 
-### 1. `Kron` (start here)
+### 1. `Kron`
 
-The operator that blocks the rest of the linalg roadmap (`pyeki.gauss` has
-its own linalg prerequisite, `PSDLowRank`, listed under step 2). Two variants, and they are not
-the same code:
+The operator that blocks the rest of the linalg roadmap. No shipped layer
+needs it — `pyeki.gauss` and `pyeki.eki` run on the operators already there —
+so this is a capability step rather than an unblocking one. Two variants, and
+they are not the same code:
 
 - **Square** `Kron(A, B)` representing $A \otimes B$. Convention: the first
   factor's index is the *slow* one, so block $(i,j)$ of the result is
@@ -59,55 +69,25 @@ Then `KronLMC` (a sum $\sum_q A_q \otimes B_q$), `KronPlusNugget` and
 `LowRankPlus`, in that order. `docs/design.md` records the closed forms and
 their preconditions, including a log-determinant term that is easy to omit.
 
-### 2. `pyeki.gauss`
-
-The conditioning layer. Its normative design is
-`docs/gaussian-contract.md` — adversarially reviewed and ready to
-implement; `docs/design.md` is background, giving the whitened-SVD kernel
-and why it beats the Woodbury route on the normal equations. The shape
-differs from the suggestion this section previously recorded: one closed `EnsembleJoint` class plus a
-`Gaussian` marginal and two array-level conditioning primitives; no
-operator-represented joint (the dense reference is hand-written in the
-tests, deliberately); and the whitened-SVD kernel as the single algorithm.
-The contract's *Deliberately excluded* section records why each earlier
-suggestion was dropped.
-
-Two deliverables the contract names and this list previously did not: the
-layer needs a new operator, **`PSDLowRank`** (specified in the Gaussian
-contract, to be added to `pyeki.linalg` and to the operator contract's
-public surface, with tier-2 validation `check_operator` will not catch),
-and the implementation PR must add the layer's user-guide page.
-
-### 3. `pyeki.eki`
-
-Tempering ladder, ensemble updates, inflation, driver loop. Its normative
-design is `docs/eki-contract.md` — adversarially reviewed and ready to
-implement.
-
-:::{important}
-The per-step observation noise is $\Sigma/\Delta\beta_t$, using the tempering
-*increment*, not $\Sigma/\beta_t$. Per-step precisions must telescope to the
-total. On a linear-Gaussian problem with a five-step ladder, the increment form
-reproduces the one-shot posterior to $10^{-15}$ while the other is off by 0.12
-in the mean and 0.25 in the covariance — and the error grows with ladder
-length. Write the telescoping test first.
-:::
-
-The contract's shape: one driver, and the *schedule* decides which form of EKI
-you get — a budget summing to $\beta = 1$ gives the approximate-sampling form,
-an unbounded ladder with a discrepancy stopping rule gives the optimization
-form. Schedule, update rule, inflation and stopping rule are four independent
-protocols with shipped implementations; `pyeki.localize` will plug in as an
-update rule. The loop is ordinary Python, because the forward model may not be
-traceable; every array computation in the layer is `jit`-safe.
-
-### 4. `pyeki.localize`
+### 2. `pyeki.localize`
 
 Domain localization, not covariance localization — `docs/design.md` explains
 why the latter destroys the low-rank structure the conditioning kernel depends
 on. Watch the two hazards recorded there: exempting unlocated parameters from
 tapering, and fixed-size neighbourhoods with masks so the local analyses
 vectorize.
+
+`pyeki.eki` is ready for it: localization plugs in as an `EnsembleUpdate`,
+and the driver needs no knowledge of it. Two things localization must bring
+itself, neither of which `pyeki.eki` supplies: observation **locations**,
+which appear nowhere in the layer and so live as static fields on the rule,
+and the neighbourhood and taper definitions. One real limit, recorded in the
+EKI contract's *How the layers around this one connect*: extracting a
+principal submatrix of a *correlated* noise block is not an operator-layer
+operation, so localization composes cleanly for diagonal noise or for
+neighbourhoods aligned to the noise operator's blocks, and not for arbitrary
+neighbourhoods cutting across a correlated block. That is a constraint on
+neighbourhood construction rather than a gap in the layer below.
 
 ## Open decisions
 
@@ -121,15 +101,27 @@ than binary nesting; and a way for a rule to decline. A reasonable alternative
 is not to simplify on addition at all, and instead dispatch on structure inside
 `solve` and `logdet`.
 
-(Two decisions previously listed here — capability declaration and whitening
-versus triangularity — were settled by the operator contract: `supports()` is
-defined by hook presence with derived-dependency resolution, and `cholesky()`
-was removed in favour of `factor()` plus a primitive `whiten()`.)
+**The validity mask on `Evaluation`.** Only `n_valid` is carried, not the
+`(J,)` boolean mask, so an update that wanted to down-weight repaired members
+cannot see which they were. Deferred rather than declined: the update
+protocol's `**_` seam makes adding the field non-breaking, and the consumer
+that would use it — `pyeki.localize` — does not exist yet and so cannot say
+what shape it wants. Revisit when localization lands. The EKI contract's
+*Diagnostics* section records the argument.
+
+(Three decisions previously listed here were settled. Capability declaration
+and whitening versus triangularity went to the operator contract: `supports()`
+is defined by hook presence with derived-dependency resolution, and
+`cholesky()` was removed in favour of `factor()` plus a primitive `whiten()`.
+`AdditiveInflation`'s per-rung refactorization was settled by adding
+`AdditiveInflation.from_cov`, which factorizes at construction; the contract
+was amended in the same PR.)
 
 ## Things not to rediscover
 
 Each of these cost real effort to find and produces wrong numbers rather than
-errors. All are recorded in `docs/design.md`; this is the index.
+errors. Each is recorded in `docs/design.md` or in the contract for its
+layer; this is the index.
 
 | finding | consequence |
 | --- | --- |
@@ -144,6 +136,13 @@ errors. All are recorded in `docs/design.md`; this is the index.
 | Lazy factorization caches are discarded inside traces | silent ~10x slowdown |
 | Undeclared non-array dataclass fields become tracers | fails later, far from the declaration |
 | JAX has no generalized `eigh` | reformulate via Cholesky whitening |
+| Per-step noise is $\Sigma/\Delta\beta_t$, never $\Sigma/\beta_t$ | a plausible posterior, wrong by $(T+1)/2$ times the data precision on a uniform $T$-rung ladder, growing with ladder length |
+| A single-`where` guard sends a `nan` misfit to the `inf` branch | `nan > 0` is `False`, so the schedule silently returns the *largest* allowed step |
+| A Python float passed as a `jit` **argument** does not retrace | the retrace-per-step bug is a *static field* on an object crossing the boundary, so never pass an `EKIState` or `Evaluation` whole |
+| `Evaluation.centre_misfit` is not the mean of `Evaluation.misfits` | they differ by exactly $\tfrac{J-1}{2J}\operatorname{tr}(W \widehat C_{vv} W^\top)$ |
+| The repair formula is not bit-exactly the identity when nothing failed | it must be `jnp.where(valid, ensemble, centre)` *and* skipped in Python on the synchronized `n_valid` |
+| A static field on a `HistoryRecord` makes every record a different pytree | `jax.tree.map` across a history raises instead of stacking |
+| `step` is cumulative across runs | chaining a fresh ladder onto a finished state returns unchanged, with nothing raised — use `restart()` |
 
 ## Working agreements
 
