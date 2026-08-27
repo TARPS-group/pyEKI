@@ -329,7 +329,7 @@ centre = sampled.mean                # (P,) its mean
 fit = run(state, forward, y, noise_cov,
           schedule=FixedSchedule.constant(1.0, n_steps=200),
           stop=DiscrepancyStop(tau=1.0))
-assert fit.converged                 # False means the ladder ran out first
+assert fit.stop_fired                # False means the ladder ran out first
 ```
 
 Neither result is named `posterior`. `sampled.ensemble` is an approximate
@@ -376,7 +376,7 @@ arbitrary intermediate level. `EKIResult.status` records which happened, and
 | object | kind | role |
 | ------ | ---- | ---- |
 | `EKIState` | pytree | the loop-carried state: ensemble, level, step index, key |
-| `StepSummary` | pytree | what a schedule or stopping rule sees about the current step |
+| `Evaluation` | pytree | everything one forward evaluation produced: the members, their predictions, and the whitened residuals |
 | `StepRecord` | pytree | one row of the run's history: scalars only |
 | `EKIResult` | frozen dataclass | the final state, the history, and why the run ended |
 | `EnsembleUpdate` | protocol | one ensemble update, given an increment |
@@ -483,42 +483,93 @@ concatenate in call order.
 (eki-step)=
 ## The step
 
-One iteration, specified once and used three times: `iterate` is a loop over
-it, `run` is a loop over `iterate`, and it is public in its own right.
+One iteration, as **two public phases** and one convenience that composes them.
+`iterate` and `run` are loops over the same two phases.
 
-### `step(state, forward, y, noise_cov, *, increment, update=SquareRootUpdate(), inflation=None, on_failure="repair")`
+| function | does | returns |
+| -------- | ---- | ------- |
+| `evaluate` | inflate, call the forward model, repair, summarize | an `Evaluation` |
+| `apply` | validate the increment, update, check finiteness, advance | `(EKIState, StepRecord)` |
+| `advance` | `evaluate` then `apply`, at a given increment | `(EKIState, StepRecord)` |
 
-Carries `state` forward by one rung at the **given** increment, returning
-`(EKIState, StepRecord)`. It chooses nothing: no schedule, no stopping rule, no
+### `evaluate(state, forward, y, noise_cov, *, inflation=None, on_failure="repair")`
+
+Runs the forward model once and returns everything that evaluation produced. It
+takes **no increment** and moves nothing: `state` is untouched, and the level
+and the step index are carried into the result unchanged.
+
+This is the phase that costs a forward-model evaluation, and making it public
+separately is what lets a caller spend that resource deliberately. Three
+consumers need it:
+
+- **Backtracking and damping.** One `Evaluation` serves any number of trial
+  increments, because `apply` takes it as an argument
+  ({ref}`eki-step-backtracking`).
+- **Consulting a policy outside the driver.** A `Schedule` or `StoppingRule`
+  takes an `Evaluation`, so a caller driving the loop by hand can use the
+  shipped policies rather than reimplementing their criteria.
+- **Diagnostics the record does not carry.** The singular values of $S$, the
+  per-member misfits, the posterior predictive — all live on the `Evaluation`
+  ({ref}`eki-diagnostics`).
+
+### `apply(state, evaluation, *, increment, y, noise_cov, update=TransformUpdate())`
+
+Moves `state` forward by the given increment, using an `Evaluation` already
+obtained from it. Chooses nothing: no schedule, no stopping rule, no
 `max_steps`. Those are the driver's, and everything they decide is passed in.
 
-Making the single iteration public is what keeps {ref}`eki-driver`'s claim —
-that `iterate` is the extension point — true for the algorithms that need to
-*revisit* a step rather than merely observe it. A generator can be abandoned
-but not re-entered with a revised decision, so the whole damped/backtracking
-family (propose a step, evaluate it, accept it or shrink the damping and retry)
-is unwritable against `iterate` alone. Against `step` it is an ordinary loop,
-because states are immutable and re-stepping from the same one is exactly
-"reject and retry":
+**`evaluation` must belong to `state`.** `apply` checks
+`evaluation.step == state.step` and `evaluation.beta == state.beta` and raises
+`ValueError` otherwise. Without the check, pairing an evaluation with a
+different state would take the key split from one and the members from the
+other and return finite, plausible nonsense.
+
+`y` and `noise_cov` are passed again rather than carried on the `Evaluation`,
+which holds no problem data — it is a record of an evaluation, not a bound
+problem. This is also what makes `apply` the entry point for anything that
+varies the *data* between rungs, a subsampled or randomized observation vector
+among them, which the driver deliberately fixes for a whole run
+({ref}`eki-excluded`).
+
+### `advance(state, forward, y, noise_cov, *, increment, update=TransformUpdate(), inflation=None, on_failure="repair")`
+
+Exactly `apply(state, evaluate(state, forward, y, noise_cov, inflation=...,
+on_failure=...), increment=increment, y=y, noise_cov=noise_cov, update=...)`,
+provided because one rung at a known increment is the common case. Named
+`advance` rather than `step` because `step` is an index on three classes and a
+keyword argument, and `step = step(...)` is a shadowing mistake waiting to
+happen.
+
+(eki-step-backtracking)=
+### Backtracking, as the two phases make it
+
+The damped and backtracking family — propose an increment, judge it, accept it
+or shrink and retry — is why the phases are public. States are immutable, so
+re-applying from the same state with a smaller increment is exactly "reject and
+retry", and the rejected trial costs **no** re-evaluation at the current state:
 
 ```python
 s, delta = state, 1.0
-while not done(s):
-    trial, record = step(s, forward, y, noise_cov, increment=delta)
-    _, probe = step(trial, forward, y, noise_cov, increment=delta)
-    if probe.misfit_mean < record.misfit_mean:
-        s, delta = trial, delta * 1.5      # accept, lengthen
+current = evaluate(s, forward, y, noise_cov)
+while not done(current):
+    trial, record = apply(s, current, increment=delta, y=y, noise_cov=noise_cov)
+    probe = evaluate(trial, forward, y, noise_cov)
+    if probe.centre_misfit < current.centre_misfit:
+        s, current, delta = trial, probe, delta * 1.5   # accept, lengthen
     else:
-        delta = delta / 2                  # reject, retry from the same state
+        delta = delta / 2                               # reject, reuse `current`
 ```
 
-One evaluation per rejection is wasted, which is what backtracking costs in any
-implementation; the layer neither hides that nor pays it for callers who do not
-want it. `step` is also the entry point for anything that varies the *data*
-between rungs — a subsampled or randomized observation vector — which the
-driver deliberately fixes for a whole run ({ref}`eki-excluded`).
+The accepted branch reuses `probe` as the next rung's evaluation, so the
+steady-state cost is **one forward evaluation per rung plus one per rejection**
+— which is what backtracking costs in any implementation. The layer neither
+hides that nor pays it for callers who do not want it. A loop written against
+`advance` alone would instead re-evaluate the current state on every trial,
+doubling the cost, which is why the phases and not just their composition are
+public.
 
-**The order of operations is normative.**
+**The order of operations is normative.** Steps 1–5 are `evaluate`; steps
+0 and 6–9 are `apply`.
 
 1. **Split the key**, always into three, whatever the policies are:
 
@@ -527,7 +578,12 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
    ```
 
    Fixed arity means turning inflation on or off does not shift the update's
-   random stream ({ref}`eki-prng`).
+   random stream ({ref}`eki-prng`). **Both phases perform this split
+   independently** from the same `state.key`, rather than `evaluate` handing
+   `key_update` and `key_next` on through the `Evaluation`. The split is
+   deterministic, so they agree; it costs nothing; and it keeps the
+   fixed-arity rule stated in one place instead of putting the update's key on
+   an object that every `Schedule` and `StoppingRule` receives.
 2. **Inflate.** `u = inflation(key_inflate, ensemble=state.ensemble,
    step=state.step, beta=state.beta)`, or `u = state.ensemble` bit-exactly
    when `inflation is None`. Inflation happens here — before the forward
@@ -545,9 +601,19 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
    untouched**; if `on_failure == "raise"`, raise `EKIError`; if $J_v < 2$,
    raise `EKIError` regardless of `on_failure`; otherwise apply
    `repair_failed_members` ({ref}`eki-failures`).
-5. **Summarize.** Build the `StepSummary` from the repaired ensemble and
-   predictions ({ref}`eki-diagnostics`). `step` returns the summary's contents
-   through the record; the driver consults the summary itself.
+5. **Summarize.** Build the `Evaluation` from the repaired ensemble and
+   predictions ({ref}`eki-diagnostics`), and return it. This ends `evaluate`.
+
+0. **Validate, before anything else.** `apply` checks its `increment` and that
+   its `evaluation` belongs to its `state` **on entry**, before the key split.
+   Numbered zero because it precedes step 6's position in the original
+   ordering, and the placement matters: validating the increment after the
+   forward model has run — which a single fused `step` had to do, since the
+   driver cannot know the increment until it has seen the evaluation — spends
+   $J$ model evaluations before rejecting an argument the caller got wrong.
+   Splitting the phases removes that cost for every caller of `apply`, and the
+   driver still validates a schedule-returned increment at the same point it
+   always did, because that is the earliest it exists.
 6. **Validate the increment.** It must be a scalar, finite, and **strictly
    positive**, converted to a 0-d float array; otherwise `ValueError`. A zero
    increment is rejected even though it raises nothing: $R/0$ is a
@@ -555,9 +621,10 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
    zero, so the gain vanishes and the ensemble is returned **unchanged** while
    $\beta$ never advances. An adaptive ladder would then spin until
    `max_steps`.
-7. **Update.** `u_new = update(key_update, ensemble=u, predictions=v, y=y,
-   noise_cov=noise_cov, increment=dbeta, step=state.step, beta=state.beta)`,
-   validated to be `(J, P)`.
+7. **Update.** `u_new = update(key_update, ensemble=evaluation.ensemble,
+   predictions=evaluation.predictions, y=y, noise_cov=noise_cov,
+   increment=dbeta, step=state.step, beta=state.beta)`, validated to be
+   `(J, P)` with a real floating dtype matching the incoming ensemble's.
 8. **Finiteness.** If `u_new` contains a non-finite entry, raise `EKIError`
    naming the step and the level. Silent `nan` propagation through a long run
    is the worst outcome available to this layer, and the cost is one $O(JP)$
@@ -566,11 +633,11 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
    `EKIState(u_new, state.beta + dbeta, state.step + 1, key_next)` and the
    step's `StepRecord`.
 
-Steps 4, 6 and 8 read concrete values, so a step **synchronizes with the device
-a small fixed number of times** — at most three here, and at most four in
-`iterate`, which also reads the exhaustion check and the stopping rule. The reads cannot
-be coalesced: step 6 decides whether to dispatch the update, and step 8 reads a
-value the update produces. This is a deliberate cost: $O(1)$ scalars and one
+Steps 4, 6 and 8 read concrete values, so one rung **synchronizes with the
+device a small fixed number of times** — at most three across the two phases,
+and at most four in `iterate`, which also reads the exhaustion check and the
+stopping rule. The reads cannot be coalesced: step 6 decides whether to
+dispatch the update, and step 8 reads a value the update produces. This is a deliberate cost: $O(1)$ scalars and one
 reduction against $J$ forward-model evaluations, and it is what allows
 termination, validation and adaptive increments to be ordinary Python.
 
@@ -1467,9 +1534,11 @@ field that could disagree with the summary it came from would be a defect. The
 one field the record adds from outside is the increment, which is not known
 until the schedule has seen the summary.
 
-### `StepSummary`
+### `Evaluation`
 
-What a schedule's `increment` and a stopping rule see.
+Everything one forward evaluation produced: what a schedule's `next_increment`
+and a stopping rule see, what {func}`apply` consumes, and what a run reports as
+its `last_evaluation`. Returned by {func}`evaluate` ({ref}`eki-step`).
 
 **Fields.**
 
@@ -1477,12 +1546,30 @@ What a schedule's `increment` and a stopping rule see.
 | ----- | ----- | ------- |
 | `step` | static `int` | the index of this step |
 | `beta` | 0-d | the level *entering* the step |
+| `ensemble` | `(J, P)` | the members that were evaluated — after inflation and after repair |
+| `predictions` | `(J, N)` | their predictions, after repair |
 | `whitened_residuals` | `(J, N)` | row $j$ is $W(y - v_j)$, after repair |
-| `spread` | 0-d | $\lVert A_u \rVert_F / \sqrt{(J-1)P}$, the root-mean-square per-coordinate ensemble standard deviation |
+| `rms_parameter_spread` | 0-d | $\lVert A_u \rVert_F / \sqrt{(J-1)P}$, the root-mean-square per-coordinate ensemble standard deviation |
 | `n_valid` | static `int` | how many members' predictions were finite |
 
-**The single array field is deliberate, and it is the layer's choice of
-sufficient statistic.** Write $b_j = W(y - v_j)$ for the rows. Then
+**`ensemble` is not the ensemble the caller supplied.** It is post-inflation
+and post-repair: the members that were actually run through the forward model
+and that the update will actually move. Both transformations happen inside
+{func}`evaluate` ({ref}`eki-inflation`, {ref}`eki-failures`), and neither is
+recoverable by the caller — inflation consumes a split key, and repair depends
+on which rows came back non-finite. Carrying the pair is what makes
+`last_evaluation` answerable at all, and it costs nothing: the driver holds
+both arrays live for the update regardless.
+
+**`rms_parameter_spread` is scale-dependent**, and the name says so. It
+averages per-coordinate standard deviations across parameters that may carry
+unrelated units, so for an unscaled parameter vector it is dominated by the
+largest-magnitude coordinate. The scale-free collapse diagnostic is the leading
+singular value of $S$, which this layer deliberately does not compute
+({ref}`eki-excluded`) and which is recoverable from `whitened_residuals`.
+
+**Why `whitened_residuals` rather than just the misfit vector.** Write
+$b_j = W(y - v_j)$ for the rows. Then
 
 $$
 \Phi_j = \tfrac12\lVert b_j\rVert^2,
@@ -1504,6 +1591,9 @@ $\langle W(v_k - \bar v),\, b_j\rangle$ — is expressible as a `Schedule`
 instead of being locked out of the protocol. $N$ is likewise recoverable, from
 the trailing axis, so a criterion may be calibrated to the observation
 dimension without the schedule storing it.
+
+Every method and derived property below raises on a vmapped family, and the
+class is otherwise an ordinary unbatched frozen pytree ({ref}`eki-jax`).
 
 :::{note}
 **The whitening is computed twice per step, and the layer accepts that.** The
@@ -1539,7 +1629,7 @@ than an optimization.
 | -------- | ----- |
 | `misfits` | `(J,)`, $\Phi_j = \tfrac12\lVert b_j\rVert^2$ |
 | `centre_misfit` | 0-d, $\Phi(\bar v) = \tfrac12\lVert \bar b\rVert^2$ |
-| `n_members`, `n_obs` | `int` |
+| `n_members`, `u_dim`, `v_dim` | `int`, named as in {doc}`gaussian-contract` |
 
 `centre_misfit` is *not* the mean of `misfits`, and the two must never be
 confused: they differ by half the whitened prediction spread,
@@ -1572,7 +1662,7 @@ rather than an oversight.** Static fields live in a pytree's treedef, so two
 records with different `step` values would have different treedefs, and
 `jax.tree.map` across a history would raise instead of stacking. The history is
 the one collection in the package meant to be stacked, so its element type must
-be homogeneous as a pytree. `StepSummary.step` stays a static `int` for the
+be homogeneous as a pytree. `Evaluation.step` stays a static `int` for the
 opposite reason: `FixedSchedule` indexes a Python tuple with it, which a traced
 value cannot do.
 
@@ -1621,16 +1711,22 @@ record therefore means "evaluated, then stopped"; this is the one zero
 increment the layer permits, and it is written by the driver, never returned
 by a schedule.
 
-**Stacking the history** is one line, since records are homogeneous pytrees:
+**Stacking the history** is `result.stacked`: a single `StepRecord` whose
+`batch_shape` is `(T,)` and whose every field is `(T,)`-shaped — a family in
+the sense of {ref}`contract-families`, inert to methods and legible in its
+repr, which is exactly what a stacked history should be.
 
 ```python
-h = jax.tree.map(lambda *xs: jnp.stack(xs), *result.history)
-h.misfit_mean  # (T,)
+plt.plot(result.stacked.step, result.stacked.misfit_mean)
 ```
 
-The result is a `StepRecord` whose `batch_shape` is `(T,)` — a family in the
-sense of {ref}`contract-families`, inert to methods and legible in its repr,
-which is exactly what a stacked history should be.
+It is a property rather than a documented one-liner because the one-liner is
+`jax.tree.map(lambda *xs: jnp.stack(xs), *result.history)`, which **raises on
+an empty history** — `jax.tree.map` with no trees has nothing to map over — so
+every caller would have to guard on `n_steps` first, for the first thing anyone
+does with a run. `stacked` returns `(0,)`-shaped fields there instead, which is
+the answer that needs no branch. Records are homogeneous pytrees precisely so
+that this works ({ref}`eki-diagnostics`).
 
 The one case to guard is the **empty history**: a run whose ladder is already
 exhausted on entry performs no evaluation, so `history == ()` and
@@ -1642,23 +1738,62 @@ tabular or plotting machinery.
 (eki-driver)=
 ## The driver
 
-Three entry points over one loop: `step` is one iteration ({ref}`eki-step`),
-`iterate` is the loop, and `run` collects its output.
+Two loops over the two phases of {ref}`eki-step`: `iterate` is a generator,
+`run` collects its output. **Neither is implemented over the other**, and `run`
+is not implemented over `iterate`: both are thin wrappers around one private
+driver. That is deliberate — see `run` below.
 
 ### `iterate(state, forward, y, noise_cov, *, schedule, update=SquareRootUpdate(), inflation=None, stop=None, on_failure="repair", max_steps=1000)`
 
-A generator yielding `(EKIState, StepRecord)` after each iteration, including
-the terminal evaluation-only iteration. It is the extension point for anything
-that needs to *observe* or *interrupt* a run: per-step checkpointing, custom
-logging, a wall-clock budget, stopping on parameter stagnation, an early
-`break`. Exceptions propagate; abandoning the generator is safe. Anything that
-needs to *revisit* a rung — backtracking, damping, trial increments — uses
-`step` directly instead ({ref}`eki-step`).
+A generator yielding `(EKIState, StepRecord, Evaluation)` after each
+iteration, including the terminal evaluation-only iteration, and **returning**
+the terminating `status` as its `StopIteration` value. It is the extension
+point for anything that needs to *observe* or *interrupt* a run: per-step
+checkpointing, custom logging, a wall-clock budget, stopping on parameter
+stagnation, an early `break`. Exceptions propagate; abandoning the generator is
+safe. Anything that needs to *revisit* a rung — backtracking, damping, trial
+increments — uses `evaluate` and `apply` directly instead ({ref}`eki-step`).
+
+The `Evaluation` is yielded because every recipe this contract recommends needs
+it and the record cannot carry it: the record holds scalars only, by design
+({ref}`eki-diagnostics`), so per-member misfits, the whitened residual matrix,
+the singular values of $S$ and the posterior predictive are all reachable only
+here. A caller who wants none of them ignores the third element.
+
+A caller who ends the loop themselves has everything `EKIResult` needs — the
+last yielded state, the records they accumulated, `INTERRUPTED`, and the last
+yielded `Evaluation`:
+
+```python
+records = []
+for state, record, evaluation in (it := iterate(state, forward, y, noise_cov,
+                                                schedule=sched)):
+    records.append(record)
+    if time.monotonic() > deadline:
+        break
+else:
+    ...
+result = EKIResult(state=state, history=tuple(records),
+                   status=INTERRUPTED, last_evaluation=evaluation)
+```
 
 ### `run(...)`
 
-The same arguments, consuming `iterate` and returning an `EKIResult`. It is
-sugar, and it is the interface the user guide leads with.
+The same arguments, returning an `EKIResult`. It is the interface the user guide
+leads with.
+
+**`run` does not consume `iterate`, and the reason is `status`.** All three
+end-paths — the schedule's attributes, `next_increment` returning `None`, and a
+stopping rule — look alike from outside: two of them emit an identical terminal
+record and the third emits none ({ref}`eki-diagnostics`), so a consumer of the
+yield stream cannot tell `"stopping_rule"` from `"schedule_exhausted"`. Routing
+`run` through `iterate` would therefore mean either recovering the status from
+`StopIteration.value` — which a plain `for` loop discards, making the obvious
+implementation silently wrong — or reconstructing it from the record shape,
+which is exactly the inference this layer refuses to ask of anyone. Both
+functions instead wrap one private driver that knows why it stopped. `iterate`
+still returns the status, for a caller who wants it and drives the generator
+explicitly.
 
 **`EKIResult`** is a plain frozen dataclass — the one value class in the layer
 that is not a pytree, because it is a report and never an argument to traced
@@ -1669,24 +1804,37 @@ code. Fields:
 | `state` | the final `EKIState` |
 | `history` | a tuple of `StepRecord`, one per ensemble evaluation |
 | `status` | why the run ended (below) |
-| `last_evaluated` | the `(ensemble, predictions)` pair of the final forward evaluation, or `None` if the run made none |
+| `last_evaluation` | the `Evaluation` of the final forward evaluation, or `None` if the run made none |
 
-and properties `ensemble` (`state.ensemble`), `beta` (`state.beta`), `mean`
-(the ensemble mean, `(P,)`), `n_steps` (`len(history)`), `n_evaluations`
-(`n_steps * J`, exact because every record corresponds to exactly one ensemble
-evaluation), and `converged` (below).
+All four are **keyword-only**, since the type is user-constructible
+({ref}`eki-driver`) and `state`/`history` are as swappable as any other
+same-arity pair. It is declared `eq=False` like every other class in the
+package: a generated `__eq__` would raise on array comparison, and a generated
+`__hash__` with it.
 
-**`last_evaluated` exists because the returned ensemble has never been
+Properties: `ensemble` (`state.ensemble`), `beta` (`state.beta`), `mean` (the
+ensemble mean, `(P,)`), `n_steps` (`len(history)`), `n_evaluations` (the number
+of *forward calls*, which is `n_steps`, one per record — not $J\,n_{\text{steps}}$,
+which counts member evaluations and is the caller's own multiplication),
+`min_n_valid` (the smallest `n_valid` over the history, or `None` on an empty
+one), `stacked` and the two termination booleans (all below).
+
+**`last_evaluation` exists because the returned ensemble has never been
 evaluated.** On a `"schedule_exhausted"` run the last update produces
 `state.ensemble` and the loop then ends, so `state.ensemble` is one update
 *past* the final forward evaluation and has no predictions at all; the last
 record's misfits describe the ensemble *before* that update. Without this
 field, a user's first two questions — what is my final misfit, and what does
 the posterior predictive look like — would each cost another $J$ forward
-evaluations for data the run already bought and threw away. The pair is
-labelled rather than merged into the result's other fields precisely so that
-which ensemble it belongs to cannot be misread:
-`result.last_evaluated[0]` is *not* `result.ensemble`.
+evaluations for data the run already bought and threw away.
+
+`result.last_evaluation.ensemble` is therefore **not** `result.ensemble` on a
+schedule-exhausted run. On a stopping-rule termination the state is left
+unchanged, so there they *are* the same array — the off-by-one is a property of
+the exit path, not an invariant. Naming the fields rather than indexing a
+2-tuple is what keeps the two readable apart; `[0]` and `[1]` on an
+`(ensemble, predictions)` pair is the same hazard `EnsembleJoint`'s
+keyword-only fields exist to forbid.
 
 Moments beyond the mean are one line through the layer below:
 
@@ -1732,17 +1880,35 @@ completed budget. The implementation annotates `status` and `on_failure` as
 `Literal[...]`, validates `on_failure` at the call, and exports
 `SCHEDULE_EXHAUSTED`, `STOPPING_RULE` and `INTERRUPTED`.
 
-**`converged`** is `True` exactly when a stopping rule was supplied and it
-fired — that is, `stop is not None and status == "stopping_rule"`. It is a
-property rather than a fourth status because "did this run achieve what it was
-for" is a question about intent, which `status` deliberately does not model.
-It answers the optimization form's version of the honesty problem: a run with
-`FixedSchedule.constant(1.0, 200)` and a `DiscrepancyStop` that never fires
-ends at $\beta = 200$ with `status="schedule_exhausted"` — the *same* status a
-successfully completed sampling ladder reports — having failed to fit the data.
-The layer argues at length that returning an ensemble at $\beta = 0.7$ labelled
-a posterior is unacceptable; reporting an unconverged fit as a completed budget
-is the symmetric failure, and `converged` is the one-word answer.
+**Two termination booleans, not one.** `stop_fired` is
+`status == STOPPING_RULE`; `budget_complete` is
+`status == SCHEDULE_EXHAUSTED`. Both are properties rather than further
+statuses, because they answer questions about *intent* that `status`
+deliberately does not model — and there are two such questions, one per form of
+the iteration:
+
+- The optimization form asks *did it fit?* A run with
+  `FixedSchedule.constant(1.0, 200)` and a `DiscrepancyStop` that never fires
+  ends at $\beta = 200$ with `status="schedule_exhausted"` — the *same* status
+  a successfully completed sampling ladder reports — having failed to fit the
+  data. `stop_fired` is `False` there, and that is the one-word answer.
+- The sampling form asks *did the ladder finish?* `budget_complete` answers it,
+  and the pair together makes the layer's one real trap legible from the result
+  alone: `DiscrepancyStop` on a budgeted ladder, which {ref}`eki-axes` calls
+  constructible and usually a mistake, reports `stop_fired=True,
+  budget_complete=False`, ending a sampling run at an arbitrary intermediate
+  level.
+
+:::{note}
+**There is deliberately no single `converged`.** A boolean by that name has to
+choose one of the two questions and then answers the other one wrongly: defined
+as "a stopping rule fired" it is `False` on a perfectly completed $\beta = 1$
+sampling ladder, which is the layer's headline use and did everything right,
+and `True` on the $\beta = 0.4$ early exit above, which is the case
+{ref}`eki-axes` says nothing will warn about. The name promises a statement
+about the answer while the definition can only report which branch the loop
+exited, so the layer does not offer it.
+:::
 
 There is no `"max_steps"` status, because **exceeding `max_steps` raises**. The
 bound is a safety net against a schedule that can never be exhausted and a run
@@ -1926,12 +2092,14 @@ Beyond that, three requirements specific to a layer that owns a loop:
 The family machinery of {ref}`contract-families` applies to the pytree value
 classes, in its gauss instantiation ({ref}`gauss-jax`):
 
-- `EKIState`, `StepSummary` and `StepRecord` each have a required
+- `EKIState`, `Evaluation` and `StepRecord` each have a required
   `batch_shape` property, computed from the leading axes of each array **field**
   beyond its core rank — `EKIState.ensemble` 2,
-  `StepSummary.whitened_residuals` 2, `key` 0, and `beta`, `spread` and every
+  `Evaluation.whitened_residuals` 2, `Evaluation.ensemble` 2,
+  `Evaluation.predictions` 2, `key` 0, and `beta`,
+  `rms_parameter_spread` and every
   `StepRecord` field 0 — combined by broadcasting with `ValueError` on
-  mismatch. Derived properties such as `StepSummary.misfits` are not fields and
+  mismatch. Derived properties such as `Evaluation.misfits` are not fields and
   do not enter the computation. Directly constructed objects always report `()`.
 - When `batch_shape` is non-empty the object is **inert**: every method and
   array-computing property raises `ValueError` naming the object, the
@@ -2094,7 +2262,7 @@ where that consumer belongs.
 Type name and static sizes, never array contents, matching
 {ref}`contract-repr` and {ref}`gauss-repr`:
 `EKIState(n_members=64, u_dim=12, step=3)`,
-`StepSummary(step=3, n_members=64)`, `StepRecord(step=3)`. Policy objects
+`Evaluation(step=3, n_members=64)`, `StepRecord(step=3)`. Policy objects
 print their static fields, which are small and informative:
 `AdaptiveESSSchedule(target=0.5, beta_target=1.0)`,
 `MultiplicativeInflation(anomaly_factor=1.02)` — with the one exception that a
@@ -2107,24 +2275,40 @@ counts: `EKIResult(status='schedule_exhausted', n_steps=17, beta=1.0)`.
 (eki-surface)=
 ## Public surface
 
-`pyeki.eki` exports exactly: the value classes `EKIState`, `StepSummary`,
+`pyeki.eki` exports exactly: the value classes `EKIState`, `Evaluation`,
 `StepRecord`, `EKIResult`; the protocols `EnsembleUpdate`, `Schedule`,
 `StoppingRule`, `Inflation`; the update rules `SquareRootUpdate`,
 `StochasticUpdate`; the schedules `FixedSchedule`, `AdaptiveESSSchedule`,
 `AdaptiveMisfitSchedule`; the stopping rule `DiscrepancyStop`; the inflations
-`MultiplicativeInflation`, `AdditiveInflation`; the driver `run`, `iterate`
-and `step`; the helpers `whitened_misfits`, `effective_sample_size`,
-`repair_failed_members`; the status constants `SCHEDULE_EXHAUSTED`,
-`STOPPING_RULE`, `INTERRUPTED`; and the exception `EKIError`. Anything else is
-private, and no consumer may depend on it.
+`MultiplicativeInflation`, `AdditiveInflation`; the driver `run` and `iterate`
+and the three step functions `evaluate`, `apply` and `advance`; the helpers
+`whitened_misfits`, `effective_sample_size`, `repair_failed_members`; the
+status constants `SCHEDULE_EXHAUSTED`, `STOPPING_RULE`, `INTERRUPTED`; and the
+exception `EKIError`. Anything else is private, and no consumer may depend on
+it.
 
-The three helpers are public because writing a schedule requires them:
+The three helpers are public for three different reasons, and it is worth
+saying which: `whitened_misfits` because the misfit convention of
+{ref}`eki-notation` must be applicable outside a run — to a validation set, or
+to a candidate parameter — without reimplementing the factor of $\tfrac12$;
+`effective_sample_size` because it is the one criterion a custom schedule is
+most likely to want and the least likely to get right in log space; and
+`repair_failed_members` because its moment identities are worth testing
+directly, and a caller driving the phases by hand needs it.
 
 | helper | signature | returns |
 | ------ | --------- | ------- |
 | `whitened_misfits(y, predictions, noise_cov)` | `(N,), (..., N), PSDLinOp -> (...)` | $\tfrac12\lVert W(y - v)\rVert^2$, batched per the operator layer's contract |
 | `effective_sample_size(misfits, increment)` | `(J,), scalar -> 0-d` | $\mathrm{ESS}$ of $e^{-\delta\Phi}$, computed in log space |
-| `repair_failed_members(ensemble, predictions, valid)` | `(J,P), (J,N), (J,) bool -> (J,P), (J,N)` | the moment-preserving repair of {ref}`eki-failures` |
+| `repair_failed_members(*, ensemble, predictions, valid)` | `(J,P), (J,N), (J,) bool -> (J,P), (J,N)` | the mean-preserving repair of {ref}`eki-failures` |
+
+`repair_failed_members` is **keyword-only** for the reason
+{ref}`eki-updates` gives for the update protocol: its first two arguments are
+arrays whose shapes coincide whenever $P = N$, so a positional signature would
+let them be transposed with no error at all, returning finite and plausibly
+wrong numbers. `valid` must be a `(J,)` boolean array, and $J_v \ge 2$ is a
+precondition the helper checks, since at $J_v \le 1$ the valid-member mean is
+`nan`.
 
 There is no `pyeki.eki.testing`: the policy protocols are structural and have
 no invariants a harness could check beyond the signature, so conformance is a
@@ -2295,15 +2479,29 @@ written independently of the code under test. The suite must verify at least:
     its increments; the pinned prior draw and a short run's output are
     snapshotted so a JAX-side PRNG change is detected rather than absorbed.
 16. **The result reports the run.** `status` takes only the three permitted
-    values and equals the exported constants; `converged` is true exactly when
-    a stopping rule was supplied and fired, and **false** for an optimization
-    run whose ladder ran out before its `DiscrepancyStop` fired — the case
-    {ref}`eki-driver` exists to distinguish. `last_evaluated` holds the
-    ensemble and predictions of the final forward evaluation, and is `None`
-    exactly when the run made none; its ensemble is *not* `result.ensemble` on
-    a schedule-exhausted run, and the test asserts the off-by-one rather than
-    assuming it. `n_evaluations` equals the number of forward calls, counted
-    by an instrumented model.
+    values and equals the exported constants. `stop_fired` and
+    `budget_complete` are each true exactly on their own status, tested on
+    four runs: a completed budget with no stopping rule (`budget_complete`
+    only — the case a single `converged` would report as failure), an
+    optimization run whose ladder ran out before its `DiscrepancyStop` fired
+    (`budget_complete` only), a `DiscrepancyStop` firing on a budgeted ladder
+    (`stop_fired` only, at $\beta < \beta_{\text{target}}$ — the trap of
+    {ref}`eki-axes`), and a user-built `INTERRUPTED` result (neither). The
+    third fixture must have `stop` fire on a problem the ladder has **not**
+    fit, so that an implementation deriving either boolean from the last
+    record's misfit fails rather than passing.
+
+    `last_evaluation` holds the final forward evaluation and is `None` exactly
+    when the run made none. Its `ensemble` and `predictions` are asserted
+    **equal** to the last call recorded by an instrumented model — an equality,
+    not the inequality against `result.ensemble` that a pre-inflation or
+    pre-repair pair would also satisfy — and the off-by-one against
+    `result.ensemble` is asserted on a schedule-exhausted run and its *absence*
+    asserted on a stopping-rule run, where the state is unchanged.
+    `n_evaluations` equals the instrumented forward-call count.
+    `result.stacked` succeeds on a multi-step run with `(T,)`-shaped fields
+    including `step` and `n_valid`, and returns `(0,)`-shaped fields on an
+    empty history rather than raising.
 17. **Inflation sees the ladder.** An `Inflation` and an `EnsembleUpdate` that
     record their `step` and `beta` arguments observe the true sequence, and a
     rule varying with `beta` gives a run that is still exactly resumable —
