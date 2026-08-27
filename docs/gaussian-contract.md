@@ -279,15 +279,24 @@ Whitening costs $J + 1$ applications of $W$ — every prediction and the
 observation, from one call on the stacked rows $[\mathsf{V}; y]$. Whitening
 is a fixed linear map applied row-wise, so it commutes with centring and
 with subtraction: $W A_v^\top$ is the whitened predictions minus *their*
-mean, and $W(y - v_j)$ is $Wy - Wv_j$. Implementations are free to group the
-whitening as they like — results then agree to round-off rather than
-bit-exactly, like any reassociation — but whitening the anomalies and the
-residuals in two separate calls costs $2J$ applications in the stochastic
-update, twice the necessary figure and, for a dense whitener, on the
-dominant term. The thin SVD is
+mean, and $W(y - v_j)$ is $Wy - Wv_j$. The grouping is **not** free, however: centring
+and differencing must happen *before* the whitener is applied. The two
+orders agree in exact arithmetic but are not equally stable — centring
+*whitened* predictions makes the cancellation ratio
+$\lVert W\bar v\rVert / \lVert W a_j\rVert$ in place of
+$\lVert \bar v\rVert / \lVert a_j\rVert$, so the error grows with
+$\kappa(W) = \sqrt{\kappa(R)}$ whenever the prediction mean is aligned
+with a precise direction of the noise. Measured against an exact reference
+at $\kappa(R) = 10^4$ with a prediction mean of $10^8$ along $R$'s most
+precise direction, whitening first gives a posterior-mean error of $4.9$
+where centring first gives $2\times10^{-6}$. Whitening $[A_v;\, y-\bar v]$
+costs the same $J+1$ applications and does not have that failure mode. What
+must **not** be done is whitening the anomalies and the residuals in two
+separate calls, which costs $2J$ applications in the stochastic update —
+twice the necessary figure, and for a dense whitener on the dominant term. The thin SVD is
 $O(J N \min(J, N))$; forming weights is $O((N + J)\,\rho)$ per residual and
 combining anomalies $O(JP)$ per member. A full ensemble update is
-$O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J$ whitener applications —
+$O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J + 1$ whitener applications —
 which the total absorbs for structured whiteners applying in $O(N)$, and
 which dominate ($O(JN^2)$) for a dense $W$ whenever $P \lesssim N^2/J$; at
 larger $P$ the $O(PJ^2)$ anomaly combination dominates instead. Linear in both dimensions for
@@ -474,7 +483,8 @@ The whitened formulation requires it even though $\widehat{C}_{vv} + R$
 is generically invertible for singular $R$ (it fails only when
 $\operatorname{nullity}(R) + \operatorname{nullity}(\widehat{C}_{vv}) > N$);
 a singular noise operator that nonetheless
-types as whitening-capable yields `nan` per tier 4. The two update methods
+types as whitening-capable yields `nan`, or the tier-4 result check of
+{ref}`gauss-validation` in debug mode. The two update methods
 return a `(J, P)` array of updated members, row $j$ updating member $j$ —
 they update $u$ only, since EKI re-evaluates the forward model to get the
 next step's $v$ — while `condition` returns the same posterior as a
@@ -483,6 +493,13 @@ distribution. All are deterministic functions of their arguments
 degrade gracefully when the prediction anomalies are zero: the updates
 return `u_samples` unchanged and `condition` returns the prior marginal's
 moments — a collapsed ensemble is a no-op, not `nan`, for finite inputs.
+This requires the anomalies of identical members to be *exactly* zero,
+which a plain subtraction of a summed-and-divided mean does not deliver;
+the anomaly properties are formed so that they do, because the alternative
+is not a `nan` but a wrong finite update, of order 1 for members of order
+$10^{23}$. Whitening can still overflow for finite inputs — a prediction of
+$10^{300}$ against a noise variance of $10^{-20}$ — and there the result is
+`nan`.
 
 ### `pathwise_update(key, y, noise_cov)`
 
@@ -682,10 +699,16 @@ its scope:
   even then it left the covariance factor unchecked, so the check covered
   half of what it appeared to guard.
 - **`sample` is deliberately excluded**, and `log_density` with it. Their
-  output is non-finite only if a field is, and fields are the operator
-  layer's to validate at construction — which
-  {class}`~pyeki.linalg.PSDLowRank` and {class}`~pyeki.linalg.DensePSD` both
-  do for their factors.
+  covariance arrives already constructed, so a non-finite result implicates
+  the operator rather than this call, and the operator layer validates its
+  own fields at construction — which {class}`~pyeki.linalg.PSDLowRank` and
+  {class}`~pyeki.linalg.DensePSD` both do for their factors. The gap this
+  leaves is deliberate and worth naming: a *singular* covariance with
+  entirely finite fields makes `log_density` return `nan` with no check
+  firing, in debug mode or out. Every shipped operator rejects that at
+  construction, but the level is user-extensible, so a custom `PSDLinOp`
+  that whitens and is singular reaches it. Nonsingularity is
+  `log_density`'s stated precondition, not something this layer detects.
 
 Because tier 4 is skipped on tracers, none of this fires inside a
 `jit`-compiled driver loop. Detection there is a different mechanism, and
@@ -942,27 +965,33 @@ must verify at least:
    $T\,(I + ss^\top)\,T^\top = I$ must not be used, because forming
    $ss^\top$ reintroduces the $\sigma_{\max}^2$-sized intermediate whose
    rounding this check exists to avoid, pushing the achievable residual to
-   $\varepsilon\sigma_{\max}^2$. **The spectrum of `s` must span decades
-   for this comparison to mean anything.** When every singular value sits at
-   one large scale, $TT^\top \sim \sigma_{\max}^{-2}$ is itself
-   negligible and absorbs the lost identity, so both forms pass and the
-   check silently tests nothing: at $J=5$, $N=8$ and $\sigma \sim 10^{10}$
-   throughout, both residuals are $3\times 10^{-5}$. With
+   $\varepsilon\sigma_{\max}^2$. **The spectrum of `s` must carry
+   singular values of order 1 or below alongside the large ones for this
+   comparison to mean anything.** What hides the re-formed version's loss is
+   $TT^\top \sim \sigma^{-2}$ being negligible in every direction at once,
+   which happens whenever *all* the singular values are large — spanning
+   decades is not sufficient, and is the wrong criterion: at $J=5$, $N=8$,
+   $\sigma = (10^{10}, 10^9, 10^8, 10^7, 10^6)$ spans four decades and the
+   two forms agree to a factor of $1.0$, testing nothing. With
    $\sigma = (10^{10}, 10^5, 1, 1, 1)$ they separate by eight orders of
-   magnitude — $4\times10^{-6}$ against $4\times10^{2}$ — which is the
-   regime the check must use.
+   magnitude, which is the regime the check must use.
    It satisfies $T = T^\top$ for every
    `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centred `s`**
    ($\mathbf{1}^\top s = 0$, which is the only case the conditioning
    kernel produces) to a tolerance of
-   $c\,\varepsilon + (\varepsilon \sigma_{\max})^2$; for general `s` no
-   such identity holds ({ref}`gauss-primitives`). The quadratic term is the
-   modifier-induced mean shift of {ref}`gauss-kernel`, but the *computed*
-   $T\mathbf{1}$ carries ordinary $O(\varepsilon)$ round-off from its
-   $J$-term dot products on top, and that dominates until $\sigma_{\max}$
-   reaches $\varepsilon^{-1/2}$: at $\sigma_{\max} = 3.3$ the observed
-   residual is $4\times10^{-16}$, against $5\times10^{-31}$ for the
-   quadratic term alone.
+   $c_1 J \varepsilon + c_2 (\varepsilon \sigma_{\max})^2$; for general
+   `s` no such identity holds ({ref}`gauss-primitives`). Both terms are
+   needed and **both scale**. The quadratic term is the modifier-induced
+   mean shift of {ref}`gauss-kernel`, but the *computed* $T\mathbf{1}$
+   carries ordinary round-off from its $J$-term dot products on top, and
+   that floor dominates until $\sigma_{\max}$ reaches
+   $\varepsilon^{-1/2}$: at $\sigma_{\max} = 3.3$ the observed residual is
+   $4\times10^{-16}$ against $5\times10^{-31}$ for the quadratic term
+   alone. The floor grows with $J$, so a *constant* floor calibrated at one
+   ensemble size expires at another — measured worst ratios over $J$ up to
+   400 and $\sigma_{\max}$ up to $10^{13}$ are $0.83$ against
+   $J\varepsilon$ and $2.0$ against $(\varepsilon\sigma_{\max})^2$. The
+   check must therefore be exercised at more than one $J$.
 4. **Moment exactness of the posterior**: `transform_update`'s output has
    sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;
@@ -1023,10 +1052,13 @@ earlier: the layer's user-guide page ({ref}`gauss-scope`) and the
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
 a mixed-representation perturbation, a mean shift from an uncentred
-transform, a `nan` gradient at an exactly collapsed `s`, and a singular
+transform, a `nan` gradient at an exactly collapsed `s`, a singular
 noise covariance turning an update into an all-`nan` result with no
 exception outside debug mode (assert the `nan`, so the day it starts raising
-is visible) —
+is visible), the whitening grouping of {ref}`gauss-kernel` (checked for
+accuracy against an exact reference, not only for its application count),
+and a collapsed ensemble at large magnitude, where a mean-and-subtract that
+does not cancel exactly turns an exact no-op into a wrong, finite update —
 under the same
 do-not-delete rule as the operator layer's.
 

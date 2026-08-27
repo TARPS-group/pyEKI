@@ -92,6 +92,11 @@ Joint Gaussian distributions and conditioning. See
 {doc}`../user-guide/conditioning` for when to use each piece, and
 {doc}`../gaussian-contract` for the full behavioural contract.
 
+```{eval-rst}
+.. automodule:: pyeki.gauss
+   :no-members:
+```
+
 ### Distributions
 
 ```{eval-rst}

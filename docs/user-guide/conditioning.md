@@ -13,9 +13,10 @@ conditioning mathematics.
 
 ```python
 import pyeki  # enables float64; import this before creating arrays
+import jax
 import jax.numpy as jnp
 from pyeki.gauss import Gaussian, EnsembleJoint
-from pyeki.linalg import PSDDiagonal, DensePSD
+from pyeki.linalg import PSDDiagonal, DensePSD, block_diag
 
 prior = Gaussian(jnp.zeros(12), DensePSD.from_matrix(C0))   # mean + covariance
 u = prior.sample(key, 40)                                   # (40, 12) ensemble
@@ -81,16 +82,21 @@ representation for it.
 
 Every conditioning method uses `noise_cov` through exactly one operation,
 `whiten`. That is not an accident of the implementation — it is the reason the
-noise interface looks the way it does. A noise operator with no cheap
-factorization, no solve and no log-determinant still drives every update:
+noise interface looks the way it does, and it is a promise about the
+*interface*: a custom operator that implements `_whiten` and nothing else
+drives every update in this layer, with no `factor`, no `solve` and no
+`logdet`. Structured noise is used the same way, block by block:
 
 ```python
 noise_cov = block_diag(
     PSDDiagonal(instrument_variances),   # independent errors
     DensePSD.from_matrix(correlated),    # a correlated block
 )
-u_next = joint.pathwise_update(key, y, noise_cov)
+u_next = joint.pathwise_update(key, y, noise_cov)   # whiten only
 ```
+
+(The shipped operators happen to support more than `whiten` — this one solves
+and has a log-determinant too. Nothing here calls them.)
 
 This also makes tempering cheap. A tempered step wants $R/\delta\beta$, which
 is the operator layer's scalar scaling:
@@ -163,7 +169,7 @@ several joints, several priors, several noise levels — is a `jax.vmap` over th
 pytree, not an object with extra leading axes:
 
 ```python
-joints = jax.vmap(EnsembleJoint)(u_batch, v_batch)   # (m, J, P), (m, J, N)
+joints = jax.vmap(EnsembleJoint)(u_batch, v_batch)   # (8, J, P), (8, J, N)
 joints.batch_shape                                    # (8,)
 joints.transform_update(y, noise_cov)                 # ValueError: apply under vmap
 

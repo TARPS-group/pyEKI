@@ -193,14 +193,34 @@ def value_check(x, predicate, message: str) -> None:
     ``from_matrix``-style classmethods for preconditions that are values
     rather than shapes — positivity, finiteness, definiteness.
 
-    Skipped when debug checks are off, when ``x`` is not array-like, or
-    when ``x`` is a tracer — value checks never affect ``jit``-ed code.
+    Skipped when debug checks are off, when ``x`` is not array-like, and
+    whenever the check cannot be evaluated concretely — value checks never
+    affect ``jit``-ed code.
+
+    Notes
+    -----
+    Two skip conditions are needed, not one. A tracer operand is the obvious
+    case. The subtle case is a *concrete* operand inspected while a trace is
+    live — a closed-over constant inside :func:`jax.jit`, which is how a
+    driver loop passes an observation and a noise covariance. JAX stages a
+    primitive into the live trace regardless of whether its operands are
+    tracers, so the predicate's array work is staged there and reading its
+    result as a bool raises ``TracerBoolConversionError`` from inside a debug
+    check. Both spellings of the predicate are handled: one that returns the
+    comparison for this helper to read, and one that converts to ``bool``
+    itself, as the operators in this package do.
     """
     if not _debug_checks_enabled:
         return
     if getattr(x, "ndim", None) is None or isinstance(x, jax.core.Tracer):
         return
-    if not bool(predicate(x)):
+    try:
+        outcome = predicate(x)
+    except jax.errors.ConcretizationTypeError:
+        return
+    if isinstance(outcome, jax.core.Tracer):
+        return
+    if not bool(outcome):
         raise ValueError(message)
 
 
@@ -982,7 +1002,7 @@ class PSDLinOp(SquareLinOp):
 
     @property
     def T(self) -> PSDLinOp:  # noqa: N802 - mirrors the NumPy attribute
-        """The transpose: the operator itself, since it is self-adjoint."""
+        """The transpose, which is the operator itself, being self-adjoint."""
         return self
 
     # -- derived hook -----------------------------------------------------------

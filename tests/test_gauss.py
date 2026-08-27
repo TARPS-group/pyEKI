@@ -18,6 +18,8 @@ Two rules govern the reference throughout:
 """
 from __future__ import annotations
 
+from fractions import Fraction
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -187,13 +189,14 @@ class CountingWhitenPSD(PSDLinOp):
 
 
 def test_local_operators_satisfy_the_operator_contract():
-    """The two test-local operators are contract-valid, so the layer's failures
-    cannot be blamed on the fixtures."""
+    """The three test-local operators are contract-valid, so the layer's
+    failures cannot be blamed on the fixtures."""
     R = _psd(4)
     Q, _ = np.linalg.qr(RNG.normal(size=(4, 4)))
     rotated = RotatedWhitenPSD.from_matrix(R, Q)
     check_operator(rotated)
     check_operator(WhitenOnlyPSD(jnp.linalg.cholesky(jnp.asarray(_psd(4)))))
+    check_operator(CountingWhitenPSD.counting(_psd(4)))
     assert rotated.capabilities() == frozenset(
         {"solve", "solve_mat", "logdet", "diag", "factor", "whiten", "whiten_mat"}
     )
@@ -246,6 +249,45 @@ def _dense_conditional(mu_u, mu_v, Cuu, Cuv, Cvv, R, y):
     """Closed-form Gaussian conditioning for an analytic joint."""
     K = Cuv @ np.linalg.inv(Cvv + R)
     return mu_u + K @ (y - mu_v), Cuu - K @ Cuv.T
+
+
+def _exact_posterior_mean(U, V, R, y) -> np.ndarray:
+    """The posterior mean in exact rational arithmetic over the stored floats.
+
+    A float64 reference is not good enough for the ill-conditioned,
+    large-prediction-mean regime: it is itself the inaccurate side there. This
+    forms the empirical moments and solves (C_vv + R) x = y - v_bar exactly,
+    by Gaussian elimination over ``Fraction``, so the comparison has a true
+    answer to compare against. Only for tiny problems.
+    """
+    J, P, N = U.shape[0], U.shape[1], V.shape[1]
+    Uf = [[Fraction(float(x)) for x in row] for row in U]
+    Vf = [[Fraction(float(x)) for x in row] for row in V]
+    Rf = [[Fraction(float(x)) for x in row] for row in R]
+    um = [sum(Uf[i][k] for i in range(J)) / J for k in range(P)]
+    vm = [sum(Vf[i][k] for i in range(J)) / J for k in range(N)]
+    Au = [[Uf[i][k] - um[k] for k in range(P)] for i in range(J)]
+    Av = [[Vf[i][k] - vm[k] for k in range(N)] for i in range(J)]
+    Cuv = [[sum(Au[i][a] * Av[i][b] for i in range(J)) / (J - 1)
+            for b in range(N)] for a in range(P)]
+    M = [[sum(Av[i][a] * Av[i][b] for i in range(J)) / (J - 1) + Rf[a][b]
+          for b in range(N)] for a in range(N)]
+    rhs = [Fraction(float(y[k])) - vm[k] for k in range(N)]
+    for c in range(N):                                   # exact elimination
+        pivot = max(range(c, N), key=lambda r: abs(M[r][c]))
+        M[c], M[pivot] = M[pivot], M[c]
+        rhs[c], rhs[pivot] = rhs[pivot], rhs[c]
+        for r in range(c + 1, N):
+            f = M[r][c] / M[c][c]
+            for k in range(c, N):
+                M[r][k] -= f * M[c][k]
+            rhs[r] -= f * rhs[c]
+    x = [Fraction(0)] * N
+    for r in reversed(range(N)):
+        x[r] = (rhs[r] - sum(M[r][k] * x[k] for k in range(r + 1, N))) / M[r][r]
+    return np.array(
+        [float(um[a] + sum(Cuv[a][k] * x[k] for k in range(N))) for a in range(P)]
+    )
 
 
 def _recovered_whitener(noise_cov, N: int) -> np.ndarray:
@@ -435,10 +477,21 @@ def test_3_sqrt_transform_satisfies_the_stably_formed_invariant(J, N, sigma_max)
     assert residual <= 128 * EPS * max(1.0, sigma_max)
 
 
-def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centring():
-    """T = T^T for every s; T 1 = 1 for mean-centred s only."""
-    J, N = 6, 9
-    for scale in (1.0, 1e3, 1e8):
+@pytest.mark.parametrize(("J", "N"), [(6, 9), (50, 60)], ids=["small", "large-J"])
+def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centring(J, N):
+    """T = T^T for every s; T 1 = 1 for mean-centred s only.
+
+    Both terms of the tolerance are needed and both scale. The mean shift the
+    modifier induces is O((eps sigma_max)^2), but the *computed* T @ 1 carries
+    ordinary round-off from its J-term dot products on top, which dominates
+    until sigma_max reaches 1/sqrt(eps) — and that floor grows with J, so a
+    constant floor calibrated at one shape expires at another. Measured worst
+    ratios over J up to 400 and sigma_max up to 1e13: 0.83 against J*EPS in
+    the floor regime, 2.0 against (EPS*sigma_max)^2 at large sigma_max. The
+    large-J case is parametrized in so neither constant can be fitted to a
+    single shape again.
+    """
+    for scale in (1.0, 1e3, 1e8, 1e11):
         A = RNG.normal(size=(J, N))
         s = jnp.asarray((A - A.mean(axis=0)) * scale)
         T = np.asarray(sqrt_transform(s))
@@ -446,11 +499,8 @@ def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centring():
 
         np.testing.assert_allclose(T, T.T, rtol=0, atol=1e3 * EPS)
 
-        # The modifier-induced mean shift is O((eps sigma_max)^2); the computed
-        # matrix-vector product carries ordinary O(eps) round-off on top, which
-        # dominates until sigma_max reaches 1/sqrt(eps).
         shift = np.abs(T @ np.ones(J) - 1.0).max()
-        assert shift <= 64 * EPS + (EPS * sigma_max) ** 2
+        assert shift <= 8 * J * EPS + 16 * (EPS * sigma_max) ** 2
 
     # on general (uncentred) s no such identity holds
     general = jnp.asarray(RNG.normal(size=(J, N)) + 5.0)
@@ -1492,3 +1542,323 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
         rtol=0,
         atol=1e3 * EPS * np.abs(m_post).max(),
     )
+
+
+def test_regression_anomalies_are_centred_before_whitening():
+    """The kernel must centre before whitening, and only accuracy shows it.
+
+    Whitening is linear, so the two groupings give the same S in exact
+    arithmetic — but not the same accuracy. Centring *whitened* predictions
+    makes the cancellation ratio ||W v_bar|| / ||W a_j|| rather than
+    ||v_bar|| / ||a_j||, so the error grows with kappa(W) = sqrt(kappa(R))
+    when the prediction mean lies along a precise direction of the noise.
+
+    Both orders whiten J + 1 vectors, so the cost regression test below passes
+    either way, and every moment-exactness obligation passes either way too
+    because their fixtures are well scaled. This asserts against an exact
+    rational reference in the regime that separates them.
+    """
+    J, P, N = 5, 3, 4
+    kappa = 1e10
+    rng = np.random.default_rng(17)
+    Q, _ = np.linalg.qr(rng.normal(size=(N, N)))
+    Rm = Q @ np.diag(np.geomspace(1.0, 1.0 / kappa, N)) @ Q.T
+    Rm = (Rm + Rm.T) / 2
+    A = rng.normal(size=(J, N))
+    V = A - A.mean(axis=0) + 1e10 * Q[:, -1]  # mean along R's most precise direction
+    U = rng.normal(size=(J, P))
+    noise_cov = DensePSD.from_matrix(jnp.asarray(Rm))
+    y = jnp.asarray(rng.normal(size=N))
+
+    exact = _exact_posterior_mean(U, V, Rm, np.asarray(y))
+    scale = max(1.0, np.abs(exact).max())
+
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+    shipped = np.asarray(joint.condition(y, noise_cov).mean)
+
+    # the same kernel, whitening before centring -- the reverted grouping
+    whitened_v = np.asarray(noise_cov.whiten(jnp.asarray(V)))
+    s_bad = (whitened_v - whitened_v.mean(axis=0)) / np.sqrt(J - 1)
+    r_bad = np.asarray(noise_cov.whiten(y)) - whitened_v.mean(axis=0)
+    Au = U - U.mean(axis=0)
+    reverted = U.mean(axis=0) + Au.T @ np.asarray(
+        gain_weights(jnp.asarray(s_bad), jnp.asarray(r_bad))
+    ) / np.sqrt(J - 1)
+
+    shipped_err = np.abs(shipped - exact).max() / scale
+    reverted_err = np.abs(reverted - exact).max() / scale
+
+    # measured: shipped 1.0e-12, reverted 9.0e-06 -- nine orders apart
+    assert shipped_err < 1e-9, f"shipped relative error {shipped_err:.2e}"
+    assert reverted_err > 1e-7, f"reverted relative error only {reverted_err:.2e}"
+    assert reverted_err > 1e3 * shipped_err
+
+
+def test_regression_a_collapsed_ensemble_is_exact_at_any_magnitude():
+    """Anomalies of identical members must be *exactly* zero.
+
+    jnp.mean of J bit-identical rows sums and divides, which does not in
+    general return the value it was given, so a plain subtraction leaves
+    spurious anomalies of about eps*|v_bar|. The gain amplifies those into a
+    wrong, finite, nan-free update once the members are large — the failure
+    obligation 8 cannot see, because it prescribes an exactly representable
+    value whose mean happens to round back to itself.
+    """
+    J, P, N = 10, 3, 2
+    U = np.random.default_rng(0).normal(size=(J, P))
+    noise_cov = DensePSD.from_matrix(jnp.eye(N))
+    y = jnp.zeros(N)
+
+    for magnitude in (1.0, 0.1, 6.02e23, 1e150):
+        V = np.full((J, N), magnitude)
+        joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+
+        np.testing.assert_array_equal(joint.v_anomalies, jnp.zeros((J, N)))
+        np.testing.assert_array_equal(
+            joint.pathwise_update(jax.random.key(0), y, noise_cov), jnp.asarray(U)
+        )
+        np.testing.assert_allclose(
+            joint.transform_update(y, noise_cov), U, rtol=0, atol=1e3 * EPS
+        )
+
+
+def test_regression_debug_checks_survive_a_trace_over_closed_over_arrays():
+    """Tier-4 checks must be skipped inside a trace, not crash in it.
+
+    jnp.isfinite applied to a *concrete* array while a trace is live is staged
+    into that trace, so the check's bool conversion sees a tracer. Guarding on
+    whether the operand is a tracer does not catch it: the operand is
+    concrete. This is the documented driver shape — y and noise_cov closed
+    over, only the ensemble traced — and it used to raise
+    TracerBoolConversionError from inside a debug check, cache-dependently.
+    """
+    J, P, N = 4, 3, 2
+    U = np.random.default_rng(0).normal(size=(J, P))
+    V = np.random.default_rng(1).normal(size=(J, N))
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+    y = jnp.zeros(N)
+    noise_cov = PSDDiagonal(jnp.ones(N))
+    eager = np.asarray(joint.transform_update(y, noise_cov))
+
+    with debug_checks(True):
+        # every array closed over, nothing traced
+        np.testing.assert_allclose(
+            jax.jit(lambda: joint.transform_update(y, noise_cov))(), eager
+        )
+        np.testing.assert_allclose(
+            jax.jit(lambda: joint.condition(y, noise_cov).mean)(),
+            np.asarray(joint.condition(y, noise_cov).mean),
+        )
+        jax.jit(lambda: joint.pathwise_update(jax.random.key(0), y, noise_cov))()
+        # and a scan, which is how a tempering driver runs
+        def step(carry, _):
+            return EnsembleJoint(carry, jnp.asarray(V)).transform_update(
+                y, noise_cov
+            ), None
+
+        out, _ = jax.lax.scan(step, jnp.asarray(U), None, length=3)
+        assert bool(jnp.all(jnp.isfinite(out)))
+        # constructing an operator from a closed-over concrete array, too
+        A = jnp.ones(N)
+        jax.jit(lambda: PSDDiagonal(A).diag())()
+
+
+def test_regression_check_order_with_two_simultaneous_violations():
+    """The specified check order is only observable when two things are wrong.
+
+    Supplying one bad argument at a time, as the validation tests do, pins no
+    ordering at all: three independent reorderings of the guard sequence pass
+    such tests. Each case below has two violations, so exactly one error can
+    win, and which one is the contract's ordering rule.
+    """
+    J, P, N = 5, 3, 4
+    joint = EnsembleJoint(
+        jnp.asarray(RNG.normal(size=(J, P))), jnp.asarray(RNG.normal(size=(J, N)))
+    )
+    bad_y = jnp.zeros(N + 3)
+    good_y = jnp.zeros(N)
+
+    # capability before tier-3 operand and side checks
+    no_whiten = PSDLowRank(jnp.asarray(RNG.normal(size=(N, N))))
+    with pytest.raises(UnsupportedOpError):
+        joint.transform_update(bad_y, no_whiten)
+    wrong_side_no_whiten = PSDLowRank(jnp.asarray(RNG.normal(size=(N + 1, N + 1))))
+    with pytest.raises(UnsupportedOpError):
+        joint.transform_update(good_y, wrong_side_no_whiten)
+
+    # noise_cov's type and family checks come *ahead* of the capability check,
+    # the one forced exception: supports() cannot be asked of a non-operator
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        joint.transform_update(bad_y, jnp.eye(N))
+    family = _stacked(DensePSD.from_matrix(jnp.asarray(_psd(N))), reps=2)
+    with pytest.raises(ValueError, match="vmapped family"):
+        joint.transform_update(bad_y, family)
+
+    # the side check stays behind the capability check but ahead of y
+    with pytest.raises(ValueError, match="side"):
+        joint.transform_update(bad_y, DensePSD.from_matrix(jnp.asarray(_psd(N + 1))))
+
+    # and the family guard on the joint precedes everything
+    joint_family = _stacked(joint, reps=2)
+    with pytest.raises(ValueError, match="vmapped family"):
+        joint_family.transform_update(bad_y, jnp.eye(N))
+
+    # log_density's two capability checks, in the order it names them
+    whiten_only = WhitenOnlyPSD(jnp.linalg.cholesky(jnp.asarray(_psd(3))))
+    with pytest.raises(UnsupportedOpError, match="logdet"):
+        Gaussian(jnp.zeros(3), whiten_only).log_density(jnp.zeros(99))
+    with pytest.raises(UnsupportedOpError, match="whiten"):
+        Gaussian(jnp.zeros(3), PSDLowRank(jnp.eye(3))).log_density(jnp.zeros(99))
+
+
+def test_error_messages_name_the_object_the_method_and_the_offending_value():
+    """The message obligations are normative, and a fragment match does not
+    pin them: a terse message losing the repr, the method and the shape passes
+    every other validation test."""
+    J, P, N = 5, 3, 4
+    joint = EnsembleJoint(
+        jnp.asarray(RNG.normal(size=(J, P))), jnp.asarray(RNG.normal(size=(J, N)))
+    )
+    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+
+    with pytest.raises(ValueError) as excinfo:
+        joint.transform_update(jnp.zeros((2, N)), noise_cov)
+    message = str(excinfo.value)
+    assert repr(joint) in message          # the object
+    assert "transform_update" in message   # the method
+    assert f"({N},)" in message            # the expectation
+    assert "(2, 4)" in message             # the offending shape
+
+    gaussian = Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.asarray(_psd(3))))
+    with pytest.raises(ValueError) as excinfo:
+        gaussian.log_density(jnp.zeros((2, 7)))
+    message = str(excinfo.value)
+    assert repr(gaussian) in message
+    assert "log_density" in message
+    assert "(2, 7)" in message
+
+    with pytest.raises(ValueError) as excinfo:
+        gain_weights(jnp.zeros((3, 4)), jnp.zeros(9))
+    assert "gain_weights" in str(excinfo.value) and "(9,)" in str(excinfo.value)
+
+
+def test_derived_moment_properties_have_the_documented_values():
+    """v_mean and v_anomalies are public and nothing in the kernel reads them,
+    so without this they have no value coverage at all: replacing v_mean with
+    zeros passes the whole suite."""
+    J, P, N = 6, 3, 4
+    U, V, _, _ = _problem(J, P, N)
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+
+    for got, want in (
+        (joint.u_mean, U.mean(axis=0)),
+        (joint.v_mean, V.mean(axis=0)),
+        (joint.u_anomalies, U - U.mean(axis=0)),
+        (joint.v_anomalies, V - V.mean(axis=0)),
+    ):
+        np.testing.assert_allclose(
+            got, want, rtol=0, atol=1e3 * EPS * max(1.0, np.abs(want).max())
+        )
+    # anomalies sum to zero, and mean + anomalies recovers the samples
+    np.testing.assert_allclose(joint.v_anomalies.sum(axis=0), 0.0, rtol=0, atol=1e-13)
+    np.testing.assert_allclose(
+        joint.u_mean + joint.u_anomalies, U, rtol=0, atol=1e3 * EPS
+    )
+
+
+def test_gaussian_batch_shape_includes_its_covariance_contribution():
+    """A reconstruction that batches only the covariance is still a family.
+
+    Stacking every leaf cannot see this: `mean` alone already reports the
+    batch, so ignoring the covariance's contribution passes.
+    """
+    n = 3
+    gaussian = Gaussian(jnp.zeros(n), DensePSD.from_matrix(jnp.asarray(_psd(n))))
+    leaves, treedef = jax.tree_util.tree_flatten(gaussian)
+    mean_leaf, cov_leaf = leaves
+
+    cov_only = jax.tree_util.tree_unflatten(
+        treedef, [mean_leaf, jnp.stack([cov_leaf] * 4)]
+    )
+    assert cov_only.batch_shape == (4,)
+    assert cov_only.n == n
+    with pytest.raises(ValueError, match="vmapped family"):
+        cov_only.log_density(jnp.zeros(n))
+
+    # incompatible contributions are diagnosed at the property
+    mismatched = jax.tree_util.tree_unflatten(
+        treedef, [jnp.stack([mean_leaf] * 2), jnp.stack([cov_leaf] * 5)]
+    )
+    with pytest.raises(ValueError, match="do not broadcast"):
+        _ = mismatched.batch_shape
+
+
+def test_gaussian_repr_never_raises_on_unreadable_leaves():
+    """The never-raises rule is per class, and only EnsembleJoint was covered."""
+    treedef = jax.tree_util.tree_structure(
+        Gaussian(jnp.zeros(2), DensePSD.from_matrix(jnp.eye(2)))
+    )
+    broken = jax.tree_util.tree_unflatten(treedef, [object(), object()])
+    assert repr(broken) == "<Gaussian (unprintable leaves)>"
+
+
+def test_non_array_fields_are_rejected_at_construction():
+    """Tier 2 is unconditional, so a field with no shape is an error.
+
+    Waving it through silences every check that follows — including those on
+    the other field — and yields an object whose every accessor raises
+    AttributeError instead of a constructor ValueError.
+    """
+    cov = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    with pytest.raises(TypeError, match="no shape to check"):
+        Gaussian([0.0, 0.0, 0.0], cov)
+    with pytest.raises(TypeError, match="no shape to check"):
+        EnsembleJoint([[1.0, 2.0], [3.0, 4.0]], jnp.zeros((2, 2)))
+    with pytest.raises(TypeError, match="no shape to check"):
+        EnsembleJoint(jnp.zeros((2, 2)), [[1.0], [2.0]])
+
+    # NumPy arrays have a shape and are accepted; the checks then apply
+    Gaussian(np.zeros(3), cov)
+    with pytest.raises(ValueError, match="disagrees"):
+        Gaussian(np.zeros(4), cov)
+    with pytest.raises(ValueError, match="at least 2 members"):
+        EnsembleJoint(np.zeros((1, 2)), np.zeros((1, 2)))
+
+
+def test_primitives_coerce_their_matrix_operand():
+    """`s` is coerced like `b`, so a nested list raises the contract's
+    ValueError on a shape violation rather than AttributeError on ndim."""
+    np.testing.assert_allclose(
+        gain_weights([[1.0, 2.0], [3.0, 4.0]], jnp.ones(2)),
+        gain_weights(jnp.asarray([[1.0, 2.0], [3.0, 4.0]]), jnp.ones(2)),
+    )
+    assert sqrt_transform([[1.0, 2.0], [3.0, 4.0]]).shape == (2, 2)
+    with pytest.raises(ValueError, match="expected s of shape"):
+        gain_weights([1.0, 2.0], jnp.ones(2))
+    with pytest.raises(ValueError, match="expected s of shape"):
+        sqrt_transform([1.0, 2.0])
+
+
+def test_the_transform_does_not_promote_the_dtype():
+    """jnp.eye defaults to float64, which silently upcast an otherwise-float32
+    pipeline and made `condition` return a Gaussian whose mean and covariance
+    factor had different dtypes — enough to break a lax.scan carry."""
+    J, P, N = 5, 3, 4
+    U = jnp.asarray(RNG.normal(size=(J, P)), dtype=jnp.float32)
+    V = jnp.asarray(RNG.normal(size=(J, N)), dtype=jnp.float32)
+    s = jnp.asarray(RNG.normal(size=(J, N)), dtype=jnp.float32)
+    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N), dtype=jnp.float32))
+    y = jnp.asarray(RNG.normal(size=N), dtype=jnp.float32)
+
+    assert sqrt_transform(s).dtype == jnp.float32
+    joint = EnsembleJoint(U, V)
+    assert joint.transform_update(y, noise_cov).dtype == jnp.float32
+    posterior = joint.condition(y, noise_cov)
+    assert posterior.mean.dtype == posterior.cov.F.dtype == jnp.float32
+
+    # float64 stays float64, which is what the package actually runs on
+    joint64 = EnsembleJoint(
+        jnp.asarray(RNG.normal(size=(J, P))), jnp.asarray(RNG.normal(size=(J, N)))
+    )
+    cov64 = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    assert joint64.transform_update(jnp.zeros(N), cov64).dtype == jnp.float64
