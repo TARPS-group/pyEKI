@@ -20,8 +20,9 @@ catalogue, a guide to writing an operator, the operator contract, the
 joint Gaussian contract, design notes, and an API reference.
 
 **Not started.** `pyeki.gauss`, `pyeki.localize`, `pyeki.eki`. The design
-background for all three is in `docs/design.md`; `pyeki.gauss` additionally
-has its full normative contract in `docs/gaussian-contract.md`.
+background for all three is in `docs/design.md`; `pyeki.gauss` and `pyeki.eki`
+additionally have their full normative contracts in
+`docs/gaussian-contract.md` and `docs/eki-contract.md`.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -79,7 +80,9 @@ and the implementation PR must add the layer's user-guide page.
 
 ### 3. `pyeki.eki`
 
-Tempering ladder, ensemble updates, inflation, driver loop.
+Tempering ladder, ensemble updates, inflation, driver loop. Its normative
+design is `docs/eki-contract.md` — adversarially reviewed and ready to
+implement.
 
 :::{important}
 The per-step observation noise is $\Sigma/\Delta\beta_t$, using the tempering
@@ -90,9 +93,13 @@ in the mean and 0.25 in the covariance — and the error grows with ladder
 length. Write the telescoping test first.
 :::
 
-Also: choose the increment adaptively rather than fixing the ladder; handle
-forward-model failures with a validity mask and a fixed ensemble size; and
-carry the PRNG key in the state so runs are reproducible and resumable.
+The contract's shape: one driver, and the *schedule* decides which form of EKI
+you get — a budget summing to $\beta = 1$ gives the approximate-sampling form,
+an unbounded ladder with a discrepancy stopping rule gives the optimization
+form. Schedule, update rule, inflation and stopping rule are four independent
+protocols with shipped implementations; `pyeki.localize` will plug in as an
+update rule. The loop is ordinary Python, because the forward model may not be
+traceable; every array computation in the layer is `jit`-safe.
 
 ### 4. `pyeki.localize`
 
