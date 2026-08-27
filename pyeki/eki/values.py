@@ -55,8 +55,12 @@ from jax import Array
 
 from ..linalg import static_field, value_check
 from ..linalg.base import _broadcast_batch, _pytree_dataclass
-from .helpers import _check_field_rank, _check_finite, _check_not_vmap_family
-from .helpers import _misfits_from_residuals
+from .helpers import (
+    _check_field_rank,
+    _check_finite,
+    _check_not_vmap_family,
+    _misfits_from_residuals,
+)
 
 __all__ = [
     "EKIError",

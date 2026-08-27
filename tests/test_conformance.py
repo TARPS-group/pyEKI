@@ -1,9 +1,12 @@
-"""Conformance tests: every operator type, through the full contract suite.
+"""Conformance tests: every extensible type, through its contract's suite.
 
-One instance per operator class — plus variants whose capabilities,
-structure depth, block count, or sign differ — runs through
-:func:`pyeki.linalg.testing.check_operator`, the executable form of the
-linear operator contract.
+Two layers ship a conformance harness, because two layers are open to
+extension. One instance per operator class — plus variants whose
+capabilities, structure depth, block count, or sign differ — runs through
+:func:`pyeki.linalg.testing.check_operator`; and every shipped EKI policy runs
+through the check for its axis in :mod:`pyeki.eki.testing`, which is the
+harness a user's own schedule, update rule or inflation is meant to be run
+through.
 """
 from __future__ import annotations
 
@@ -12,6 +15,22 @@ import numpy as np
 import pytest
 
 import pyeki  # noqa: F401  -- enables x64 before any array exists
+from pyeki.eki import (
+    AdaptiveESSSchedule,
+    AdaptiveMisfitSchedule,
+    AdditiveInflation,
+    DiscrepancyStop,
+    FixedSchedule,
+    MultiplicativeInflation,
+    PathwiseUpdate,
+    TransformUpdate,
+)
+from pyeki.eki.testing import (
+    check_inflation,
+    check_schedule,
+    check_stopping_rule,
+    check_update,
+)
 from pyeki.linalg import (
     BlockDiag,
     Dense,
@@ -119,3 +138,51 @@ def _instances() -> list[LinOp]:
 @pytest.mark.parametrize("op", _instances(), ids=lambda o: type(o).__name__)
 def test_conformance(op):
     check_operator(op)
+
+
+# ---------------------------------------------------------------------------
+# every shipped EKI policy, through the harness the layer ships for user ones
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        FixedSchedule.uniform(4),
+        FixedSchedule.constant(1.0, 1),
+        FixedSchedule((0.25, 0.5, 0.25)),
+        AdaptiveESSSchedule(),
+        AdaptiveESSSchedule(beta_target=None, ess_fraction=0.3, n_bisect=12),
+        AdaptiveMisfitSchedule(),
+        AdaptiveMisfitSchedule(beta_target=None, divergence_budget=3.0),
+    ],
+    ids=repr,
+)
+def test_schedule_conformance(schedule):
+    check_schedule(schedule)
+
+
+@pytest.mark.parametrize("update", [TransformUpdate(), PathwiseUpdate()], ids=repr)
+def test_update_conformance(update):
+    check_update(update)
+
+
+@pytest.mark.parametrize(
+    "inflation",
+    [
+        MultiplicativeInflation(1.02),
+        MultiplicativeInflation(2.0),
+        AdditiveInflation(DensePSD.from_matrix(jnp.eye(3) * 0.05)),
+        AdditiveInflation.from_cov(DensePSD.from_matrix(jnp.eye(3) * 0.05)),
+        AdditiveInflation(PSDDiagonal(jnp.full((3,), 0.02))),
+    ],
+    ids=repr,
+)
+def test_inflation_conformance(inflation):
+    check_inflation(inflation)
+
+
+@pytest.mark.parametrize(
+    "stop", [DiscrepancyStop(), DiscrepancyStop(tau=2.0)], ids=repr
+)
+def test_stopping_rule_conformance(stop):
+    check_stopping_rule(stop)

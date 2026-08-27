@@ -22,7 +22,9 @@ needs nothing from :mod:`pyeki.gauss` beyond its two update methods.
 Two well-known modes of EKI fall out of the same driver, and neither is
 privileged — they are two schedules, not two drivers and not a flag::
 
-    from pyeki.eki import AdaptiveESSSchedule, DiscrepancyStop, EKIState, FixedSchedule, run
+    from pyeki.eki import (
+        AdaptiveESSSchedule, DiscrepancyStop, EKIState, FixedSchedule, run,
+    )
 
     state = EKIState.from_prior(key, prior, n_members=64)
 
@@ -127,14 +129,14 @@ from .policies import (
     TransformUpdate,
 )
 from .values import (
+    INTERRUPTED,
+    SCHEDULE_EXHAUSTED,
+    STOPPING_RULE,
     EKIError,
     EKIResult,
     EKIState,
     Evaluation,
     HistoryRecord,
-    INTERRUPTED,
-    SCHEDULE_EXHAUSTED,
-    STOPPING_RULE,
 )
 
 __all__ = [

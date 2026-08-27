@@ -51,7 +51,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import Array
 
 from ..linalg import PSDDiagonal, PSDLinOp
 from .values import Evaluation

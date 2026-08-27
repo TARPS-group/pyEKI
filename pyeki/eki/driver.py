@@ -63,17 +63,20 @@ import jax.numpy as jnp
 from jax import Array
 
 from ..linalg import PSDLinOp
-from .helpers import _anomalies, _misfits_from_residuals, effective_sample_size
-from .helpers import repair_failed_members
+from .helpers import (
+    _anomalies,
+    effective_sample_size,
+    repair_failed_members,
+)
 from .policies import TransformUpdate
 from .values import (
+    SCHEDULE_EXHAUSTED,
+    STOPPING_RULE,
     EKIError,
     EKIResult,
     EKIState,
     Evaluation,
     HistoryRecord,
-    SCHEDULE_EXHAUSTED,
-    STOPPING_RULE,
 )
 
 __all__ = ["advance", "apply", "evaluate", "iterate", "run"]

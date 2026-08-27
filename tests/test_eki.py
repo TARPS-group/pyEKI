@@ -29,6 +29,9 @@ import pytest
 
 import pyeki  # noqa: F401  -- enables x64 before any array exists
 from pyeki.eki import (
+    INTERRUPTED,
+    SCHEDULE_EXHAUSTED,
+    STOPPING_RULE,
     AdaptiveESSSchedule,
     AdaptiveMisfitSchedule,
     AdditiveInflation,
@@ -39,11 +42,8 @@ from pyeki.eki import (
     Evaluation,
     FixedSchedule,
     HistoryRecord,
-    INTERRUPTED,
     MultiplicativeInflation,
     PathwiseUpdate,
-    SCHEDULE_EXHAUSTED,
-    STOPPING_RULE,
     TransformUpdate,
     advance,
     apply,
@@ -1116,9 +1116,8 @@ def test_12_runs_are_reproducible_resumable_and_agree_with_iterate():
     # Stop after four rungs and resume: the tail is bit-exact.
     partial_state = problem.state()
     taken = 0
-    for partial_state, _, _ in iterate(
-        problem.state(), problem.forward, y, noise, **common
-    ):
+    for yielded in iterate(problem.state(), problem.forward, y, noise, **common):
+        partial_state = yielded[0]
         taken += 1
         if taken == 4:
             break
@@ -1380,11 +1379,11 @@ def test_16_iterate_yields_what_a_hand_written_two_phase_loop_yields():
         by_hand, _ = advance(by_hand, problem.forward, y, noise, increment=increment)
 
     driven = None
-    for driven, _, _ in iterate(
+    for yielded in iterate(
         problem.state(), problem.forward, y, noise,
         schedule=FixedSchedule(increments),
     ):
-        pass
+        driven = yielded[0]
     assert np.array_equal(
         np.asarray(driven.ensemble), np.asarray(by_hand.ensemble)
     )
@@ -1443,3 +1442,980 @@ def test_17_a_wholly_failing_model_and_a_nan_update_both_raise():
             problem.state(), problem.forward, y, noise,
             schedule=FixedSchedule.uniform(3), update=poison,
         )
+
+
+def test_18_every_tier_two_and_tier_three_rule_raises_as_specified():
+    """The validation table, rule by rule."""
+    key = jax.random.key(0)
+    ensemble = jnp.zeros((4, 3))
+
+    # -- EKIState ------------------------------------------------------------
+    with pytest.raises(ValueError, match="rank 2"):
+        EKIState(jnp.zeros((4,)), 0.0, 0, key)
+    with pytest.raises(ValueError, match="at least 2 members"):
+        EKIState(jnp.zeros((1, 3)), 0.0, 0, key)
+    with pytest.raises(ValueError, match="core sizes must be positive"):
+        EKIState(jnp.zeros((4, 0)), 0.0, 0, key)
+    with pytest.raises(ValueError, match="must not be negative"):
+        EKIState(ensemble, 0.0, -1, key)
+    with pytest.raises(TypeError, match="Python int"):
+        EKIState(ensemble, 0.0, 1.0, key)
+    with pytest.raises(ValueError, match="scalar"):
+        EKIState(ensemble, jnp.zeros((2,)), 0, key)
+    with pytest.raises(TypeError, match="typed PRNG key"):
+        EKIState(ensemble, 0.0, 0, jnp.zeros(()))
+    with pytest.raises(TypeError, match="typed PRNG key"):
+        EKIState(ensemble, 0.0, 0, jax.random.PRNGKey(0))
+    with debug_checks():
+        with pytest.raises(ValueError, match="must not be negative"):
+            EKIState(ensemble, -0.5, 0, key)
+        with pytest.raises(ValueError, match="finite"):
+            EKIState(jnp.full((4, 3), jnp.nan), 0.0, 0, key)
+
+    # -- policies ------------------------------------------------------------
+    with pytest.raises(ValueError, match="must not be empty"):
+        FixedSchedule(())
+    with pytest.raises(ValueError, match="strictly positive"):
+        FixedSchedule((0.5, 0.0, 0.5))
+    with pytest.raises(ValueError, match="strictly positive"):
+        FixedSchedule((0.5, jnp.inf))
+    with pytest.raises(TypeError, match="tuple"):
+        FixedSchedule([0.5, 0.5])
+    with pytest.raises(ValueError, match="ess_fraction"):
+        AdaptiveESSSchedule(ess_fraction=1.0)
+    with pytest.raises(ValueError, match="ess_fraction"):
+        AdaptiveESSSchedule(ess_fraction=0.0)
+    with pytest.raises(ValueError, match="n_bisect"):
+        AdaptiveESSSchedule(n_bisect=0)
+    with pytest.raises(ValueError, match="max_increment"):
+        AdaptiveESSSchedule(max_increment=float("inf"))
+    with pytest.raises(ValueError, match="min_increment"):
+        AdaptiveESSSchedule(min_increment=2.0, max_increment=1.0)
+    with pytest.raises(ValueError, match="beta_target"):
+        AdaptiveESSSchedule(beta_target=0.0)
+    with pytest.raises(ValueError, match="divergence_budget"):
+        AdaptiveMisfitSchedule(divergence_budget=0.0)
+    with pytest.raises(ValueError, match="divergence_budget"):
+        AdaptiveMisfitSchedule(divergence_budget=float("inf"))
+    with pytest.raises(ValueError, match="tau"):
+        DiscrepancyStop(tau=0.0)
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        AdditiveInflation(jnp.eye(3))
+    with debug_checks():
+        with pytest.raises(ValueError, match="anomaly_factor"):
+            MultiplicativeInflation(-1.0)
+
+    # -- call-time problem and policy outputs ---------------------------------
+    problem = _AffineProblem()
+    state, noise = problem.state(), problem.noise_cov
+    y = jnp.asarray(problem.y)
+    ladder = FixedSchedule.uniform(2)
+    with pytest.raises(ValueError, match="shape"):
+        run(state, problem.forward, jnp.zeros((problem.N + 1,)), noise, schedule=ladder)
+    with pytest.raises(ValueError, match="must be finite"):
+        run(state, problem.forward, jnp.full((problem.N,), jnp.nan), noise,
+            schedule=ladder)
+    with pytest.raises(TypeError, match="PSDLinOp"):
+        run(state, problem.forward, y, jnp.eye(problem.N), schedule=ladder)
+    with pytest.raises(ValueError, match="max_steps"):
+        run(state, problem.forward, y, noise, schedule=ladder, max_steps=0)
+    with pytest.raises(ValueError, match="forward model returned shape"):
+        run(state, lambda u: jnp.zeros((problem.J, problem.N + 1)), y, noise,
+            schedule=ladder)
+    with pytest.raises(ValueError, match="real floating dtype"):
+        run(state, lambda u: jnp.zeros((problem.J, problem.N), dtype=jnp.int32),
+            y, noise, schedule=ladder)
+    with pytest.raises(ValueError, match="inflation returned shape"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            inflation=lambda key, *, ensemble, step, beta, **_: ensemble[:-1])
+    with pytest.raises(ValueError, match="update returned shape"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            update=lambda key, *, ensemble, **_: ensemble[:, :-1])
+    with pytest.raises(ValueError, match="update returned dtype"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            update=lambda key, *, ensemble, **_: ensemble.astype(jnp.float32))
+    with pytest.raises(ValueError, match="cov has side"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            inflation=AdditiveInflation(DensePSD.from_matrix(jnp.eye(problem.P + 1))))
+
+    class _NonPositive:
+        n_steps, beta_target = 4, None
+
+        def next_increment(self, evaluation):
+            return -0.5
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        run(state, problem.forward, y, noise, schedule=_NonPositive())
+
+    # -- unsupported operations propagate unmodified --------------------------
+    singular = Gaussian(jnp.zeros(problem.P), PSDLowRank(jnp.zeros((problem.P, 2))))
+    with pytest.raises(UnsupportedOpError):
+        run(state, problem.forward, y, PSDLowRank(jnp.eye(problem.N)),
+            schedule=ladder)
+    del singular
+
+    # -- repair_failed_members ------------------------------------------------
+    with pytest.raises(ValueError, match="at least 2 valid"):
+        repair_failed_members(
+            ensemble=jnp.zeros((4, 3)),
+            predictions=jnp.zeros((4, 2)),
+            valid=jnp.asarray([True, False, False, False]),
+        )
+    with pytest.raises(ValueError, match="boolean"):
+        repair_failed_members(
+            ensemble=jnp.zeros((4, 3)),
+            predictions=jnp.zeros((4, 2)),
+            valid=jnp.ones(4),
+        )
+
+    # -- EKIResult ------------------------------------------------------------
+    with pytest.raises(ValueError, match="status"):
+        EKIResult(state=state, history=(), status="stopping-rule",
+                  last_evaluation=None)
+
+
+def test_18_reprs_are_types_and_static_sizes_with_no_array_data():
+    problem = _AffineProblem()
+    state = problem.state()
+    evaluation = evaluate(
+        state, problem.forward, jnp.asarray(problem.y), problem.noise_cov
+    )
+    _, record = advance(
+        state, problem.forward, jnp.asarray(problem.y), problem.noise_cov,
+        increment=0.5,
+    )
+    result = run(
+        problem.state(), problem.forward, jnp.asarray(problem.y), problem.noise_cov,
+        schedule=FixedSchedule.uniform(2),
+    )
+    assert repr(state) == f"EKIState(n_members={problem.J}, u_dim={problem.P}, step=0)"
+    assert repr(evaluation) == f"Evaluation(step=0, n_members={problem.J})"
+    assert repr(record) == "HistoryRecord(step=0)"
+    assert repr(result) == "EKIResult(status='schedule_exhausted', n_steps=2, beta=1)"
+    assert repr(TransformUpdate()) == "TransformUpdate()"
+    assert repr(DiscrepancyStop(tau=2.0)) == "DiscrepancyStop(tau=2.0)"
+    assert repr(MultiplicativeInflation(1.02)) == (
+        "MultiplicativeInflation(anomaly_factor=1.02)"
+    )
+    # FixedSchedule summarizes rather than enumerating its increments.
+    long_ladder = repr(FixedSchedule.constant(1.0, 200))
+    assert long_ladder == "FixedSchedule(n_steps=200, total=200.0)"
+    assert "1.0, 1.0" not in long_ladder
+
+
+def test_18_the_pinned_prior_draw_and_a_short_run_are_snapshotted():
+    """A JAX-side PRNG change is detected rather than absorbed."""
+    prior = Gaussian(jnp.zeros(2), PSDDiagonal(jnp.asarray([1.0, 4.0])))
+    state = EKIState.from_prior(jax.random.key(0), prior, 3)
+
+    key_sample, key_state = jax.random.split(jax.random.key(0))
+    factor = prior.cov.factor()
+    want = prior.mean + factor.matvec(jax.random.normal(key_sample, (3, factor.shape[1])))
+    assert np.array_equal(np.asarray(state.ensemble), np.asarray(want))
+    assert np.array_equal(
+        np.asarray(jax.random.key_data(state.key)),
+        np.asarray(jax.random.key_data(key_state)),
+    )
+    assert float(state.beta) == 0.0 and state.step == 0
+
+    problem = _AffineProblem(P=2, N=2, J=4, seed=61)
+    result = run(
+        problem.state(seed=2), problem.forward, jnp.asarray(problem.y),
+        problem.noise_cov, schedule=FixedSchedule.uniform(3),
+        update=PathwiseUpdate(),
+    )
+    snapshot = np.array(
+        [
+            [-4.822437772347259, -0.5647789498818425],
+            [-0.7782512445291673, -0.0207102206543081],
+            [-1.273350642921045, 1.501021381875314],
+            [-0.9664786494421309, -0.2782707344895974],
+        ]
+    )
+    assert np.abs(np.asarray(result.ensemble) - snapshot).max() < 1e-12
+
+
+def test_19_the_result_reports_the_run_on_four_fixtures():
+    """``stop_fired`` and ``budget_complete`` are each true exactly on their status."""
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    # 1. A completed budget with no stopping rule.
+    completed = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule.uniform(4),
+    )
+    assert completed.status == SCHEDULE_EXHAUSTED
+    assert completed.budget_complete and not completed.stop_fired
+
+    # 2. An optimization run whose ladder ran out before its stop fired.
+    unfitted = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule.constant(1.0, 5),
+        stop=DiscrepancyStop(tau=1e-6), max_steps=5,
+    )
+    assert unfitted.budget_complete and not unfitted.stop_fired
+
+    # 3. A stop firing on a budgeted ladder, on a problem it has *not* fit.
+    #    The threshold is met by the ensemble centre while the ladder is only
+    #    part-way, which is the trap the two booleans exist to expose.
+    early = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule.uniform(10),
+        stop=_StopAtStepThree(),
+    )
+    assert early.stop_fired and not early.budget_complete
+    assert float(early.beta) < 1.0
+
+    # 4. A user-built INTERRUPTED result.
+    interrupted = EKIResult(
+        state=problem.state(), history=(), status=INTERRUPTED, last_evaluation=None
+    )
+    assert not interrupted.stop_fired and not interrupted.budget_complete
+
+    for result in (completed, unfitted, early, interrupted):
+        assert result.status in (SCHEDULE_EXHAUSTED, STOPPING_RULE, INTERRUPTED)
+
+
+class _StopAtStepThree:
+    """A stopping rule that fires on position, never on the misfits.
+
+    Deliberately independent of the data, so that an implementation deriving
+    ``stop_fired`` or ``budget_complete`` from the last record's misfit fails
+    rather than passing.
+    """
+
+    def __call__(self, evaluation) -> bool:
+        return evaluation.step >= 3
+
+
+def test_19_last_evaluation_is_the_final_forward_call_and_off_by_one_where_it_should_be():
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    exhausted = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule.uniform(4),
+    )
+    assert exhausted.n_evaluations == len(problem.calls) == 4
+    # Equality against the model's own last recorded input, not merely
+    # inequality against result.ensemble, which a pre-repair pair would also
+    # satisfy.
+    assert np.array_equal(
+        np.asarray(exhausted.last_evaluation.ensemble), problem.calls[-1]
+    )
+    assert np.array_equal(
+        np.asarray(exhausted.last_evaluation.predictions),
+        np.asarray(problem.forward(problem.calls[-1])),
+    )
+    # The returned ensemble is one update past the final forward evaluation.
+    assert not np.array_equal(
+        np.asarray(exhausted.ensemble),
+        np.asarray(exhausted.last_evaluation.ensemble),
+    )
+
+    # On a stopping-rule termination the state is unchanged, so they agree.
+    stopped = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule.uniform(10), stop=_StopAtStepThree(),
+    )
+    assert np.array_equal(
+        np.asarray(stopped.ensemble), np.asarray(stopped.last_evaluation.ensemble)
+    )
+
+    # A run that made no evaluation has none.
+    finished = run(
+        stopped.state, problem.forward, y, noise, schedule=FixedSchedule.uniform(3)
+    )
+    assert finished.n_steps == 0 and finished.last_evaluation is None
+
+
+def test_20_inflation_and_the_update_see_the_true_ladder_and_are_applied_in_place():
+    """Placement is asserted against an instrumented model, not assumed."""
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    seen: dict[str, list] = {"inflate": [], "update": []}
+    shift = 0.125
+
+    def recording_inflation(key, *, ensemble, step, beta, **_):
+        seen["inflate"].append((step, float(beta)))
+        return ensemble + shift
+
+    def recording_update(key, *, ensemble, predictions, y, noise_cov, increment,
+                         step, beta, **_):
+        seen["update"].append((step, float(beta), float(increment)))
+        return TransformUpdate()(
+            key, ensemble=ensemble, predictions=predictions, y=y,
+            noise_cov=noise_cov, increment=increment, step=step, beta=beta,
+        )
+
+    increments = (0.2, 0.3, 0.5)
+    result = run(
+        problem.state(), problem.forward, y, noise,
+        schedule=FixedSchedule(increments),
+        inflation=recording_inflation, update=recording_update,
+    )
+    levels = [0.0, 0.2, 0.5]
+    assert seen["inflate"] == [(t, levels[t]) for t in range(3)]
+    assert seen["update"] == [
+        (t, levels[t], increments[t]) for t in range(3)
+    ]
+
+    # The model's *first* recorded input is the initial ensemble plus the
+    # shift, bit-exactly: inflation runs before the evaluation, and so the
+    # ensemble the caller supplied is never itself evaluated.
+    assert np.array_equal(problem.calls[0], np.asarray(problem.members + shift))
+    # And the returned ensemble is an update output, never an inflation one.
+    assert not np.array_equal(
+        np.asarray(result.ensemble), np.asarray(result.last_evaluation.ensemble)
+    )
+
+    # A rule that varies with beta still gives an exactly resumable run.
+    def beta_dependent(key, *, ensemble, predictions, y, noise_cov, increment,
+                       step, beta, **_):
+        scaled = TransformUpdate()(
+            key, ensemble=ensemble, predictions=predictions, y=y,
+            noise_cov=noise_cov, increment=increment, step=step, beta=beta,
+        )
+        return scaled * (1.0 + 0.01 * beta)
+
+    whole = run(problem.state(), problem.forward, y, noise,
+                schedule=FixedSchedule(increments), update=beta_dependent)
+    part = run(problem.state(), problem.forward, y, noise,
+               schedule=FixedSchedule(increments[:1]), update=beta_dependent)
+    rest = run(part.state, problem.forward, y, noise,
+               schedule=FixedSchedule(increments), update=beta_dependent)
+    assert np.array_equal(np.asarray(rest.ensemble), np.asarray(whole.ensemble))
+
+
+def test_21_every_record_field_agrees_with_the_evaluation_it_came_from():
+    """The only guard against a plausible-scalar bug in any of eleven fields."""
+    problem = _AffineProblem(J=9)
+    increments = (0.15, 0.35, 0.2, 0.3)
+    result = run(
+        problem.state(), problem.forward, jnp.asarray(problem.y),
+        problem.noise_cov, schedule=FixedSchedule(increments),
+    )
+    W = _recovered_whitener(problem.noise_cov, problem.N)
+    level = 0.0
+    for index, (record, members) in enumerate(
+        zip(result.history, problem.calls, strict=True)
+    ):
+        predictions = np.asarray(members) @ problem.G.T
+        residuals = (problem.y - predictions) @ W.T
+        phi = 0.5 * np.sum(residuals**2, axis=1)
+        anomalies = members - members.mean(axis=0)
+        spread = np.linalg.norm(anomalies) / np.sqrt(
+            (problem.J - 1) * problem.P
+        )
+        weights = np.exp(-increments[index] * (phi - phi.min()))
+
+        assert int(record.step) == index
+        assert int(record.n_valid) == problem.J
+        assert float(record.beta) == pytest.approx(level, abs=8 * EPS)
+        assert float(record.increment) == pytest.approx(increments[index])
+        assert float(record.beta_next) == pytest.approx(
+            level + increments[index], abs=8 * EPS
+        )
+        assert float(record.misfit_mean) == pytest.approx(phi.mean(), rel=1e-11)
+        assert float(record.misfit_min) == pytest.approx(phi.min(), rel=1e-11)
+        assert float(record.misfit_max) == pytest.approx(phi.max(), rel=1e-11)
+        assert record.misfit_min <= record.misfit_mean <= record.misfit_max
+        assert float(record.centre_misfit) == pytest.approx(
+            0.5 * np.sum(residuals.mean(axis=0) ** 2), rel=1e-10
+        )
+        assert float(record.spread) == pytest.approx(spread, rel=1e-11)
+        assert float(record.ess) == pytest.approx(
+            weights.sum() ** 2 / (weights**2).sum(), rel=1e-11
+        )
+        level += increments[index]
+
+    assert float(result.beta) == pytest.approx(sum(increments), abs=8 * EPS)
+
+
+def test_22_the_parameter_spread_is_exact_against_a_closed_form():
+    """A divisor of J and a missing 1/sqrt(P) are separately distinguishable."""
+    J, P, N = 5, 3, 2
+
+    # Every coordinate has empirical variance exactly c**2, so the field is c.
+    for c in (1.0, 0.25, 7.0):
+        members = _exact_moment_ensemble(J, np.zeros(P), c * np.eye(P))
+        got = _spread_of(members, N)
+        assert got == pytest.approx(c, rel=1e-12)
+
+    # Distinct per-coordinate variances: the root mean square of the three.
+    a, b, d = 1.0, 2.0, 4.0
+    members = _exact_moment_ensemble(J, np.zeros(P), np.diag([a, b, d]))
+    got = _spread_of(members, N)
+    assert got == pytest.approx(np.sqrt((a**2 + b**2 + d**2) / 3), rel=1e-12)
+    # The two errors this catches, at J = 5 and P = 3.
+    assert got != pytest.approx(np.sqrt((a**2 + b**2 + d**2) / 3 * (J - 1) / J))
+    assert got != pytest.approx(np.sqrt(a**2 + b**2 + d**2))
+
+
+def _spread_of(members: np.ndarray, n_obs: int) -> float:
+    """The ``rms_parameter_spread`` the layer reports for these members."""
+    J = members.shape[0]
+    state = EKIState(jnp.asarray(members), 0.0, 0, jax.random.key(0))
+    evaluation = evaluate(
+        state,
+        lambda u: jnp.zeros((J, n_obs)),
+        jnp.zeros(n_obs),
+        PSDDiagonal(jnp.ones(n_obs)),
+    )
+    return float(evaluation.rms_parameter_spread)
+
+
+def test_23_a_finished_ladder_is_a_no_op_and_restart_gives_the_full_one():
+    """The trap the contract devotes a warning to, and which nothing tested."""
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    for schedule in (FixedSchedule.uniform(4), AdaptiveESSSchedule(beta_target=1.0)):
+        finished = run(problem.state(), problem.forward, y, noise, schedule=schedule)
+        assert finished.n_steps > 0
+        calls_before = len(problem.calls)
+
+        again = run(finished.state, problem.forward, y, noise, schedule=schedule)
+        assert again.status == SCHEDULE_EXHAUSTED
+        assert again.n_steps == 0
+        assert again.history == ()
+        assert again.last_evaluation is None
+        assert np.array_equal(
+            np.asarray(again.ensemble), np.asarray(finished.ensemble)
+        )
+        assert len(problem.calls) == calls_before, "zero forward calls"
+
+        restarted = run(
+            finished.state.restart(), problem.forward, y, noise, schedule=schedule
+        )
+        assert restarted.n_steps == finished.n_steps
+        assert float(restarted.state.beta) == pytest.approx(float(finished.beta))
+
+
+def test_23_a_no_op_run_says_so_at_warning_level(caplog):
+    problem = _AffineProblem()
+    finished = run(
+        problem.state(), problem.forward, jnp.asarray(problem.y), problem.noise_cov,
+        schedule=FixedSchedule.uniform(2),
+    )
+    with caplog.at_level(logging.WARNING, logger="pyeki.eki"):
+        run(finished.state, problem.forward, jnp.asarray(problem.y),
+            problem.noise_cov, schedule=FixedSchedule.uniform(2))
+    assert "no forward evaluations" in caplog.text
+    assert "restart" in caplog.text
+
+
+def test_24_the_driver_hands_the_update_both_repaired_blocks():
+    """Repairing one block and not the other is a silent wrong answer.
+
+    Obligation 9 exercises the helper; this exercises the driver, which is
+    where the two blocks could diverge.
+    """
+    problem = _AffineProblem(J=6)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    shift = 0.0625
+    received: dict[str, np.ndarray] = {}
+
+    def failing(u):
+        problem.calls.append(np.asarray(u))
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[2, 0].set(jnp.nan)
+
+    def recording_update(key, *, ensemble, predictions, **_):
+        received["ensemble"] = np.asarray(ensemble)
+        received["predictions"] = np.asarray(predictions)
+        return jnp.asarray(ensemble)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run(
+            problem.state(), failing, y, noise,
+            schedule=FixedSchedule.uniform(1),
+            inflation=lambda key, *, ensemble, step, beta, **_: ensemble + shift,
+            update=recording_update,
+        )
+
+    inflated = jnp.asarray(problem.members + shift)
+    raw_predictions = jnp.asarray(inflated) @ jnp.asarray(problem.G).T
+    raw_predictions = raw_predictions.at[2, 0].set(jnp.nan)
+    valid = jnp.all(jnp.isfinite(raw_predictions), axis=-1)
+    want_ensemble, want_predictions = repair_failed_members(
+        ensemble=inflated, predictions=raw_predictions, valid=valid
+    )
+    assert np.array_equal(received["ensemble"], np.asarray(want_ensemble))
+    assert np.array_equal(received["predictions"], np.asarray(want_predictions))
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        FixedSchedule.uniform(3),
+        FixedSchedule.constant(0.3, 3),
+        AdaptiveESSSchedule(beta_target=0.6, min_increment=0.2, max_increment=0.2),
+        AdaptiveMisfitSchedule(beta_target=0.6, min_increment=0.2, max_increment=0.2),
+    ],
+)
+@pytest.mark.parametrize("update", [TransformUpdate(), PathwiseUpdate()])
+@pytest.mark.parametrize("inflation_kind", ["none", "multiplicative", "additive"])
+@pytest.mark.parametrize("with_stop", [False, True])
+def test_25_the_three_axes_compose(schedule, update, inflation_kind, with_stop):
+    """The executable form of the orthogonality claim, over the whole matrix.
+
+    Asserts only that each run terminates, reports a permitted status, stacks,
+    stays finite, and matches an instrumented forward-call count. It also
+    catches a driver that inspects one axis to decide another — an ``ess``
+    computed only for the ESS schedule, say.
+    """
+    problem = _AffineProblem(P=2, N=3, J=5, seed=71)
+    inflation = {
+        "none": None,
+        "multiplicative": MultiplicativeInflation(1.01),
+        "additive": AdditiveInflation.from_cov(
+            DensePSD.from_matrix(jnp.eye(problem.P) * 0.01)
+        ),
+    }[inflation_kind]
+    result = run(
+        problem.state(),
+        problem.forward,
+        jnp.asarray(problem.y),
+        problem.noise_cov,
+        schedule=schedule,
+        update=update,
+        inflation=inflation,
+        stop=DiscrepancyStop(tau=1e-8) if with_stop else None,
+        max_steps=20,
+    )
+    assert result.status in (SCHEDULE_EXHAUSTED, STOPPING_RULE)
+    assert result.n_evaluations == len(problem.calls)
+    assert np.all(np.isfinite(np.asarray(result.ensemble)))
+    stacked = result.stacked
+    assert stacked.batch_shape == (result.n_steps,)
+    assert np.all(np.isfinite(np.asarray(stacked.ess)))
+    assert np.all(np.asarray(stacked.ess) >= 1.0 - 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 26. every runnable block of the contract page
+# ---------------------------------------------------------------------------
+
+
+def test_26_the_two_form_example_runs():
+    """The contract's opening example, both forms, verbatim in structure."""
+    problem = _AffineProblem()
+    key = jax.random.key(0)
+    prior = Gaussian(
+        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+    )
+    forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
+
+    state = EKIState.from_prior(key, prior, n_members=64)
+
+    sampled = run(state, forward, y, noise_cov, schedule=AdaptiveESSSchedule())
+    ensemble = sampled.ensemble
+    centre = sampled.mean
+    assert ensemble.shape == (64, problem.P)
+    assert centre.shape == (problem.P,)
+
+    fit = run(
+        state, forward, y, noise_cov,
+        schedule=FixedSchedule.constant(1.0, n_steps=200),
+        stop=DiscrepancyStop(tau=1.0),
+        max_steps=200,
+    )
+    assert isinstance(fit.stop_fired, bool)  # False means the ladder ran out first
+
+
+def test_26_the_pinned_prior_draw_and_restart_blocks_run():
+    problem = _AffineProblem()
+    key = jax.random.key(9)
+    prior = Gaussian(
+        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+    )
+
+    key_sample, key_state = jax.random.split(key)
+    pinned = EKIState(prior.sample(key_sample, 8), 0.0, 0, key_state)
+    assert np.array_equal(
+        np.asarray(pinned.ensemble),
+        np.asarray(EKIState.from_prior(key, prior, 8).ensemble),
+    )
+
+    state = run(
+        pinned, problem.forward, jnp.asarray(problem.y), problem.noise_cov,
+        schedule=FixedSchedule.uniform(10),
+    ).state
+    phase2 = state.restart()  # step = 0, beta = 0.0, same ensemble and key
+    assert phase2.step == 0 and float(phase2.beta) == 0.0
+    assert np.array_equal(np.asarray(phase2.ensemble), np.asarray(state.ensemble))
+
+
+def test_26_the_backtracking_loop_runs_and_costs_what_the_contract_says():
+    """One forward evaluation per rung plus one per rejection."""
+    problem = _AffineProblem()
+    forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
+    accepted = 0
+
+    def done(_evaluation):
+        return accepted >= 3
+
+    s, delta = problem.state(), 1.0
+    current = evaluate(s, forward, y, noise_cov)
+    rejections = 0
+    while not done(current):
+        trial, record = apply(
+            s, current, increment=delta, y=y, noise_cov=noise_cov
+        )
+        probe = evaluate(trial, forward, y, noise_cov)
+        if probe.centre_misfit < current.centre_misfit:
+            s, current, delta = trial, probe, delta * 1.5
+            accepted += 1
+        else:
+            delta = delta / 2
+            rejections += 1
+        assert rejections < 20, "the loop must make progress"
+
+    assert len(problem.calls) == 1 + accepted + rejections
+
+
+def test_26_the_additive_inflation_definition_and_the_stacked_one_liner_run():
+    problem = _AffineProblem()
+    P, J = problem.P, problem.J
+    cov = DensePSD.from_matrix(jnp.eye(P) * 0.01)
+    key = jax.random.key(3)
+    ensemble = jnp.asarray(problem.members)
+
+    pert = Gaussian(jnp.zeros(P), cov).sample(key, J)
+    written_out = ensemble + (pert - pert.mean(axis=0))
+    assert np.array_equal(
+        np.asarray(written_out),
+        np.asarray(
+            AdditiveInflation(cov)(key, ensemble=ensemble, step=0, beta=jnp.asarray(0.0))
+        ),
+    )
+
+    result = run(
+        problem.state(), problem.forward, jnp.asarray(problem.y), problem.noise_cov,
+        schedule=FixedSchedule.uniform(4),
+    )
+    # plt.plot(result.stacked.step, result.stacked.misfit_mean)
+    xs, ys = result.stacked.step, result.stacked.misfit_mean
+    assert xs.shape == ys.shape == (4,)
+
+    fit = Gaussian.from_samples(result.ensemble)
+    assert fit.cov.diag().shape == (P,)
+    assert fit.sample(jax.random.key(1), 1000).shape == (1000, P)
+
+
+def test_26_the_eki_error_checkpoint_and_interrupted_result_patterns_run():
+    problem = _AffineProblem()
+    forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
+    sched = FixedSchedule.constant(0.25, 40)
+    checkpointed, diagnosed = [], []
+
+    try:
+        run(problem.state(), forward, y, noise_cov, schedule=sched, max_steps=3)
+    except EKIError as exc:
+        checkpointed.append(exc.state)      # resume from here after investigating
+        diagnosed.append(exc.history)
+    assert len(checkpointed) == 1 and len(diagnosed[0]) == 3
+
+    records = []
+    state, evaluation = problem.state(), None
+    for yielded in iterate(problem.state(), forward, y, noise_cov, schedule=sched):
+        state, record, evaluation = yielded
+        records.append(record)
+        if len(records) >= 2:
+            break
+    result = EKIResult(
+        state=state, history=tuple(records),
+        status=INTERRUPTED, last_evaluation=evaluation,
+    )
+    assert result.status == INTERRUPTED
+    assert not result.stop_fired and not result.budget_complete
+    assert result.n_steps == 2
+
+
+def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
+    """The augmentation runs, and its documented hazard is asserted exactly.
+
+    Appending the parameters to the predictions and the prior mean to the data
+    adds ``0.5 ||C0^-1/2 (u - m0)||^2`` to the tempered misfit. Started from a
+    *prior* ensemble and run to beta = 1, the prior therefore enters twice, and
+    the result is over-concentrated by exactly one extra copy of the prior
+    precision. Pinned as an equality so that a later change cannot quietly
+    "fix" it.
+    """
+    problem = _AffineProblem()
+    forward, y = problem.forward, jnp.asarray(problem.y)
+    noise_cov = problem.noise_cov
+    prior = Gaussian(
+        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+    )
+
+    forward_aug = lambda u: jnp.concatenate([forward(u), u], axis=-1)  # noqa: E731
+    y_aug = jnp.concatenate([y, prior.mean])
+    noise_aug = block_diag(noise_cov, prior.cov)
+
+    result = run(
+        problem.state(), forward_aug, y_aug, noise_aug,
+        schedule=FixedSchedule((0.5, 0.25, 0.25)),
+    )
+    _, got_cov = _moments(result.ensemble)
+
+    prior_precision = np.linalg.inv(problem.C0)
+    data_precision = problem.G.T @ np.linalg.solve(problem.R, problem.G)
+    # Once through the initial ensemble, once through the appended block.
+    doubled = np.linalg.inv(2 * prior_precision + data_precision)
+    _, honest = problem.posterior()
+    scale = np.abs(doubled).max()
+    assert np.abs(got_cov - doubled).max() < 1e3 * EPS * scale
+    assert np.abs(got_cov - honest).max() > 1e6 * EPS * scale
+    # Over-concentrated, in the direction the warning names.
+    assert np.trace(got_cov) < np.trace(honest)
+
+
+# ===========================================================================
+# Section 2 -- one targeted regression test per silent-failure class
+#
+# The list is derived from the contract's prose rather than curated: every
+# place it says a mistake raises nothing, warns nobody, or looks normal earns
+# an entry, and the two must be kept in step. Several classes are already
+# pinned by a conformance test above and are named here rather than
+# duplicated: the R/beta mis-scaling (test 2), the non-log-space ESS
+# (test 5), a repair applied when nothing failed (test 9), a HistoryRecord
+# field declared static (test 15), the safety bound checked before ladder
+# exhaustion (test 4), the min/max inversion and the two clamp-precedence
+# inversions (test 4), the bisection returning `hi` (test 4), a record field
+# disagreeing with its evaluation (test 21), two forward evaluations per rung
+# (tests 4, 16 and 19), chaining a fresh ladder onto a finished state
+# (test 23), DiscrepancyStop on a budgeted ladder (test 19), and the Tikhonov
+# augmentation at beta = 1 (test 26).
+# ===========================================================================
+
+
+def test_regression_inflation_scales_the_anomalies_not_the_covariance():
+    """``anomaly_factor`` is the field's name because the two conventions differ.
+
+    A caller passing an intended *variance* inflation of 1.2 gets 1.44. The
+    error is invisible at the small values normally used, where r and
+    sqrt(gamma) barely differ, and severe at large ones — which is why the
+    name pins the convention and this test pins the name.
+    """
+    rng = np.random.default_rng(83)
+    ensemble = jnp.asarray(rng.normal(size=(12, 3)))
+    _, before = _moments(ensemble)
+    inflated = MultiplicativeInflation(1.2)(
+        jax.random.key(0), ensemble=ensemble, step=0, beta=jnp.asarray(0.0)
+    )
+    _, after = _moments(inflated)
+    assert np.abs(after - 1.44 * before).max() < 64 * EPS * np.abs(before).max()
+    assert np.abs(after - 1.2 * before).max() > 1e-3 * np.abs(before).max()
+
+
+def test_regression_the_repair_does_not_rescale_the_surviving_members():
+    """The moment-exact variant would inflate silently, by a factor that is not small.
+
+    At J = 100 with 10% of members failing, the rescaling is sqrt(99/89) ≈
+    1.055 — a 5.5% re-injection of spread per step, larger than the
+    multiplicative inflation factors practitioners actually use, applied by
+    default under the name "repair".
+    """
+    rng = np.random.default_rng(89)
+    J, P, N = 100, 4, 3
+    ensemble = jnp.asarray(rng.normal(size=(J, P)))
+    predictions = jnp.asarray(rng.normal(size=(J, N)))
+    mask = np.ones(J, dtype=bool)
+    mask[:10] = False
+    valid = jnp.asarray(mask)
+
+    repaired, _ = repair_failed_members(
+        ensemble=ensemble, predictions=predictions, valid=valid
+    )
+    assert np.array_equal(np.asarray(repaired)[mask], np.asarray(ensemble)[mask])
+
+    n_valid = int(mask.sum())
+    rescaling = np.sqrt((J - 1) / (n_valid - 1))
+    assert rescaling == pytest.approx(np.sqrt(99 / 89), rel=1e-12)
+    u_hat = np.asarray(ensemble)[mask].mean(axis=0)
+    moment_exact = u_hat + (np.asarray(ensemble)[mask] - u_hat) * rescaling
+    assert np.abs(np.asarray(repaired)[mask] - moment_exact).max() > 1e-3
+
+
+def test_regression_misfits_are_computed_after_the_repair():
+    """A failed member would otherwise poison every statistic and criterion.
+
+    After repair its prediction is the valid centre, so it contributes the
+    centre's misfit — which sits *below* the valid members' mean misfit, a
+    downward bias the contract names rather than hides.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    def failing(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[1, 0].set(jnp.nan)
+
+    evaluation = evaluate(problem.state(), failing, y, noise)
+    assert np.all(np.isfinite(np.asarray(evaluation.misfits)))
+    assert evaluation.n_valid == problem.J - 1
+
+    mask = np.ones(problem.J, dtype=bool)
+    mask[1] = False
+    valid_predictions = (problem.members @ problem.G.T)[mask]
+    v_hat = valid_predictions.mean(axis=0)
+    W = _recovered_whitener(noise, problem.N)
+    want_repaired = 0.5 * float(np.sum((W @ (problem.y - v_hat)) ** 2))
+    assert float(evaluation.misfits[1]) == pytest.approx(want_repaired, rel=1e-10)
+
+    valid_misfits = 0.5 * np.sum(((problem.y - valid_predictions) @ W.T) ** 2, axis=1)
+    assert want_repaired < valid_misfits.mean()
+
+
+def test_regression_a_schedule_that_counts_its_own_calls_is_caught():
+    """Purity is what makes a run resumable, and the harness is what catches it."""
+    from pyeki.eki.testing import check_schedule, synthetic_evaluation
+
+    class _CountsItsCalls:
+        n_steps, beta_target = None, 1.0
+
+        def __init__(self):
+            self.seen = 0
+
+        def next_increment(self, evaluation):
+            self.seen += 1
+            return 0.1 * self.seen
+
+    with pytest.raises(AssertionError, match="not pure"):
+        check_schedule(_CountsItsCalls(), synthetic_evaluation())
+
+
+def test_regression_the_key_split_is_three_way_in_a_pinned_order():
+    """No numeric test can catch this in the default configuration.
+
+    The default consumes no randomness at all, so the guard is a
+    ``jax.random.key_data`` snapshot of a multi-rung ``PathwiseUpdate`` run,
+    together with the property the fixed arity exists for: turning inflation
+    on must not shift the update's stream.
+    """
+    problem = _AffineProblem(P=2, N=2, J=4, seed=61)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    common = dict(schedule=FixedSchedule.uniform(3), update=PathwiseUpdate())
+
+    without = run(problem.state(seed=2), problem.forward, y, noise, **common)
+    identity = lambda key, *, ensemble, step, beta, **_: ensemble  # noqa: E731
+    with_inflation = run(
+        problem.state(seed=2), problem.forward, y, noise,
+        inflation=identity, **common,
+    )
+    assert np.array_equal(
+        np.asarray(without.ensemble), np.asarray(with_inflation.ensemble)
+    ), "turning inflation on shifted the update's random stream"
+
+    # The order and the arity, snapshotted through the state's own key.
+    assert [int(x) for x in np.asarray(jax.random.key_data(without.state.key))] == [
+        916975276,
+        3797780651,
+    ]
+    key = problem.state(seed=2).key
+    for _ in range(3):
+        key, _, _ = jax.random.split(key, 3)
+    assert np.array_equal(
+        np.asarray(jax.random.key_data(without.state.key)),
+        np.asarray(jax.random.key_data(key)),
+    )
+
+
+def test_regression_a_fill_value_model_stalls_an_adaptive_ladder_silently():
+    """Finite nonsense is invisible to the layer, and the ladder crawls.
+
+    A solver returning a sentinel such as -9999 produces an enormous misfit
+    for one member, which an adaptive schedule reads as genuine ensemble
+    disagreement and answers by shrinking the increment — here all the way to
+    the floor, so a one-rung ladder becomes a fifty-rung one. Nothing raises
+    and nothing warns; ``n_valid`` reports every member valid. Documented as
+    a behaviour rather than fixed, because the layer cannot see it.
+
+    Scaled down to a budget of 0.05 against the same floor, so the stall is
+    exercised at 5% of the cost the shipped defaults would incur.
+    """
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    schedule = AdaptiveMisfitSchedule(beta_target=0.05, min_increment=1e-3)
+
+    clean = run(
+        problem.state(), problem.forward, y, noise, schedule=schedule, max_steps=50
+    )
+    assert clean.n_steps == 1
+
+    def with_fill_value(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[0].set(-9999.0)
+
+    stalled = run(
+        problem.state(), with_fill_value, y, noise, schedule=schedule, max_steps=50
+    )
+    assert stalled.min_n_valid == problem.J, "every member looks valid"
+    assert stalled.n_steps == 50
+    assert np.all(np.asarray(stalled.stacked.increment) == pytest.approx(1e-3))
+
+
+def test_regression_a_systematically_failing_member_is_visible_only_in_n_valid():
+    """The run completes and looks normal; three things say otherwise."""
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    def always_fails_member_three(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[3, 0].set(jnp.nan)
+
+    with pytest.warns(UserWarning, match="forward-model evaluations failed"):
+        result = run(
+            problem.state(), always_fails_member_three, y, noise,
+            schedule=FixedSchedule.uniform(4),
+        )
+    assert result.status == SCHEDULE_EXHAUSTED
+    assert np.all(np.isfinite(np.asarray(result.ensemble)))
+    assert result.min_n_valid == problem.J - 1
+    assert list(np.asarray(result.stacked.n_valid)) == [problem.J - 1] * 4
+
+
+def test_regression_a_failing_step_logs_at_warning_level(caplog):
+    problem = _AffineProblem(J=8)
+
+    def failing(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[3, 0].set(jnp.nan)
+
+    with caplog.at_level(logging.WARNING, logger="pyeki.eki"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run(
+            problem.state(), failing, jnp.asarray(problem.y), problem.noise_cov,
+            schedule=FixedSchedule.uniform(2),
+        )
+    assert "were finite" in caplog.text
+
+
+def test_regression_a_float32_update_cannot_quietly_demote_a_run():
+    """Every downstream test would still pass at its own tolerance."""
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    def demoting(
+        key, *, ensemble, predictions, y, noise_cov, increment, step, beta, **_
+    ):
+        return TransformUpdate()(
+            key, ensemble=ensemble, predictions=predictions, y=y,
+            noise_cov=noise_cov, increment=increment, step=step, beta=beta,
+        ).astype(jnp.float32)
+
+    with pytest.raises(ValueError, match="float32"):
+        run(problem.state(), problem.forward, y, noise,
+            schedule=FixedSchedule.uniform(2), update=demoting)
+
+    # A float32 forward model is the caller's own precision choice, but it
+    # must not demote the run: the state stays float64 throughout.
+    def coarse(u):
+        return (jnp.asarray(u) @ jnp.asarray(problem.G).T).astype(jnp.float32)
+
+    result = run(problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2))
+    assert result.ensemble.dtype == jnp.float64
