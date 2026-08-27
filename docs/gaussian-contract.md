@@ -275,7 +275,16 @@ Two structural facts, both load-bearing and both conformance-checked:
 
 ### Cost
 
-Whitening costs $J$ applications of $W$; the thin SVD is
+Whitening costs $J + 1$ applications of $W$ — every prediction and the
+observation, from one call on the stacked rows $[\mathsf{V}; y]$. Whitening
+is a fixed linear map applied row-wise, so it commutes with centring and
+with subtraction: $W A_v^\top$ is the whitened predictions minus *their*
+mean, and $W(y - v_j)$ is $Wy - Wv_j$. Implementations are free to group the
+whitening as they like — results then agree to round-off rather than
+bit-exactly, like any reassociation — but whitening the anomalies and the
+residuals in two separate calls costs $2J$ applications in the stochastic
+update, twice the necessary figure and, for a dense whitener, on the
+dominant term. The thin SVD is
 $O(J N \min(J, N))$; forming weights is $O((N + J)\,\rho)$ per residual and
 combining anomalies $O(JP)$ per member. A full ensemble update is
 $O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J$ whitener applications —
@@ -628,17 +637,19 @@ applies with one extension: everything static is checked always, values
 only on request — and, unlike the operator layer, tier 4 here also runs at
 *call* time: in debug mode the conditioning methods check `y`,
 `log_density` its evaluation point `x`, and the primitives their operands,
-for finiteness. Like the operator layer's,
+for finiteness, and the conditioning methods additionally check **what they
+return**. Like the operator layer's,
 these checks read array values and are therefore skipped on tracers: under
 `jit` or `vmap` they do not run, in debug mode or otherwise. A singular
-`noise_cov` is not among them — nothing here can detect it cheaply; it
-surfaces as `nan`. What each tier means here:
+`noise_cov` is not among the *operand* checks — nothing here can detect one
+before the fact; it surfaces as `nan`, or as the result check firing after
+the fact. What each tier means here:
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
 | 2. construction | ranks, static sizes, operator types, cross-field shape agreement; a vmapped-family `cov` | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
 | 3. call | operand core shapes, operator arguments, and static non-array arguments; a vmapped-family `noise_cov` — `ValueError` for shape violations, `TypeError` for type violations, per the taxonomy below | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y`, `x`, and the primitives' `s` and `b` at call | violations yield `nan` or a silently wrong posterior outside debug mode |
+| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y`, `x`, and the primitives' `s` and `b` at call; of the conditioning methods' *returned* values | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
@@ -650,8 +661,38 @@ guard ({ref}`gauss-jax`) first, then the required-capability checks in the
 order the method names them, then tier-3 operand and operator-argument
 validation, then — in debug mode — tier-4 value checks.
 
-That order has one forced exception, for the operator argument that *is* the
-capability bearer. A conditioning method cannot consult
+Result checks run **last**, once there is a result to check. This is the
+layer's one tier-4 *postcondition*: all three conditioning methods assert in
+debug mode that what they return is finite — the updated ensemble, or, for
+`condition`, both the posterior mean and the covariance factor, checked
+before the `PSDLowRank` and the `Gaussian` are built, so the diagnosis names
+the conditioning call rather than a constructor below it. Three points fix
+its scope:
+
+- **Why this layer checks outputs when the operator layer does not.** A
+  conditioning result becomes the *next* iteration's input: a `nan` ensemble
+  is handed straight to an expensive forward-model evaluation, and a model
+  that returns finite nonsense for `nan` parameters launders it beyond
+  recovery. An operator's result goes back to the caller who asked for it.
+  The asymmetry is deliberate, and is not an argument for adding output
+  checks to `pyeki.linalg`.
+- **It is the only cheap detection of a singular `noise_cov`.** The three
+  methods behave identically under it. Before this rule `condition` alone
+  raised, because it happened to route its mean through a constructor — and
+  even then it left the covariance factor unchecked, so the check covered
+  half of what it appeared to guard.
+- **`sample` is deliberately excluded**, and `log_density` with it. Their
+  output is non-finite only if a field is, and fields are the operator
+  layer's to validate at construction — which
+  {class}`~pyeki.linalg.PSDLowRank` and {class}`~pyeki.linalg.DensePSD` both
+  do for their factors.
+
+Because tier 4 is skipped on tracers, none of this fires inside a
+`jit`-compiled driver loop. Detection there is a different mechanism, and
+belongs to the layer that owns the loop.
+
+The ordering rule has one forced exception, for the operator argument that
+*is* the capability bearer. A conditioning method cannot consult
 `noise_cov.supports("whiten")` before it knows `noise_cov` is an operator at
 all, so two of its tier-3 checks — that it is a `PSDLinOp` (`TypeError`) and
 that it is not a vmapped family (`ValueError`) — run **ahead** of the
@@ -677,6 +718,7 @@ The explicit escape hatch is the same one as everywhere:
 | any operation or array-computing property on a vmapped family | `ValueError`, at call — apply the family under `jax.vmap` |
 | a vmapped-family `cov` at construction, or `noise_cov` at call | `ValueError` |
 | violated value precondition | `ValueError` in debug mode; `nan` or a silently wrong result otherwise |
+| a non-finite conditioning result (typically a singular `noise_cov`) | `ValueError` in debug mode, from the method; `nan` otherwise |
 
 (gauss-jax)=
 ## JAX integration
@@ -983,7 +1025,8 @@ silent-failure classes once found — the thin-SVD completion term (check 3),
 a mixed-representation perturbation, a mean shift from an uncentred
 transform, a `nan` gradient at an exactly collapsed `s`, and a singular
 noise covariance turning an update into an all-`nan` result with no
-exception (assert the `nan`, so the day it starts raising is visible) —
+exception outside debug mode (assert the `nan`, so the day it starts raising
+is visible) —
 under the same
 do-not-delete rule as the operator layer's.
 

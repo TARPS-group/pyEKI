@@ -140,8 +140,21 @@ The direction that *does* degrade is small noise: a very large whitener, giving
 a large $\sigma_{\max}$. Collapse is the numerically pristine end.
 
 The one precondition you own is that `noise_cov` be nonsingular, which is
-`whiten`'s own. A singular noise covariance cannot be detected cheaply, so it
-surfaces as `nan` rather than an exception.
+`whiten`'s own. A singular noise covariance cannot be detected *before the
+fact*, so by default it surfaces as `nan` rather than an exception. Under
+`debug_checks` the three conditioning methods check what they return, which
+turns that `nan` into a `ValueError` naming the likely cause:
+
+```python
+from pyeki.linalg import debug_checks
+
+with debug_checks(True):
+    joint.transform_update(y, singular_noise)   # ValueError, not a nan ensemble
+```
+
+Like every value-level check in pyEKI this reads array contents, so it is
+skipped on tracers: it fires in eager code and in tests, and not inside a
+`jit`-compiled loop. It is a debugging aid, not a guard on production runs.
 
 ## Families are `vmap`, never stored batch axes
 

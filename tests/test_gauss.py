@@ -148,6 +148,44 @@ class WhitenOnlyPSD(PSDLinOp):
         return tri_solve(self.L, x, lower=True)
 
 
+@linop
+class CountingWhitenPSD(PSDLinOp):
+    """A whitening operator that records how many vectors it has whitened.
+
+    The count is a plain Python list on the instance rather than a field, so
+    it stays invisible to the pytree machinery. Eager use only.
+    """
+
+    L: Array
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        n = self.L.shape[-1]
+        return (n, n)
+
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        return tuple(self.L.shape[:-2])
+
+    def _matvec(self, x: Array) -> Array:
+        return dense_matvec(self.L, dense_matvec(self.L.swapaxes(-1, -2), x))
+
+    def _to_dense(self) -> Array:
+        return self.L @ self.L.swapaxes(-1, -2)
+
+    def _whiten(self, x: Array) -> Array:
+        object.__getattribute__(self, "log").append(
+            1 if x.ndim == 1 else int(np.prod(x.shape[:-1]))
+        )
+        return tri_solve(self.L, x, lower=True)
+
+    @classmethod
+    def counting(cls, A) -> CountingWhitenPSD:
+        op = cls(jnp.linalg.cholesky(jnp.asarray(A)))
+        object.__setattr__(op, "log", [])
+        return op
+
+
 def test_local_operators_satisfy_the_operator_contract():
     """The two test-local operators are contract-valid, so the layer's failures
     cannot be blamed on the fixtures."""
@@ -1315,9 +1353,9 @@ def test_regression_singular_noise_covariance_yields_nan_without_raising():
     nan rather than an exception.
 
     Asserted deliberately, so the day it starts raising is visible here rather
-    than in a caller's results. Debug checks stay off: they would catch the nan
-    at the posterior's own construction, which is not the behaviour being
-    pinned.
+    than in a caller's results. Debug checks stay off for that half: in debug
+    mode the result checks turn the nan into an exception, which the second
+    half of this test pins separately.
     """
     J, P, N = 5, 3, 4
     U, V, _, y = _problem(J, P, N)
@@ -1336,6 +1374,76 @@ def test_regression_singular_noise_covariance_yields_nan_without_raising():
         assert bool(jnp.isnan(result).all())
 
 
+def test_regression_all_three_methods_report_a_nan_result_in_debug_mode():
+    """The result check is a postcondition, and it applies uniformly.
+
+    Before it existed, `condition` alone raised — because it happened to route
+    its mean through a constructor — and even then the posterior covariance
+    factor went unchecked. The uniformity is the point: a caller who wraps a
+    tempering loop in debug_checks must not get an exception from one
+    conditioning path and a silent nan from the others on identical inputs.
+
+    One asymmetry is deliberate and worth recording, because it limits what
+    this test can guard. `condition` checks both halves of its result, but
+    nothing distinguishes them: every input that makes the posterior factor
+    non-finite makes the mean non-finite too — both flow from the same SVD, and
+    a zero weight vector against a non-finite anomaly is nan rather than zero.
+    So the mean check is what fires here, and deleting the factor check would
+    not fail any test. It is kept for completeness, against a future change
+    that computes the mean by a route the factor does not share.
+    """
+    J, P, N = 5, 3, 4
+    U, V, _, y = _problem(J, P, N)
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+    singular = PSDDiagonal(jnp.asarray([1.0, 0.0, 2.0, 3.0]))
+
+    with debug_checks(True):
+        for call in (
+            lambda: joint.pathwise_update(jax.random.key(0), jnp.asarray(y), singular),
+            lambda: joint.transform_update(jnp.asarray(y), singular),
+            lambda: joint.condition(jnp.asarray(y), singular),
+        ):
+            with pytest.raises(ValueError, match="is not finite"):
+                call()
+        # the message points at the cause the check cannot itself detect
+        with pytest.raises(ValueError, match="singular noise_cov"):
+            joint.transform_update(jnp.asarray(y), singular)
+
+
+def test_regression_result_checks_are_skipped_under_jit():
+    """Tier 4 reads array values, so it is skipped on tracers.
+
+    Asserted so the limit of the previous test is on the record: the result
+    check is an eager-mode debugging aid, and a jitted driver loop gets the nan
+    regardless of the debug flag.
+    """
+    J, P, N = 5, 3, 4
+    U, V, _, y = _problem(J, P, N)
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+    singular = PSDDiagonal(jnp.asarray([1.0, 0.0, 2.0, 3.0]))
+
+    with debug_checks(True):
+        jitted = jax.jit(lambda j, y: j.transform_update(y, singular))
+        assert bool(jnp.isnan(jitted(joint, jnp.asarray(y))).all())
+        mapped = jax.vmap(lambda y: joint.transform_update(y, singular))
+        assert bool(jnp.isnan(mapped(jnp.stack([jnp.asarray(y)] * 2))).all())
+
+
+def test_regression_sample_is_outside_the_result_check_by_design():
+    """`sample` is excluded because its output is non-finite only if a field
+    is, and fields are validated at construction — which is what makes the
+    exclusion safe rather than an oversight."""
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="PSDLowRank.F must be finite"):
+            PSDLowRank(jnp.full((3, 2), jnp.nan))
+        with pytest.raises(ValueError, match="mean must be finite"):
+            Gaussian(jnp.full(3, jnp.nan), PSDLowRank(jnp.ones((3, 2))))
+
+    # with the checks off, both construct and sampling is silently nan
+    silent = Gaussian(jnp.zeros(3), PSDLowRank(jnp.full((3, 2), jnp.nan)))
+    assert bool(jnp.isnan(silent.sample(jax.random.key(0), 2)).all())
+
+
 def test_10_log_density_value_check_is_debug_only():
     """The evaluation point is a call-time operand like `y`, and covered by
     tier 4 for the same reason: a nan `x` returns nan without an exception."""
@@ -1347,3 +1455,40 @@ def test_10_log_density_value_check_is_debug_only():
     with debug_checks(True):
         with pytest.raises(ValueError, match="x must be finite"):
             gaussian.log_density(bad_x)
+
+
+def test_regression_each_update_applies_the_whitener_j_plus_one_times():
+    """Whitening the anomalies and the residuals in two calls costs 2J
+    applications of W in the stochastic update, twice what is needed.
+
+    Whitening is linear, so it commutes with centring and with subtracting y:
+    one call on the J + 1 stacked rows [V; y] yields every whitened quantity
+    the kernel needs. For a dense whitener those applications are the dominant
+    O(J N^2) term, so a second call is a silent 2x — it produces correct
+    numbers, which is why only a count catches it.
+    """
+    J, P, N = 6, 3, 4
+    U, V, R, y = _problem(J, P, N)
+    joint = EnsembleJoint(jnp.asarray(U), jnp.asarray(V))
+
+    for name, call in (
+        ("pathwise_update", lambda cov: joint.pathwise_update(
+            jax.random.key(0), jnp.asarray(y), cov)),
+        ("transform_update", lambda cov: joint.transform_update(jnp.asarray(y), cov)),
+        ("condition", lambda cov: joint.condition(jnp.asarray(y), cov)),
+    ):
+        noise_cov = CountingWhitenPSD.counting(R)
+        call(noise_cov)
+        applied = sum(object.__getattribute__(noise_cov, "log"))
+        assert applied == J + 1, f"{name} whitened {applied} vectors, expected {J + 1}"
+
+    # and the numbers are unchanged by the grouping: the dense reference
+    # centres before whitening, the implementation whitens before centring
+    plain = DensePSD.from_matrix(jnp.asarray(R))
+    m_post, _ = _dense_posterior(U, V, R, y)
+    np.testing.assert_allclose(
+        joint.transform_update(jnp.asarray(y), plain).mean(axis=0),
+        m_post,
+        rtol=0,
+        atol=1e3 * EPS * np.abs(m_post).max(),
+    )

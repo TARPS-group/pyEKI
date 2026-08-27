@@ -187,6 +187,27 @@ def _check_finite(where: str, name: str, x) -> None:
     )
 
 
+def _check_result_finite(where: str, name: str, x) -> None:
+    """Tier 4: finiteness of a computed result, when debug checks are enabled.
+
+    A postcondition rather than a precondition: it reads a value this layer
+    produced, not one the caller supplied. It exists because a conditioning
+    result becomes the *next* iteration's input — a ``nan`` ensemble is fed
+    straight to an expensive forward-model evaluation, and a model that
+    returns finite nonsense for ``nan`` parameters launders it beyond
+    recovery. The likeliest cause is a singular noise covariance, which
+    nothing here can detect before the fact, so this after-the-fact check is
+    the only cheap detection available for it.
+    """
+    value_check(
+        x,
+        lambda arr: bool(jnp.all(jnp.isfinite(arr))),
+        f"{where}: {name} is not finite. The likeliest cause is a singular "
+        f"noise_cov: whiten's precondition is that the noise covariance is "
+        f"nonsingular, and nothing here can detect a violation before the fact.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # the conditioning kernel
 # ---------------------------------------------------------------------------
@@ -721,15 +742,19 @@ class EnsembleJoint:
         _check_not_family(self, "v_anomalies")
         return self.v_samples - self.v_mean
 
-    def _validate_call(self, method: str, y, noise_cov) -> Array:
-        """Run the shared checks of a conditioning call, returning ``y``.
+    def _validate_call(self, method: str, y, noise_cov) -> tuple[Array, str]:
+        """Run the shared checks of a conditioning call.
+
+        Returns the validated ``y`` and the call's description, which the
+        method reuses for its result check rather than rebuilding it.
 
         In the operator layer's order, with one departure the type system
         forces: the family guard, then ``noise_cov``'s type and family —
         which must precede the capability check, since ``supports`` cannot
         be consulted on an object not known to be an operator — then the
         capability check, then the remaining operand shapes, then, in debug
-        mode, value checks.
+        mode, operand value checks. Result checks run last, in the method,
+        once there is a result to check.
         """
         _check_not_family(self, method)
         where = f"{self!r}.{method}"
@@ -748,12 +773,36 @@ class EnsembleJoint:
         _check_operator_side(where, "noise_cov", noise_cov, self.v_dim)
         y = _check_core_vector(where, "y", y, self.v_dim)
         _check_finite(where, "y", y)
-        return y
+        return y, where
 
-    def _conditioning_svd(self, noise_cov) -> tuple[Array, Array, Array]:
-        """The thin SVD of :math:`S = A_v W^\\top/\\sqrt{J-1}`, computed once."""
-        s = noise_cov.whiten(self.v_anomalies) / math.sqrt(self.n_members - 1)
-        return _thin_svd(s)
+    def _whiten_predictions_and_observation(self, y, noise_cov):
+        """Apply :math:`W` to every prediction and to the observation, at once.
+
+        Returns ``(W v_j for each j, W y)``, of shapes ``(J, N)`` and
+        ``(N,)``, from a single ``whiten`` call on the :math:`J + 1` stacked
+        rows :math:`[\\mathsf{V}; y]`.
+
+        Whitening is a fixed linear map applied row-wise, so it commutes
+        with both centring and subtraction: :math:`W A_v^\\top` is the
+        whitened predictions minus *their* mean, and :math:`W(y - v_j)` is
+        :math:`Wy - Wv_j`. Every whitened quantity the kernel needs
+        therefore comes from one call. Whitening the anomalies and the
+        residuals separately would instead cost :math:`2J` applications of
+        :math:`W` in the stochastic update, which for a dense whitener is
+        the dominant term.
+        """
+        stacked = jnp.concatenate([self.v_samples, y[None, :]], axis=-2)
+        whitened = noise_cov.whiten(stacked)
+        return whitened[..., :-1, :], whitened[..., -1, :]
+
+    def _conditioning_svd(self, whitened_predictions: Array):
+        """The thin SVD of :math:`S = A_v W^\\top/\\sqrt{J-1}`, computed once.
+
+        Takes the *whitened* predictions and centres them, which is the same
+        matrix as whitening the centred predictions.
+        """
+        centred = whitened_predictions - jnp.mean(whitened_predictions, axis=-2)
+        return _thin_svd(centred / math.sqrt(self.n_members - 1))
 
     def _posterior_mean_and_transform(self, y, noise_cov) -> tuple[Array, Array]:
         """The posterior mean and the transform :math:`T`, from a single SVD.
@@ -763,8 +812,9 @@ class EnsembleJoint:
         makes their agreement structural rather than a coincidence of two
         transcriptions of the same formula.
         """
-        U, sigma, Vt = self._conditioning_svd(noise_cov)
-        residual = noise_cov.whiten(y - self.v_mean)
+        whitened_v, whitened_y = self._whiten_predictions_and_observation(y, noise_cov)
+        U, sigma, Vt = self._conditioning_svd(whitened_v)
+        residual = whitened_y - jnp.mean(whitened_v, axis=-2)
         mean = self.u_mean + self._combine_anomalies(
             _weights_from_svd(U, sigma, Vt, residual)
         )
@@ -823,8 +873,8 @@ class EnsembleJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` is not
-            finite.
+            either is a vmapped family, or — in debug mode — ``y`` or the
+            returned value is not finite.
 
         Notes
         -----
@@ -849,16 +899,20 @@ class EnsembleJoint:
         :math:`\\mathcal{N}(u_j + K(y - v_j),\\, K R K^\\top)`.
 
         Precondition: ``noise_cov`` is nonsingular, which is ``whiten``'s own
-        precondition. Nothing here can detect a singular one cheaply, so it
-        surfaces as ``nan``.
+        precondition. Nothing here can detect a singular one before the fact,
+        so it surfaces as ``nan`` — or, in debug mode, as the result check
+        that all three conditioning methods apply to what they return.
         """
-        y = self._validate_call("pathwise_update", y, noise_cov)
-        U, sigma, Vt = self._conditioning_svd(noise_cov)
+        y, where = self._validate_call("pathwise_update", y, noise_cov)
+        whitened_v, whitened_y = self._whiten_predictions_and_observation(y, noise_cov)
+        U, sigma, Vt = self._conditioning_svd(whitened_v)
         eps = jax.random.normal(key, (self.n_members, self.v_dim))
-        b = noise_cov.whiten(y - self.v_samples) - eps
-        return self.u_samples + self._combine_anomalies(
+        b = whitened_y - whitened_v - eps
+        members = self.u_samples + self._combine_anomalies(
             _weights_from_svd(U, sigma, Vt, b)
         )
+        _check_result_finite(where, "the updated ensemble", members)
+        return members
 
     def transform_update(self, y, noise_cov) -> Array:
         """The deterministic (square-root) update: ``(J, P)``.
@@ -903,8 +957,8 @@ class EnsembleJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` is not
-            finite.
+            either is a vmapped family, or — in debug mode — ``y`` or the
+            returned value is not finite.
 
         Notes
         -----
@@ -915,11 +969,13 @@ class EnsembleJoint:
 
         One SVD serves both the mean and the transform.
         """
-        y = self._validate_call("transform_update", y, noise_cov)
+        y, where = self._validate_call("transform_update", y, noise_cov)
         mean, transform = self._posterior_mean_and_transform(y, noise_cov)
         # (J, J) @ (J, P): both operands are core-shaped, so this is the
         # plain matrix product, not a batch of vectors.
-        return mean + transform @ self.u_anomalies
+        members = mean + transform @ self.u_anomalies
+        _check_result_finite(where, "the updated ensemble", members)
+        return members
 
     def condition(self, y, noise_cov) -> Gaussian:
         """Moment-form conditioning: the posterior as a :class:`Gaussian`.
@@ -968,8 +1024,8 @@ class EnsembleJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` is not
-            finite.
+            either is a vmapped family, or — in debug mode — ``y`` or the
+            returned value is not finite.
 
         Notes
         -----
@@ -987,11 +1043,16 @@ class EnsembleJoint:
         static capability choice still raises, and a caller wanting that
         density densifies the covariance deliberately.
         """
-        y = self._validate_call("condition", y, noise_cov)
+        y, where = self._validate_call("condition", y, noise_cov)
         mean, transform = self._posterior_mean_and_transform(y, noise_cov)
         factor = (transform @ self.u_anomalies).swapaxes(-1, -2) / math.sqrt(
             self.n_members - 1
         )
+        # Both halves of the result, checked before the covariance and the
+        # distribution are built, so the diagnosis names this call rather
+        # than a constructor further down.
+        _check_result_finite(where, "the posterior mean", mean)
+        _check_result_finite(where, "the posterior covariance factor", factor)
         return Gaussian(mean, PSDLowRank(factor))
 
     def __repr__(self) -> str:

@@ -547,12 +547,22 @@ class PSDLowRank(PSDLinOp):
     valid on an instance known to be full rank. Densifying a thin-factor
     instance returns ``nan`` without raising, except under
     :func:`~pyeki.linalg.debug_checks`.
+
+    Construction validates the rank and sizes of ``F`` always, and its
+    finiteness in debug mode — the same tier-4 check :class:`DensePSD`
+    applies to its own factor, since a non-finite factor makes every
+    operation ``nan`` with no exception.
     """
 
     F: Array
 
     def __post_init__(self) -> None:
         _check_core_rank("PSDLowRank", "F", self.F, 2)
+        value_check(
+            self.F,
+            lambda mat: bool(jnp.all(jnp.isfinite(mat))),
+            "PSDLowRank.F must be finite",
+        )
 
     @property
     def shape(self) -> tuple[int, int]:

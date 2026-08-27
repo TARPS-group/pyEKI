@@ -371,6 +371,33 @@ def test_psd_low_rank_validation_is_not_covered_by_conformance():
         PSDLowRank(jnp.ones((5, 0)))
 
 
+def test_psd_low_rank_factor_finiteness_is_a_debug_check():
+    """A non-finite factor makes every operation nan with no exception, the
+    same hazard DensePSD guards its own factor against.
+
+    It matters most for the factors pyeki.gauss returns from conditioning,
+    where a non-finite one means the conditioning itself failed — so the check
+    turns a nan posterior into an exception at the point it was produced.
+    """
+    nan_factor = jnp.full((4, 2), jnp.nan)
+
+    # off by default: constructs, and every operation is silently nan
+    op = PSDLowRank(nan_factor)
+    assert bool(jnp.isnan(op.matvec(jnp.ones(4))).all())
+    assert bool(jnp.isnan(op.diag()).all())
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="PSDLowRank.F must be finite"):
+            PSDLowRank(nan_factor)
+        with pytest.raises(ValueError, match="PSDLowRank.F must be finite"):
+            PSDLowRank(jnp.full((4, 2), jnp.inf))
+        PSDLowRank(jnp.ones((4, 2)))  # a finite factor still constructs
+
+    # tracers are exempt, as everywhere in tier 4
+    with debug_checks(True):
+        assert jax.jit(lambda F: PSDLowRank(F).diag())(nan_factor).shape == (4,)
+
+
 # ---------------------------------------------------------------------------
 # operand and constructor validation
 # ---------------------------------------------------------------------------
