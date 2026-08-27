@@ -32,10 +32,16 @@ operator. The full behavioural specification is the
 `PSDLowRank` imposes no relation between $n$ and $k$, and computes nothing
 at construction: the stored factor *is* the factorization, so `factor()`
 hands it straight back as a `Dense`. It withholds `solve`, `whiten` and
-`logdet` at *every* width — forced when $k < n$, where the operator is
-singular by construction, and a deliberate choice when $k \ge n$, since
-capabilities belong to the type and no shape can rule out a rank-deficient
-wide factor. Densify an instance you know to be full rank if you need them.
+`logdet` at *every* width. At $k < n$ that is forced — the operator is
+singular by construction. At $k \ge n$ it holds because a capability
+promises a *cheap* operation, and none of the three is cheap here: each
+needs $FF^\top$ formed and factorized, which is what densifying does
+anyway.
+
+So densify when you need them — but only on an instance you know to be
+full rank. `densify` of a thin-factor `PSDLowRank` takes the Cholesky of a
+singular matrix, which returns `nan` with no exception unless you are
+inside `debug_checks()`.
 
 `DensePSD` and `DenseSquare` are built with `from_matrix`, which factorizes
 once at construction. Operators never factorize lazily on first use, because

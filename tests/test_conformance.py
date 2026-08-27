@@ -68,6 +68,15 @@ def _instances() -> list[LinOp]:
         ),
         block_diag(PSDDiagonal(d), DensePSD.from_matrix(_psd(3))),
         block_diag(Identity(2), 4.0 * Identity(3)),
+        # composites over a block that disclaims solve/whiten/logdet: the
+        # capability intersection must survive, and the block-diagonal
+        # factor is rectangular because one block's factor is
+        block_diag(PSDDiagonal(d), PSDLowRank(jnp.asarray(RNG.normal(size=(5, 2))))),
+        diag_congruence(
+            PSDLowRank(jnp.asarray(RNG.normal(size=(4, 2)))),
+            jnp.asarray(RNG.uniform(0.5, 2, 4)),
+        ),
+        2.5 * PSDLowRank(jnp.asarray(RNG.normal(size=(4, 2)))),
         diag_congruence(
             DensePSD.from_matrix(_psd(4)), jnp.asarray(RNG.uniform(0.5, 2, 4))
         ),

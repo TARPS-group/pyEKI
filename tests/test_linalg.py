@@ -295,6 +295,37 @@ def test_psd_low_rank_withholds_solve_whiten_and_logdet_at_every_width(n, k):
         op.whiten_mat(jnp.ones((n, 2)))
 
 
+def test_composites_over_psd_low_rank_intersect_its_capabilities():
+    """PSDLowRank is the first shipped PSDLinOp that disclaims operations,
+    so it is the first real operator to reach the capability-intersection
+    branch of the PSD composites. Each wrapper keeps `diag` and `factor`
+    and loses the other five, and each composite factor still reproduces
+    the composite -- rectangular, because the wrapped block's factor is."""
+    F = jnp.asarray(RNG.normal(size=(4, 2)))
+    scale = jnp.asarray(RNG.uniform(0.5, 2.0, 4))
+    wrapped = [
+        block_diag(PSDDiagonal(jnp.ones(3)), PSDLowRank(F)),
+        diag_congruence(PSDLowRank(F), scale),
+        2.5 * PSDLowRank(F),
+    ]
+    for op in wrapped:
+        assert op.capabilities() == frozenset({"diag", "factor"}), repr(op)
+        args = {
+            "solve": (jnp.ones(op.n),),
+            "solve_mat": (jnp.ones((op.n, 2)),),
+            "logdet": (),
+            "whiten": (jnp.ones(op.n),),
+            "whiten_mat": (jnp.ones((op.n, 2)),),
+        }
+        for name, operands in args.items():
+            assert not op.supports(name)
+            with pytest.raises(UnsupportedOpError):
+                getattr(op, name)(*operands)
+        L = np.asarray(op.factor().to_dense())
+        assert L.shape[0] == op.n and L.shape[1] < op.n  # singular, and says so
+        np.testing.assert_allclose(L @ L.T, np.asarray(op.to_dense()), atol=1e-12)
+
+
 def test_psd_low_rank_validation_is_not_covered_by_conformance():
     """The tier-2 checks are load-bearing precisely because check_operator
     misses them: an otherwise identical operator with no __post_init__

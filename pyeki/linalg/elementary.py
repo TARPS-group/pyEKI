@@ -533,13 +533,20 @@ class PSDLowRank(PSDLinOp):
     factorization: ``factor()`` wraps ``F`` as a :class:`Dense`, and
     ``matvec`` applies ``F (F.T x)`` rather than ever forming ``F F.T``.
 
-    Withholding ``solve`` and ``whiten`` is forced when ``k < n`` — a
-    statically thin factor makes the operator singular by construction —
-    and is this class's own static choice for ``k >= n``, where the
-    operator is generically nonsingular. Capabilities that varied with the
-    stored width would advertise a ``solve`` that is ``nan`` for every
-    rank-deficient wide factor, which no shape can rule out. Use
-    :func:`~pyeki.linalg.densify` on an instance known to be full rank.
+    Withholding ``solve`` and ``whiten`` is forced when ``k < n``: a
+    statically thin factor makes the operator singular by construction. It
+    extends to ``k >= n``, and to ``logdet``, because a capability asserts
+    a *cheap* implementation, and none of the three is cheap at any width:
+    each needs the ``(n, n)`` Gram matrix ``F F.T`` formed and factorized,
+    which is what :func:`~pyeki.linalg.densify` already does.
+    Rank is a second reason: capabilities that varied with the stored width
+    would advertise a ``solve`` that is ``nan`` for every rank-deficient
+    wide factor, which no shape can rule out.
+
+    Densifying is therefore the route to those operations, and it is only
+    valid on an instance known to be full rank. Densifying a thin-factor
+    instance returns ``nan`` without raising, except under
+    :func:`~pyeki.linalg.debug_checks`.
     """
 
     F: Array
