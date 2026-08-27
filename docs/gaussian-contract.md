@@ -14,13 +14,13 @@ records *what* they require. The layer is built on the operator layer, and
 this contract freely references {doc}`linop-contract` rather than restating
 its rules.
 
-:::{admonition} Status: specification ahead of code
-:class: important
+:::{admonition} Status: implemented
+:class: note
 
-`pyeki.gauss` does not exist yet. This document is the design it will be
-built to, and it is the artifact to review and iterate on before
-implementation begins. Once the module ships, this page remains as the
-normative reference for its behaviour.
+`pyeki.gauss` implements this specification, and this page is the normative
+reference for its behaviour. The conformance obligations of
+{ref}`gauss-conformance` are met by `tests/test_gauss.py`; the user guide's
+{doc}`user-guide/conditioning` page covers when to reach for each piece.
 :::
 
 Readers after precision rather than implementation want
@@ -378,7 +378,9 @@ Returns a `(n_samples, n)` array of independent draws. Requires
 - `n_samples` must be a Python `int`, at least 1 — it determines an output
   shape, so it can never be traced. Anything that is not an `int` —
   including `bool` and NumPy integers — is a `TypeError`; an `int` below 1
-  is a `ValueError`.
+  is a `ValueError`. Since `bool` *is* an `int` subclass, the rule is a check
+  on the exact type, not an `isinstance` test; it consequently also rejects
+  other `int` subclasses, which is intended.
 - The draw is **pinned elementwise**, not merely distributionally: with `L`
   the operator `cov.factor()` returns and `k` its width, the result is
   exactly
@@ -624,8 +626,9 @@ at construction, because the stored field *is* the factorization.
 The four-tier scheme of the operator contract ({ref}`contract-validation`)
 applies with one extension: everything static is checked always, values
 only on request — and, unlike the operator layer, tier 4 here also runs at
-*call* time: in debug mode the conditioning methods check `y`, and the
-primitives their operands, for finiteness. Like the operator layer's,
+*call* time: in debug mode the conditioning methods check `y`,
+`log_density` its evaluation point `x`, and the primitives their operands,
+for finiteness. Like the operator layer's,
 these checks read array values and are therefore skipped on tracers: under
 `jit` or `vmap` they do not run, in debug mode or otherwise. A singular
 `noise_cov` is not among them — nothing here can detect it cheaply; it
@@ -635,7 +638,7 @@ surfaces as `nan`. What each tier means here:
 | ---- | ------ | -------- |
 | 2. construction | ranks, static sizes, operator types, cross-field shape agreement; a vmapped-family `cov` | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
 | 3. call | operand core shapes, operator arguments, and static non-array arguments; a vmapped-family `noise_cov` — `ValueError` for shape violations, `TypeError` for type violations, per the taxonomy below | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y` and the primitives' `s` and `b` at call | violations yield `nan` or a silently wrong posterior outside debug mode |
+| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y`, `x`, and the primitives' `s` and `b` at call | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
@@ -646,6 +649,15 @@ Within a method the checks run in the operator layer's order: the family
 guard ({ref}`gauss-jax`) first, then the required-capability checks in the
 order the method names them, then tier-3 operand and operator-argument
 validation, then — in debug mode — tier-4 value checks.
+
+That order has one forced exception, for the operator argument that *is* the
+capability bearer. A conditioning method cannot consult
+`noise_cov.supports("whiten")` before it knows `noise_cov` is an operator at
+all, so two of its tier-3 checks — that it is a `PSDLinOp` (`TypeError`) and
+that it is not a vmapped family (`ValueError`) — run **ahead** of the
+capability check; the side check and `y`'s shape check stay behind it. No
+such exception applies to `Gaussian`, whose `cov` is validated at
+construction.
 
 The layer defines **no new exception types**. `UnsupportedOpError` arises
 only from the operator layer, propagated unmodified from the covariance
@@ -888,12 +900,27 @@ must verify at least:
    $T\,(I + ss^\top)\,T^\top = I$ must not be used, because forming
    $ss^\top$ reintroduces the $\sigma_{\max}^2$-sized intermediate whose
    rounding this check exists to avoid, pushing the achievable residual to
-   $\varepsilon\sigma_{\max}^2$. It satisfies $T = T^\top$ for every
+   $\varepsilon\sigma_{\max}^2$. **The spectrum of `s` must span decades
+   for this comparison to mean anything.** When every singular value sits at
+   one large scale, $TT^\top \sim \sigma_{\max}^{-2}$ is itself
+   negligible and absorbs the lost identity, so both forms pass and the
+   check silently tests nothing: at $J=5$, $N=8$ and $\sigma \sim 10^{10}$
+   throughout, both residuals are $3\times 10^{-5}$. With
+   $\sigma = (10^{10}, 10^5, 1, 1, 1)$ they separate by eight orders of
+   magnitude — $4\times10^{-6}$ against $4\times10^{2}$ — which is the
+   regime the check must use.
+   It satisfies $T = T^\top$ for every
    `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centred `s`**
    ($\mathbf{1}^\top s = 0$, which is the only case the conditioning
-   kernel produces) to a tolerance scaling as
-   $\varepsilon^2 \sigma_{\max}^2$; for general `s` no such identity
-   holds ({ref}`gauss-primitives`).
+   kernel produces) to a tolerance of
+   $c\,\varepsilon + (\varepsilon \sigma_{\max})^2$; for general `s` no
+   such identity holds ({ref}`gauss-primitives`). The quadratic term is the
+   modifier-induced mean shift of {ref}`gauss-kernel`, but the *computed*
+   $T\mathbf{1}$ carries ordinary $O(\varepsilon)$ round-off from its
+   $J$-term dot products on top, and that dominates until $\sigma_{\max}$
+   reaches $\varepsilon^{-1/2}$: at $\sigma_{\max} = 3.3$ the observed
+   residual is $4\times10^{-16}$, against $5\times10^{-31}$ for the
+   quadratic term alone.
 4. **Moment exactness of the posterior**: `transform_update`'s output has
    sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;

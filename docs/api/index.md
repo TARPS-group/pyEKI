@@ -85,3 +85,28 @@ contract.
              check_operand_validation, check_pytree, check_repr,
              check_arithmetic, check_family
 ```
+
+## pyeki.gauss
+
+Joint Gaussian distributions and conditioning. See
+{doc}`../user-guide/conditioning` for when to use each piece, and
+{doc}`../gaussian-contract` for the full behavioural contract.
+
+### Distributions
+
+```{eval-rst}
+.. autoclass:: pyeki.gauss.Gaussian
+   :members: n, batch_shape, sample, log_density
+
+.. autoclass:: pyeki.gauss.EnsembleJoint
+   :members: n_members, u_dim, v_dim, batch_shape, u_mean, v_mean,
+             u_anomalies, v_anomalies, pathwise_update, transform_update,
+             condition
+```
+
+### Conditioning primitives
+
+```{eval-rst}
+.. autofunction:: pyeki.gauss.gain_weights
+.. autofunction:: pyeki.gauss.sqrt_transform
+```

@@ -5,8 +5,8 @@ Ensemble Kalman Inversion for derivative-free Bayesian calibration.
 :::{admonition} Pre-alpha
 :class: warning
 
-The linear operator layer is implemented and tested. The conditioning and EKI
-layers are in progress.
+The linear operator and Gaussian conditioning layers are implemented and
+tested. The localization and EKI layers are in progress.
 :::
 
 ## What problem does this solve?
@@ -39,8 +39,8 @@ planned — is exploited rather than materialized.
 
 :::{grid-item-card} Gaussian conditioning
 `pyeki.gauss` provides the Gaussian machinery of the ensemble update —
-sampling, whitened-SVD conditioning, and the square-root transform.
-*(contract complete; implementation planned)*
+sampling, whitened-SVD conditioning, and the square-root transform, in both
+the stochastic and deterministic forms.
 :::
 
 :::{grid-item-card} Localization
@@ -94,6 +94,7 @@ user-guide/quickstart
 :hidden:
 
 user-guide/operators
+user-guide/conditioning
 user-guide/writing-an-operator
 ```
 
