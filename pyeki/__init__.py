@@ -8,10 +8,10 @@ forward evaluations. pyEKI provides the pieces that requires:
   exploited rather than materialized as dense arrays.
 - :mod:`pyeki.gauss` — joint Gaussian distributions and the conditioning
   operations EKI is built from.
+- :mod:`pyeki.eki` — the algorithms themselves: tempering schedules, ensemble
+  updates, inflation, and the driver loop.
 - :mod:`pyeki.localize` — distance-based localization for high-dimensional
   problems. *(planned)*
-- :mod:`pyeki.eki` — the algorithms themselves: tempered EKI and variants.
-  *(planned)*
 
 The forward model is any callable mapping parameters to predicted observations,
 so pyEKI is independent of the model being calibrated.
