@@ -14,13 +14,13 @@ records *what* they require. The layer is built on {doc}`linop-contract` and
 {doc}`gaussian-contract`, and references both freely rather than restating
 them.
 
-:::{admonition} Status: specification ahead of code
-:class: important
+:::{admonition} Status: implemented
+:class: note
 
-`pyeki.eki` does not exist yet. This document is the design it will be built
-to, and it is the artifact to review and iterate on before implementation
-begins. Once the module ships, this page remains as the normative reference
-for its behaviour.
+`pyeki.eki` implements this document, and the conformance suite of
+{ref}`eki-conformance` is what checks that it does. This page remains the
+normative reference for the layer's behaviour: where the code and this page
+disagree, one of them is a defect.
 :::
 
 (eki-scope)=
@@ -67,7 +67,7 @@ ensemble. A step that assembled a covariance, or that re-derived any part of
 the conditioning kernel, would be a layering violation
 ({ref}`eki-updates`).
 
-The implementation PR must also add the layer's user-guide page, per the
+The layer's user-guide page is {doc}`user-guide/running-an-inversion`, per the
 package rule that every user-facing feature has a user-guide home; this page
 remains the deeper reference.
 
@@ -1208,7 +1208,9 @@ ensemble gives $\sigma^2_\Phi = 0$, and an ensemble that already fits the data
 exactly gives $\overline{\Phi} = 0$. Compute each as
 
 ```python
-jnp.where(d > 0, theta / jnp.where(d > 0, d, 1.0), jnp.inf)
+positive = d > 0
+jnp.where(positive, theta / jnp.where(positive, d, 1.0),
+          jnp.where(d == 0, jnp.inf, jnp.nan))
 ```
 
 — the **doubled** `where`, because `jnp.where` evaluates both branches, so the
@@ -1218,6 +1220,17 @@ step, as that section requires. Dividing unguarded
 happens to give `inf` for positive `divergence_budget`, but relies on the sign of a zero
 and gives `nan` at `divergence_budget = 0`, so the guard is contractual rather than
 stylistic.
+
+**The outer fallback distinguishes a vanishing denominator from a `nan` one,
+and that distinction is normative.** Writing the fallback as the bare
+`jnp.inf` is not enough: `nan > 0` is `False`, so a poisoned misfit would take
+the `inf` branch and *silently select the largest allowed step*, which is
+precisely what conformance test 4 forbids. Sending `nan` through instead makes
+it reach the increment validation of {ref}`eki-step`, which raises. A `nan`
+misfit should not be reachable — repair runs before the misfits are computed
+({ref}`eki-failures`) — but the criterion is public through the schedule, and
+a rule that turns a poisoned ensemble into the most aggressive possible step
+is the wrong failure mode to leave available.
 
 (eki-stopping)=
 ## Stopping rules
@@ -1354,6 +1367,25 @@ scale is folded into the operator by the caller — `AdditiveInflation(0.01 *
 prior.cov)` — rather than carried as a second field. This is the only shipped
 mechanism that moves the ensemble out of its initial affine subspace, which is
 its main reason for existing.
+
+**`AdditiveInflation.from_cov(cov)` factorizes once**, and callers **should**
+prefer it. The definition above calls `Gaussian.sample`, which calls
+`cov.factor()`, so the plain constructor re-factorizes on **every rung** — an
+$O(P^3)$ Cholesky per step for a dense covariance, on a knob a user turns on
+to *delay* collapse. That violates {ref}`contract-jax`'s
+constructors-store-classmethods-compute rule, which exists for exactly this
+failure. The classmethod stores
+`PSDLowRank(cov.factor().to_dense())` instead: an operator with the same dense
+form whose own `factor()` is free, so the delegation above is unchanged and
+the recipe stays pinned in one place. Two consequences, both already
+contractual in the layer below. The stored factor is a $P \times k$ array, so
+this trades $O(P^3)$ per rung for $O(Pk)$ of storage. And the draw is equal to
+the plain constructor's *in distribution* but not elementwise, since two
+operators for the same matrix may return different factors — which is the
+caveat {meth}`~pyeki.gauss.Gaussian.sample` already records. The plain
+constructor remains, because it is what the operator layer's own arithmetic
+composes with and because a covariance whose `factor` is already free gains
+nothing from the precomputation.
 
 Composing two inflations is a three-line callable and is not packaged
 ({ref}`eki-excluded`).
@@ -1571,6 +1603,22 @@ recoverable by the caller — inflation consumes a split key, and repair depends
 on which rows came back non-finite. Carrying the pair is what makes
 `last_evaluation` answerable at all, and it costs nothing: the driver holds
 both arrays live for the update regardless.
+
+:::{note}
+**The validity *mask* is not a field, only its count.** An update that wanted
+to down-weight the members it repaired — a localized or weighted rule — cannot
+see which they were, and would have to infer it from `n_valid` and the
+repaired rows, which is not recoverable in general.
+
+Carrying a `(J,)` boolean field would fix that, and this is deliberately a
+"now or later" rather than a "now or never": the `**_` seam of
+{ref}`eki-updates` means the field can be added without breaking any existing
+rule, and adding it is the additive direction. It is not added now because no
+shipped policy reads it, `pyeki.localize` — the consumer that would — does not
+exist yet and so cannot say what shape it wants, and the layer's own rule for
+new surface is that a feature waits for a consumer ({ref}`eki-excluded`).
+Revisit when localization lands.
+:::
 
 **`rms_parameter_spread` is scale-dependent**, and the name says so. It
 averages per-coordinate standard deviations across parameters that may carry
@@ -2315,6 +2363,12 @@ asymmetry that gives `pyeki.linalg` a `check_operator` applies here.
 | `check_schedule(schedule, evaluation)` | `n_steps` and `beta_target` are present, of the right types, and unchanged by reads; `next_increment` returns `None` or a scalar, finite, strictly positive value; **purity**, by calling twice on the same evaluation and comparing bit-exactly |
 | `check_update(update, key, **operands)` | the result is `(J, P)` with the incoming dtype; determinism given the key; the subspace property of {ref}`eki-subspace`, unless the rule declares it leaves the span; `jit`-safety with static shapes |
 | `check_inflation(inflation, key, ensemble)` | shape preservation; purity; that the mean is preserved, unless the rule declares otherwise |
+
+The two conditional checks read a declaration off the policy: an update
+setting `leaves_span = True` is exempt from the subspace check, and an
+inflation setting `changes_mean = True` from the mean-preservation check. Both
+default to `False` when absent, so a rule that satisfies the property declares
+nothing.
 | `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
 
 Each takes a policy and a small synthetic `Evaluation`, which the module also
@@ -2541,7 +2595,8 @@ written independently of the code under test. The suite must verify at least:
     against an independently recomputed value: `step` and `beta` against the
     state entering the rung, `beta_next` against the state leaving it,
     `increment` against their difference, and `misfit_mean`, `misfit_min`,
-    `misfit_max`, `centre_misfit`, `rms_parameter_spread`, `n_valid` and `ess`
+    `misfit_max`, `centre_misfit`, `spread` (which carries the evaluation's
+    `rms_parameter_spread`), `n_valid` and `ess`
     against NumPy over the model's recorded input and output. Exact where the
     quantity is exact. {ref}`eki-diagnostics` calls a record field that could
     disagree with its evaluation a defect; this is the obligation that makes
@@ -2789,6 +2844,10 @@ around an `iterate` loop.
 static; serializing it is the caller's choice of format. The layer's
 obligation is that resumption from a deserialized state is exact, which is
 {ref}`eki-conformance`'s test 11.
+
+**The validity mask as an `Evaluation` field.** Only `n_valid` is carried.
+{ref}`eki-diagnostics` gives the argument and names the consumer that would
+change it.
 
 **An adaptive ensemble size.** $J$ is fixed for a run, because every
 downstream shape depends on it and a data-dependent $J$ would make the
