@@ -113,7 +113,7 @@ Conventions, each normative:
   ({ref}`eki-iteration`).
 - **Vectors passed to the layer are exactly core-shaped**, as in
   `pyeki.gauss`: `y` is a `(N,)` array, an ensemble a `(J, P)` array. The
-  batched exception is `whitened_misfits`, which follows the operator layer's
+  batched exception is `misfits`, which follows the operator layer's
   batch contract.
 - **PRNG keys are typed keys** — the output of `jax.random.key`, of shape
   `()`. Raw `uint32` key arrays are rejected at construction
@@ -377,14 +377,14 @@ arbitrary intermediate level. `EKIResult.status` records which happened, and
 | ------ | ---- | ---- |
 | `EKIState` | pytree | the loop-carried state: ensemble, level, step index, key |
 | `Evaluation` | pytree | everything one forward evaluation produced: the members, their predictions, and the whitened residuals |
-| `StepRecord` | pytree | one row of the run's history: scalars only |
+| `HistoryRecord` | pytree | one row of the run's history: scalars only |
 | `EKIResult` | frozen dataclass | the final state, the history, and why the run ended |
 | `EnsembleUpdate` | protocol | one ensemble update, given an increment |
 | `Schedule` | protocol | the increment, plus the two attributes that say how long the ladder is |
 | `StoppingRule` | protocol | whether to stop, given the current misfits |
 | `Inflation` | protocol | a transformation of the ensemble, applied before each forward evaluation |
 | `run`, `iterate`, `step` | functions | the driver, as a function, as a generator, and as one iteration |
-| `whitened_misfits`, `effective_sample_size`, `repair_failed_members` | functions | the array-level pieces schedules and custom drivers need |
+| `misfits`, `effective_sample_size`, `repair_failed_members` | functions | the array-level pieces schedules and custom drivers need |
 
 Rules governing the set:
 
@@ -489,8 +489,8 @@ One iteration, as **two public phases** and one convenience that composes them.
 | function | does | returns |
 | -------- | ---- | ------- |
 | `evaluate` | inflate, call the forward model, repair, summarize | an `Evaluation` |
-| `apply` | validate the increment, update, check finiteness, advance | `(EKIState, StepRecord)` |
-| `advance` | `evaluate` then `apply`, at a given increment | `(EKIState, StepRecord)` |
+| `apply` | validate the increment, update, check finiteness, advance | `(EKIState, HistoryRecord)` |
+| `advance` | `evaluate` then `apply`, at a given increment | `(EKIState, HistoryRecord)` |
 
 ### `evaluate(state, forward, y, noise_cov, *, inflation=None, on_failure="repair")`
 
@@ -631,7 +631,7 @@ public.
    reduction.
 9. **Advance.** Return
    `EKIState(u_new, state.beta + dbeta, state.step + 1, key_next)` and the
-   step's `StepRecord`.
+   step's `HistoryRecord`.
 
 Steps 4, 6 and 8 read concrete values, so one rung **synchronizes with the
 device a small fixed number of times** — at most three across the two phases,
@@ -751,8 +751,8 @@ Two rules ship, and both are two lines over `pyeki.gauss`:
 
 | rule | delegates to | character |
 | ---- | ------------ | --------- |
-| `SquareRootUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov / increment)` | deterministic square-root transform; ignores the key; **the default** |
-| `StochasticUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).pathwise_update(key, y, noise_cov / increment)` | perturbed-observation; consumes the key |
+| `TransformUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov / increment)` | deterministic square-root transform; ignores the key; **the default** |
+| `PathwiseUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).pathwise_update(key, y, noise_cov / increment)` | perturbed-observation; consumes the key |
 
 Neither holds any field. The entire numerical content of the update — the
 whitened-SVD kernel, the bounded gain multiplier, the identity-completed
@@ -773,14 +773,24 @@ deterministic alternative descends from the perturbation-free ensemble
 square-root filters of Whitaker and Hamill and their successors
 ({ref}`eki-references`); {doc}`gaussian-contract` owns the transform itself.
 
-**`SquareRootUpdate` is the default**, and the reason is the layer's own
+**The two rules are named for the `pyeki.gauss` methods they delegate to**, so
+that one vocabulary spans both layers: `TransformUpdate` calls
+`transform_update`, `PathwiseUpdate` calls `pathwise_update`. The alternative
+pairing — naming one for its mechanism, the square root, and the other for its
+character, stochastic — is not an antonym pair, so a reader could not infer
+from the names that the two are alternatives, and it introduced a third
+vocabulary for a distinction the layer below had already named twice. The
+mechanism and the character are both still stated, in the table above and in
+the paragraphs below; they are simply not what the classes are called.
+
+**`TransformUpdate` is the default**, and the reason is the layer's own
 claims. Telescoping holds exactly under it and only in expectation under the
 stochastic update, so the exactness statement of {ref}`eki-honesty` — the one
 property this layer proves about itself — is a property of the default
 configuration rather than of a configuration a caller has to know to ask for.
 It is also deterministic, so a user's first two runs agree, and a difference
 between them is a bug rather than a seed. A caller who wants the classical
-perturbed-observation form passes `update=StochasticUpdate()`, which is one
+perturbed-observation form passes `update=PathwiseUpdate()`, which is one
 keyword and is what the sampling-form literature describes.
 
 (eki-schedules)=
@@ -992,10 +1002,10 @@ standard ESS-based adaptive tempering of the sequential Monte Carlo literature
 (Jasra and co-authors; convergence theory in Beskos and co-authors —
 {ref}`eki-references`), and is used here purely as a **step-size heuristic**:
 pyEKI computes no importance weights, does no resampling, and makes no
-importance-sampling correctness claim. Its extra field is `target`,
+importance-sampling correctness claim. Its extra field is `ess_fraction`,
 the ESS level sought as a fraction of $J$, default `0.5`, required to lie in
 $(0,\ 1 - 10^{-6}]$ — bounded away from 1 because $\mathrm{ESS}(0)$ evaluates
-to `exp(log J)` rather than exactly $J$, so a `target` within round-off of 1
+to `exp(log J)` rather than exactly $J$, so a `ess_fraction` within round-off of 1
 makes $\delta = 0$ an invalid lower bracket and the invariant below false from
 the first iteration; and `n_bisect`, a static `int` bisection count, default
 `50`, required to be at least 1. Any `n_bisect` at or above 30 attains the
@@ -1055,7 +1065,7 @@ clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
   $\delta_{\mathrm{hi}} = \min(\delta_{\max},\, \beta_{\text{target}} -
   \beta)$, or $\delta_{\max}$ when `beta_target is None`. Bisect
   $[0, \delta_{\mathrm{hi}}]$ for exactly `n_bisect` iterations, maintaining
-  $\mathrm{ESS}(\text{lo}) \ge \text{target}\cdot J >
+  $\mathrm{ESS}(\text{lo}) \ge \text{ess\_fraction}\cdot J >
   \mathrm{ESS}(\text{hi})$, and return `lo`. The guarantee is therefore
   one-sided: the returned increment meets the target before the floor is
   applied.
@@ -1063,7 +1073,7 @@ clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
   When $\mathrm{ESS}(\delta_{\mathrm{hi}})$ already meets the target the cap
   binds and $\delta_{\mathrm{hi}}$ is the answer — but that case must be folded
   in **branchlessly**, by initialising
-  `lo = jnp.where(ess_hi >= target * J, delta_hi, 0.0)` and letting the loop run
+  `lo = jnp.where(ess_hi >= ess_fraction * J, delta_hi, 0.0)` and letting the loop run
   unchanged, never as an early Python return on a device value. It is not an
   optimization: without it the degenerate ensemble of {ref}`eki-adaptive`
   reaches the largest allowed step only to $2^{-\texttt{n\_bisect}}$, and a
@@ -1084,7 +1094,7 @@ clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
   the same quantity — and why the criterion remains meaningful when every
   misfit is enormous, as it is early in a run.
 
-`target` defaults to `0.5`, which is pyEKI's choice rather than a canonical
+`ess_fraction` defaults to `0.5`, which is pyEKI's choice rather than a canonical
 value; the tempering literature uses targets between about a third and a half.
 A smaller target takes longer steps and fewer of them.
 
@@ -1092,9 +1102,16 @@ A smaller target takes longer steps and fewer of them.
 
 Measures the move against the **noise level** rather than against the
 ensemble, and solves for the increment in closed form instead of bisecting.
-Its one extra field is `theta`, a static override for the benchmark scale,
-default `None` meaning $N/2$ — and with that default the schedule has **no
-tuning parameter at all**, which is its main attraction.
+Its one extra field is `divergence_budget`, written $\theta$ in the formulas
+below, default `None` meaning $N/2$ — and with that default the schedule has
+**no tuning parameter at all**, which is its main attraction.
+
+The field is named for what it bounds rather than for the source's symbol. It
+is the ceiling on the Jeffreys divergence between consecutive tempered
+measures, which is where the criterion comes from and what a caller overriding
+it is actually choosing; $\theta$ means nothing to a reader who has not read
+the source, and the default exists precisely so that most callers never name it
+at all. The symbol is kept in the mathematics, where it is the source's.
 
 This is the **data misfit controller** of Iglesias and Yang
 ({ref}`eki-references`), reproduced here rather than invented: their equation
@@ -1217,8 +1234,8 @@ jnp.where(d > 0, theta / jnp.where(d > 0, d, 1.0), jnp.inf)
 single-`where` form still forms `theta / 0` and yields a `nan` derivative at
 `d = 0`. The clamps of {ref}`eki-adaptive` then deliver the largest allowed
 step, as that section requires. Dividing unguarded
-happens to give `inf` for positive `theta`, but relies on the sign of a zero
-and gives `nan` at `theta = 0`, so the guard is contractual rather than
+happens to give `inf` for positive `divergence_budget`, but relies on the sign of a zero
+and gives `nan` at `divergence_budget = 0`, so the guard is contractual rather than
 stylistic.
 
 (eki-stopping)=
@@ -1448,10 +1465,10 @@ valid members are left exactly where they are.** Then, exactly:
   likewise the cross-covariance — both blocks carry the same factor;
 - failed members become $(\hat u, \hat v)$, so their residual is $y - \hat v$;
   they rejoin the ensemble rather than being lost. Under
-  `SquareRootUpdate` their update lands **exactly** at the posterior mean:
+  `TransformUpdate` their update lands **exactly** at the posterior mean:
   zeroing row $j$ of $A_u$ and of $A_v$ zeroes row $j$ of $S$, hence
   $U_{ji} = 0$ for every $\sigma_i > 0$, so the transform leaves that row's
-  anomaly at zero. Under `StochasticUpdate` they land at the posterior mean
+  anomaly at zero. Under `PathwiseUpdate` they land at the posterior mean
   plus their own $\mathcal{N}(0, KRK^\top)$ perturbation.
 
 **The covariance is damped, and that is the intended trade.** The step
@@ -1649,7 +1666,7 @@ $\Phi(G(\bar u))$, is a genuinely different object again and is deliberately
 absent: computing it costs an extra forward-model evaluation
 ({ref}`eki-excluded`).
 
-### `StepRecord`
+### `HistoryRecord`
 
 One row of the history, built by the driver from the summary and the chosen
 increment. **Every field is a 0-d array**, `step` and `n_valid` included (as
@@ -1657,7 +1674,7 @@ increment. **Every field is a 0-d array**, `step` and `n_valid` included (as
 `misfit_mean`, `misfit_min`, `misfit_max`, `centre_misfit`, `spread`, and
 `ess`.
 
-**No field of `StepRecord` is static metadata, and that is a requirement
+**No field of `HistoryRecord` is static metadata, and that is a requirement
 rather than an oversight.** Static fields live in a pytree's treedef, so two
 records with different `step` values would have different treedefs, and
 `jax.tree.map` across a history would raise instead of stacking. The history is
@@ -1698,7 +1715,7 @@ which {doc}`gaussian-contract` records but does not expose, is available the
 same way.
 
 **The terminal record.** When a run ends on an evaluation whose update is then
-discarded, that evaluation is recorded as a final `StepRecord` with `increment`
+discarded, that evaluation is recorded as a final `HistoryRecord` with `increment`
 exactly `0.0`, `beta_next == beta`, and `ess` the literal `float(J)` — written
 by the driver rather than obtained from `effective_sample_size`, since
 `exp(log J)` is not `J` in floating point. It appears at most once, always
@@ -1711,7 +1728,7 @@ record therefore means "evaluated, then stopped"; this is the one zero
 increment the layer permits, and it is written by the driver, never returned
 by a schedule.
 
-**Stacking the history** is `result.stacked`: a single `StepRecord` whose
+**Stacking the history** is `result.stacked`: a single `HistoryRecord` whose
 `batch_shape` is `(T,)` and whose every field is `(T,)`-shaped — a family in
 the sense of {ref}`contract-families`, inert to methods and legible in its
 repr, which is exactly what a stacked history should be.
@@ -1743,9 +1760,9 @@ Two loops over the two phases of {ref}`eki-step`: `iterate` is a generator,
 is not implemented over `iterate`: both are thin wrappers around one private
 driver. That is deliberate — see `run` below.
 
-### `iterate(state, forward, y, noise_cov, *, schedule, update=SquareRootUpdate(), inflation=None, stop=None, on_failure="repair", max_steps=1000)`
+### `iterate(state, forward, y, noise_cov, *, schedule, update=TransformUpdate(), inflation=None, stop=None, on_failure="repair", max_steps=1000)`
 
-A generator yielding `(EKIState, StepRecord, Evaluation)` after each
+A generator yielding `(EKIState, HistoryRecord, Evaluation)` after each
 iteration, including the terminal evaluation-only iteration, and **returning**
 the terminating `status` as its `StopIteration` value. It is the extension
 point for anything that needs to *observe* or *interrupt* a run: per-step
@@ -1802,7 +1819,7 @@ code. Fields:
 | field | contents |
 | ----- | -------- |
 | `state` | the final `EKIState` |
-| `history` | a tuple of `StepRecord`, one per ensemble evaluation |
+| `history` | a tuple of `HistoryRecord`, one per ensemble evaluation |
 | `status` | why the run ended (below) |
 | `last_evaluation` | the `Evaluation` of the final forward evaluation, or `None` if the run made none |
 
@@ -1984,7 +2001,7 @@ because they are pure Python over shapes.
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
-| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `target` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `theta` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_target` $\le 0$; `tau \le 0` |
+| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `ess_fraction` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `divergence_budget` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_target` $\le 0$; `tau \le 0` |
 | 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)` or not finite; `noise_cov` side ≠ $N$ or a family; `max_steps` not a positive `int`; the forward model's output not `(J, N)` or not of a real floating dtype; an inflation's output not `(J, P)`; an update's output not `(J, P)`; `AdditiveInflation.cov` of side ≠ $P$; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
 | 4. value (debug) | finiteness of the initial ensemble and of `beta`; finiteness of inflation fields; positivity of `anomaly_factor` | violations yield `nan` or a silently wrong ladder outside debug mode |
 
@@ -2092,13 +2109,13 @@ Beyond that, three requirements specific to a layer that owns a loop:
 The family machinery of {ref}`contract-families` applies to the pytree value
 classes, in its gauss instantiation ({ref}`gauss-jax`):
 
-- `EKIState`, `Evaluation` and `StepRecord` each have a required
+- `EKIState`, `Evaluation` and `HistoryRecord` each have a required
   `batch_shape` property, computed from the leading axes of each array **field**
   beyond its core rank — `EKIState.ensemble` 2,
   `Evaluation.whitened_residuals` 2, `Evaluation.ensemble` 2,
   `Evaluation.predictions` 2, `key` 0, and `beta`,
   `rms_parameter_spread` and every
-  `StepRecord` field 0 — combined by broadcasting with `ValueError` on
+  `HistoryRecord` field 0 — combined by broadcasting with `ValueError` on
   mismatch. Derived properties such as `Evaluation.misfits` are not fields and
   do not enter the computation. Directly constructed objects always report `()`.
 - When `batch_shape` is non-empty the object is **inert**: every method and
@@ -2121,8 +2138,8 @@ revisit the design.
 
 | variant | expressed as |
 | ------- | ------------ |
-| approximate posterior sampling by tempering (the ensemble smoother with multiple data assimilation of Emerick and Reynolds) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_target=1.0)`, with the default `SquareRootUpdate` |
-| the same, in its classical perturbed-observation form | those schedules with `update=StochasticUpdate()` |
+| approximate posterior sampling by tempering (the ensemble smoother with multiple data assimilation of Emerick and Reynolds) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_target=1.0)`, with the default `TransformUpdate` |
+| the same, in its classical perturbed-observation form | those schedules with `update=PathwiseUpdate()` |
 | a single Kalman update (the one-step linearized approximation) | `FixedSchedule.constant(1.0, 1)` |
 | EKI as an iterative regularization method | `FixedSchedule.constant(1.0, n)` with `stop=DiscrepancyStop()` |
 | adaptive-regularization EKI (the EKI-DMC scheme of Iglesias and Yang) | `AdaptiveMisfitSchedule` with `stop=DiscrepancyStop()` |
@@ -2262,9 +2279,9 @@ where that consumer belongs.
 Type name and static sizes, never array contents, matching
 {ref}`contract-repr` and {ref}`gauss-repr`:
 `EKIState(n_members=64, u_dim=12, step=3)`,
-`Evaluation(step=3, n_members=64)`, `StepRecord(step=3)`. Policy objects
+`Evaluation(step=3, n_members=64)`, `HistoryRecord(step=3)`. Policy objects
 print their static fields, which are small and informative:
-`AdaptiveESSSchedule(target=0.5, beta_target=1.0)`,
+`AdaptiveESSSchedule(ess_fraction=0.5, beta_target=1.0)`,
 `MultiplicativeInflation(anomaly_factor=1.02)` — with the one exception that a
 policy holding a *large* static field summarizes it instead
 (`FixedSchedule(n_steps=200, total=200.0)`, {ref}`eki-schedules`), since the
@@ -2276,19 +2293,19 @@ counts: `EKIResult(status='schedule_exhausted', n_steps=17, beta=1.0)`.
 ## Public surface
 
 `pyeki.eki` exports exactly: the value classes `EKIState`, `Evaluation`,
-`StepRecord`, `EKIResult`; the protocols `EnsembleUpdate`, `Schedule`,
-`StoppingRule`, `Inflation`; the update rules `SquareRootUpdate`,
-`StochasticUpdate`; the schedules `FixedSchedule`, `AdaptiveESSSchedule`,
+`HistoryRecord`, `EKIResult`; the protocols `EnsembleUpdate`, `Schedule`,
+`StoppingRule`, `Inflation`; the update rules `TransformUpdate`,
+`PathwiseUpdate`; the schedules `FixedSchedule`, `AdaptiveESSSchedule`,
 `AdaptiveMisfitSchedule`; the stopping rule `DiscrepancyStop`; the inflations
 `MultiplicativeInflation`, `AdditiveInflation`; the driver `run` and `iterate`
 and the three step functions `evaluate`, `apply` and `advance`; the helpers
-`whitened_misfits`, `effective_sample_size`, `repair_failed_members`; the
+`misfits`, `effective_sample_size`, `repair_failed_members`; the
 status constants `SCHEDULE_EXHAUSTED`, `STOPPING_RULE`, `INTERRUPTED`; and the
 exception `EKIError`. Anything else is private, and no consumer may depend on
 it.
 
 The three helpers are public for three different reasons, and it is worth
-saying which: `whitened_misfits` because the misfit convention of
+saying which: `misfits` because the misfit convention of
 {ref}`eki-notation` must be applicable outside a run — to a validation set, or
 to a candidate parameter — without reimplementing the factor of $\tfrac12$;
 `effective_sample_size` because it is the one criterion a custom schedule is
@@ -2298,7 +2315,15 @@ directly, and a caller driving the phases by hand needs it.
 
 | helper | signature | returns |
 | ------ | --------- | ------- |
-| `whitened_misfits(y, predictions, noise_cov)` | `(N,), (..., N), PSDLinOp -> (...)` | $\tfrac12\lVert W(y - v)\rVert^2$, batched per the operator layer's contract |
+| `misfits(y, predictions, noise_cov)` | `(N,), (..., N), PSDLinOp -> (...)` | $\tfrac12\lVert W(y - v)\rVert^2$, batched per the operator layer's contract |
+
+`misfits` and {attr}`Evaluation.misfits` are deliberately the same name for the
+same quantity, and the conformance suite asserts they agree: the free function
+is how a caller applies the convention of {ref}`eki-notation` outside a run,
+and the property is how a policy reads it inside one. "Whitened" is not in
+either name — the misfit is defined as the whitened quadratic form, so there is
+no unwhitened one to distinguish it from, and the word would attach to the
+misfit rather than to the residual it actually describes.
 | `effective_sample_size(misfits, increment)` | `(J,), scalar -> 0-d` | $\mathrm{ESS}$ of $e^{-\delta\Phi}$, computed in log space |
 | `repair_failed_members(*, ensemble, predictions, valid)` | `(J,P), (J,N), (J,) bool -> (J,P), (J,N)` | the mean-preserving repair of {ref}`eki-failures` |
 
@@ -2333,7 +2358,7 @@ written independently of the code under test. The suite must verify at least:
    test 1's tolerance is known to be tight enough to catch the layer's
    signature bug rather than merely to pass.
 3. **Stochastic update composition.** On the same affine problem, a ladder
-   with `StochasticUpdate` reproduces, elementwise for a fixed key, a
+   with `PathwiseUpdate` reproduces, elementwise for a fixed key, a
    hand-written dense reference that applies the perturbed-observation formula
    rung by rung; and its posterior moments match the one-shot posterior in
    expectation, tested as a mean over many keys with a tolerance derived from
@@ -2425,7 +2450,7 @@ written independently of the code under test. The suite must verify at least:
    exactly, matches its pinned elementwise definition, and moves the ensemble
    out of its initial affine subspace — while a run without it stays inside,
    which is the executable form of {ref}`eki-subspace`.
-10. **Misfits.** `whitened_misfits` matches a dense
+10. **Misfits.** `misfits` matches a dense
     $\tfrac12 (y-v)^\top R^{-1} (y-v)$ at batch ranks 0, 1 and 2, is invariant
     across two noise operators representing the same $R$ with different
     whiteners, and pins the factor of $\tfrac12$ against a closed-form case.
@@ -2454,7 +2479,7 @@ written independently of the code under test. The suite must verify at least:
     sentinel leaves; families report their batch shape, take the
     `vmapped(...)` repr, and refuse every method.
 13a. **The history stacks.** `jax.tree.map(lambda *xs: jnp.stack(xs),
-    *result.history)` succeeds on a multi-step run and yields a `StepRecord`
+    *result.history)` succeeds on a multi-step run and yields a `HistoryRecord`
     with `batch_shape == (T,)` and `(T,)`-shaped fields — including `step` and
     `n_valid`. This is a targeted regression test for the treedef trap of
     {ref}`eki-diagnostics`: declaring either as static metadata makes every
@@ -2515,7 +2540,7 @@ to the covariance rather than the anomalies (the `anomaly_factor` convention),
 a repair applied when nothing failed, a repair that rescales the surviving
 members (and so inflates silently), a misfit computed before repair, a schedule
 that counts its own calls (and so breaks resumption), an increment baked in as
-a Python constant (and so recompiles every step), a `StepRecord` field declared
+a Python constant (and so recompiles every step), a `HistoryRecord` field declared
 static (and so unstackable), and the safety bound checked before ladder
 exhaustion (and so raising on a completed run).
 
@@ -2537,7 +2562,7 @@ tidy.
 | `AdaptiveESSSchedule` | A. Jasra, D. A. Stephens, A. Doucet and T. Tsagaris, *Inference for Lévy-driven stochastic volatility models via adaptive sequential Monte Carlo*, Scandinavian Journal of Statistics 38(1):1–22, 2010, for ESS-based adaptive tempering; A. Beskos, A. Jasra, N. Kantas and A. H. Thiéry, *On the convergence of adaptive sequential Monte Carlo methods*, Annals of Applied Probability 26(2):1111–1146, 2016, for its convergence theory; Y. Zhou, A. M. Johansen and J. A. D. Aston, *Towards automatic model comparison: an adaptive sequential Monte Carlo approach*, Journal of Computational and Graphical Statistics 25(3):701–726, 2016, for the conditional-ESS generalization pyEKI does **not** implement. |
 | the tempered ladder as an algorithm | A. A. Emerick and A. C. Reynolds, *Ensemble smoother with multiple data assimilation*, Computers & Geosciences 55:3–15, 2013. The inflation factors $\alpha_n$ of that literature are this contract's reciprocal increments, and the requirement that they sum appropriately is {ref}`eki-iteration`'s telescoping. |
 | `MultiplicativeInflation` | J. L. Anderson and S. L. Anderson, *A Monte Carlo implementation of the nonlinear filtering problem to produce ensemble assimilations and forecasts*, Monthly Weather Review 127:2741–2758, 1999. |
-| `SquareRootUpdate`'s lineage | J. S. Whitaker and T. M. Hamill, *Ensemble data assimilation without perturbed observations*, Monthly Weather Review 130:1913–1924, 2002. The transform this layer uses is specified in {doc}`gaussian-contract`, not here. |
+| `TransformUpdate`'s lineage | J. S. Whitaker and T. M. Hamill, *Ensemble data assimilation without perturbed observations*, Monthly Weather Review 130:1913–1924, 2002. The transform this layer uses is specified in {doc}`gaussian-contract`, not here. |
 | the Langevin variant of {ref}`eki-variants` | A. Garbuno-Iñigo, F. Hoffmann, W. Li and A. M. Stuart, *Interacting Langevin diffusions: gradient structure and ensemble Kalman sampler*, SIAM Journal on Applied Dynamical Systems, 2020. |
 
 Two notes on what is *not* claimed. The relaxation-to-prior inflation family and
@@ -2675,7 +2700,7 @@ diagnostic — so it is the caller's to compute in an `iterate` loop if wanted.
 whitened anomaly matrix, and the marginal-likelihood term
 $\sum_i\log(1+\sigma_i^2)$ that {doc}`gaussian-contract` derives from the same
 decomposition, are the natural answer to "is my ensemble collapsing". They are
-excluded from `StepRecord` because the update's SVD is internal to
+excluded from `HistoryRecord` because the update's SVD is internal to
 `pyeki.gauss` and has no return channel, so the driver would have to compute a
 second one at $O(NJ^2)$ — the update's own order — for a diagnostic. They stay
 reachable: `summary.whitened_residuals` determines the matrix completely, so a
