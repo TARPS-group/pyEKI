@@ -285,7 +285,7 @@ here.
   schedule.** The number of rungs, and hence of forward-model evaluations,
   depends on the misfits the model produces. A caller who must budget
   evaluations uses a `FixedSchedule`, whose cost is exactly its length, or
-  drives `step` directly ({ref}`eki-step`). Exceeding `max_steps` raises
+  drives the two phases directly ({ref}`eki-step`). Exceeding `max_steps` raises
   rather than returning a partial answer — and the exception carries the
   state and the history, so the work is not lost ({ref}`eki-driver`).
 
@@ -383,7 +383,8 @@ arbitrary intermediate level. `EKIResult.status` records which happened, and
 | `Schedule` | protocol | the increment, plus the two attributes that say how long the ladder is |
 | `StoppingRule` | protocol | whether to stop, given the current misfits |
 | `Inflation` | protocol | a transformation of the ensemble, applied before each forward evaluation |
-| `run`, `iterate`, `step` | functions | the driver, as a function, as a generator, and as one iteration |
+| `run`, `iterate` | functions | the driver, as a function and as a generator |
+| `evaluate`, `apply`, `advance` | functions | one rung, as its two phases and their composition |
 | `misfits`, `effective_sample_size`, `repair_failed_members` | functions | the array-level pieces schedules and custom drivers need |
 
 Rules governing the set:
@@ -2697,8 +2698,8 @@ trial evaluation at all ({ref}`eki-schedules`).
 
 The *algorithms* that want trial evaluations — line search, backtracking on a
 rejected increment, damped Gauss–Newton-style iterative ensemble smoothers —
-are not excluded. They are written against the public `step`, which is exactly
-the propose-evaluate-accept-or-retry loop and is shown as one
+are not excluded. They are written against the public `evaluate` and `apply`,
+which are exactly the propose-evaluate-accept-or-retry loop and are shown as one
 ({ref}`eki-step`). The distinction is between the driver spending evaluations
 on a caller's behalf, which it never does, and a caller spending them
 deliberately, which it may.
@@ -2707,8 +2708,8 @@ deliberately, which it may.
 `(forward, y, noise_cov)` once, and a generator cannot be handed a new
 observation, so subsampled, mini-batch and randomized-observation variants —
 which draw a fresh subset of the data at every rung — are not expressible
-against the driver. They are expressible against `step`, which takes the triple
-per call, so the variant is a five-line loop rather than a missing feature
+against the driver. They are expressible against `evaluate` and `apply`, which take the
+triple per call, so the variant is a short loop rather than a missing feature
 ({ref}`eki-step`). The driver keeps the binding because a fixed $N$ is what
 lets it validate shapes once and lets a stopping rule mean the same thing at
 every rung. Noted because the three-axis table of {ref}`eki-axes` names schedule, update
