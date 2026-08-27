@@ -418,7 +418,17 @@ and converted to a 0-d float array before storing, as the operator layer's
 scalar dunders do; `beta` must not be negative.
 
 **Derived attributes.** `n_members` and `u_dim` are `int` properties, named as
-in {doc}`gaussian-contract`.
+in {doc}`gaussian-contract`; `mean` is the ensemble mean, a `(P,)` array, the
+same property `EKIResult` exposes and delegates to — a caller in an `iterate`
+loop holds states, not results.
+
+**`EKIState.restart()`** returns a copy with `step = 0` and `beta = 0.0`: a
+state carrying the same ensemble and key, ready to begin a *new* ladder rather
+than resume the old one. It exists because the alternative is
+`dataclasses.replace(state, step=0, beta=0.0)`, which requires knowing that
+`step` is a counter a schedule indexes and that a budgeted schedule exhausts on
+`beta`, and which is the remedy for a trap that otherwise raises nothing — see
+the warning below.
 
 **`EKIState.from_prior(key, prior, n_members)`** draws the initial ensemble
 from the prior — the layer's one piece of work that is neither storing a field
@@ -467,17 +477,25 @@ finds `step >= n_steps` already true, and `run` returns immediately with
 `status="schedule_exhausted"`, an empty history, and the ensemble unchanged.
 Nothing raises, because an already-finished ladder legitimately returns.
 
-A new ladder therefore needs a new counter:
+A new ladder therefore needs a new counter, which is what `restart` is for:
 
 ```python
-phase2 = dataclasses.replace(state, step=0)
+phase2 = state.restart()          # step = 0, beta = 0.0, same ensemble and key
 ```
 
-Adaptive *budgeted* schedules are immune, since their exhaustion reads
-`beta` rather than `step` — but for the same reason they need `beta` reset if
-a second budget is intended. `EKIResult.n_steps` counts the records of that
-run, not `state.step`; after a resumption the two differ, and the histories
-concatenate in call order.
+Adaptive *budgeted* schedules are not immune, for the mirror-image reason:
+their exhaustion reads `beta` rather than `step`, so a finished budget is
+equally finished on re-entry. `restart` resets both, which is why it resets
+both.
+
+**The driver also warns.** A run that returns with `n_steps == 0` performed no
+work at all, which is essentially never what the caller wanted, so the driver
+logs it at `WARNING` ({ref}`eki-driver`). That does not make the trap
+impossible — a run legitimately returns when its ladder is finished — but it
+means the silent case is no longer silent.
+
+`EKIResult.n_steps` counts the records of that run, not `state.step`; after a
+resumption the two differ, and the histories concatenate in call order.
 :::
 
 (eki-step)=
@@ -1441,8 +1459,20 @@ strings below; anything else is a `ValueError` at the call
 | `"raise"` | raise `EKIError` naming the number and indices of failed members |
 
 Either way, $J_v < 2$ raises: a single valid member has no anomalies.
-Diagnostics always record `n_valid`, so failures are never silent even under
-`"repair"`.
+
+**Failures are surfaced three ways, because `n_valid` alone is not enough.**
+Every record carries it, the driver logs a `WARNING` on any step with a failed
+member, and `EKIResult.min_n_valid` reports the worst step without the caller
+having to stack the history. The third matters because the first two are easy
+to miss: reading `n_valid` requires stacking the history and looking, and the
+`logging` record reaches nobody until a handler is installed, which
+{ref}`eki-driver` states plainly is not the default. On top of that, `run`
+issues one `warnings.warn` per run in which any member ever failed —
+`warnings` being on by default where `logging` is not, which is the whole
+difference between a mitigation and a mitigation on paper. Under `"repair"` a
+run can otherwise complete, return a normal-looking result, and have been
+conditioning on a covariance damped at every rung
+({ref}`eki-failures`).
 
 ### `repair_failed_members(ensemble, predictions, valid)`
 
@@ -2335,9 +2365,35 @@ wrong numbers. `valid` must be a `(J,)` boolean array, and $J_v \ge 2$ is a
 precondition the helper checks, since at $J_v \le 1$ the valid-member mean is
 `nan`.
 
-There is no `pyeki.eki.testing`: the policy protocols are structural and have
-no invariants a harness could check beyond the signature, so conformance is a
-set of obligations on the package's own tests, as in `pyeki.gauss`.
+(eki-testing)=
+### `pyeki.eki.testing`
+
+Unlike `pyeki.gauss`, this layer ships a conformance harness, because unlike
+`pyeki.gauss` it is open to extension: {ref}`eki-axes` names it the one place
+where pyEKI is deliberately extensible at the algorithm level, and the same
+asymmetry that gives `pyeki.linalg` a `check_operator` applies here.
+
+| function | checks |
+| -------- | ------ |
+| `check_schedule(schedule, evaluation)` | `n_steps` and `beta_target` are present, of the right types, and unchanged by reads; `next_increment` returns `None` or a scalar, finite, strictly positive value; **purity**, by calling twice on the same evaluation and comparing bit-exactly |
+| `check_update(update, key, **operands)` | the result is `(J, P)` with the incoming dtype; determinism given the key; the subspace property of {ref}`eki-subspace`, unless the rule declares it leaves the span; `jit`-safety with static shapes |
+| `check_inflation(inflation, key, ensemble)` | shape preservation; purity; that the mean is preserved, unless the rule declares otherwise |
+| `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
+
+Each takes a policy and a small synthetic `Evaluation`, which the module also
+provides a constructor for, since a user testing their own schedule should not
+have to run a forward model to get one.
+
+**Purity is the reason the harness exists.** {ref}`eki-updates` records that a
+policy holding iteration state silently breaks resumption, and concedes that
+this is "a failure the conformance suite can catch in the package's own rules
+and cannot catch in a user's". A harness is exactly the answer to that: calling
+a policy twice on one evaluation and comparing is two lines, and it catches the
+schedule-that-counts-its-own-calls bug — which this contract lists among the
+silent-failure classes — in a user's code rather than only in ours.
+
+The shipped policies are all run through these checks, as the operators are
+through `check_operator`.
 
 (eki-conformance)=
 ## Conformance
@@ -2527,22 +2583,114 @@ written independently of the code under test. The suite must verify at least:
     `result.stacked` succeeds on a multi-step run with `(T,)`-shaped fields
     including `step` and `n_valid`, and returns `(0,)`-shaped fields on an
     empty history rather than raising.
-17. **Inflation sees the ladder.** An `Inflation` and an `EnsembleUpdate` that
-    record their `step` and `beta` arguments observe the true sequence, and a
-    rule varying with `beta` gives a run that is still exactly resumable —
-    the point of passing the arguments instead of forcing a stateful
+17. **Inflation sees the ladder, and is applied where the contract says.** An
+    `Inflation` and an `EnsembleUpdate` that record their `step` and `beta`
+    arguments observe the true sequence, and a rule varying with `beta` gives a
+    run that is still exactly resumable — the point of passing the arguments
+    instead of forcing a stateful
     workaround ({ref}`eki-updates`).
 
+    Placement is asserted against an instrumented model, not assumed: with an
+    inflation that adds a constant, the model's **first** recorded input equals
+    the initial ensemble plus that constant, bit-exactly. That pins both the
+    before-the-evaluation placement — which {ref}`eki-inflation` calls the
+    alternative forbidden — and the consequence that section states and which
+    was otherwise untested, that the initial ensemble is inflated before it is
+    ever evaluated. `result.ensemble` is asserted to be an update output, never
+    an inflation output.
+18. **The record agrees with the evaluation it came from.** Over a multi-rung
+    run with distinct increments, every `HistoryRecord` field is checked
+    against an independently recomputed value: `step` and `beta` against the
+    state entering the rung, `beta_next` against the state leaving it,
+    `increment` against their difference, and `misfit_mean`, `misfit_min`,
+    `misfit_max`, `centre_misfit`, `rms_parameter_spread`, `n_valid` and `ess`
+    against NumPy over the model's recorded input and output. Exact where the
+    quantity is exact. {ref}`eki-diagnostics` calls a record field that could
+    disagree with its evaluation a defect; this is the obligation that makes
+    the claim mean something, and it is the only guard against a swapped
+    `misfit_min`/`misfit_max`, an `ess` computed at `beta` instead of at the
+    increment, or a `beta_next` off by one rung — none of which any other test
+    would notice, since every one of them stays a plausible scalar.
+19. **`rms_parameter_spread` is exact against a closed form.** On a
+    QR-of-ones fixture with covariance factor $c I_P$, every coordinate has
+    empirical variance exactly $c^2$, so the field is exactly $c$; a second
+    fixture with distinct per-coordinate variances pins the root-mean-square
+    reading as $\sqrt{(a^2+b^2+c^2)/3}$. The two errors this catches — a
+    divisor of $J$ rather than $J-1$, and a missing $1/\sqrt{P}$ — are
+    separately distinguishable at $J = 5$, $P = 3$, and the field is otherwise
+    covered by no obligation at all despite being reported in the history.
+20. **A finished ladder is a no-op, and says so.** Running a completed
+    `FixedSchedule` state through a fresh schedule of the same length gives
+    `status="schedule_exhausted"`, `n_steps == 0`, an empty history,
+    `last_evaluation is None`, a bit-identical ensemble, and **zero** forward
+    calls by an instrumented model; `EKIState.restart()` then gives the full
+    ladder. The adaptive counterpart is asserted too, since it exhausts on
+    `beta` rather than on `step`. {ref}`eki-state` devotes a warning to this
+    trap and nothing tested it.
+21. **The driver hands the update what it repaired.** With a model failing one
+    member of six, a recording `EnsembleUpdate` receives an `ensemble` and
+    `predictions` bit-identical to `repair_failed_members` applied to the
+    inflated ensemble and the raw predictions — **both** elements.
+    {doc}`gaussian-contract` warns that differing masks between the two blocks
+    corrupt $\widehat C_{uv}$ with no exception, so repairing one and not the
+    other is a silent wrong answer that obligation 8 does not reach, since it
+    exercises the helper rather than the driver.
+22. **The axes compose.** A smoke matrix over every schedule, both updates,
+    every inflation and both stopping-rule settings, on a tiny affine problem
+    of three rungs, asserting only that each run terminates, reports a
+    permitted `status`, stacks, stays finite, and matches an instrumented
+    forward-call count. This is the executable form of {ref}`eki-axes`'
+    orthogonality claim, which is the design's organizing premise and is
+    otherwise checked at a single point of the space. It also catches a driver
+    that inspects one axis to decide another — an `ess` computed only for the
+    ESS schedule, say.
+23. **The document's own recipes run.** Every runnable block in this page is
+    executed by a test: the two-form example, the pinned prior draw,
+    `restart()`, the backtracking loop, `AdditiveInflation`'s definition, the
+    `stacked` one-liner, the `EKIError` checkpoint pattern, the `iterate`
+    construction of an `INTERRUPTED` result, and the Tikhonov augmentation.
+    The last is load-bearing: it is this contract's evidence for the
+    "no new code" claim of {ref}`eki-variants`, it depends on `block_diag` and
+    on the appended-block whitening identity, and its documented
+    double-counting hazard is asserted as an over-concentration so that a later
+    change cannot quietly "fix" it.
+
 Alongside conformance, targeted regression tests guard this layer's
-silent-failure classes under the same do-not-delete rule as the layers below:
-the $R/\beta$ mis-scaling, the non-log-space ESS, an inflation factor applied
-to the covariance rather than the anomalies (the `anomaly_factor` convention),
-a repair applied when nothing failed, a repair that rescales the surviving
-members (and so inflates silently), a misfit computed before repair, a schedule
-that counts its own calls (and so breaks resumption), an increment baked in as
-a Python constant (and so recompiles every step), a `HistoryRecord` field declared
-static (and so unstackable), and the safety bound checked before ladder
-exhaustion (and so raising on a completed run).
+silent-failure classes under the same do-not-delete rule as the layers below.
+**The list is derived from this document rather than curated**: every place the
+prose says a mistake raises nothing, warns nobody, or looks normal earns an
+entry, and the two must be kept in step.
+
+The $R/\beta$ mis-scaling. The non-log-space ESS. An inflation factor applied
+to the covariance rather than the anomalies (the `anomaly_factor` convention).
+A repair applied when nothing failed. A repair that rescales the surviving
+members, and so inflates silently. A misfit computed before repair. A schedule
+that counts its own calls, and so breaks resumption. A `HistoryRecord` field
+declared static, and so unstackable. The safety bound checked before ladder
+exhaustion, and so raising on a completed run. The `min`/`max` inversion in
+`AdaptiveMisfitSchedule` and each inversion of the clamp precedence — all three
+named in the prose as easy and silent. The bisection returning `hi`. The
+key-split arity or order changed, which {ref}`eki-prng` says must not shift the
+update's stream, and which **no numeric test can catch** in the default
+configuration, since it consumes no randomness at all: the guard is a
+`jax.random.key_data` snapshot of a multi-rung `PathwiseUpdate` run. A record
+field disagreeing with the evaluation it was built from, which
+{ref}`eki-diagnostics` calls a defect and which every plausible-scalar bug
+hides behind. Two forward evaluations per rung. Chaining a fresh ladder onto a
+finished state, which {ref}`eki-state` warns returns unchanged with nothing
+raised. `DiscrepancyStop` on a budgeted ladder. A fill-value forward model
+stalling an adaptive ladder. A systematically failing member, visible only in
+`n_valid`. The Tikhonov augmentation at $\beta = 1$ from a prior ensemble,
+which {ref}`eki-variants` says looks completely normal. And a `float32`
+forward model or update quietly demoting a run's precision, where every
+downstream test still passes at its own tolerance.
+
+An increment baked in as a Python constant is **not** on the list, and the
+reason is worth recording: a Python float passed as a `jit` *argument* does not
+retrace, so the test that would have guarded it cannot fail. What does force a
+retrace per step is a static field on an object crossing a `jit` boundary,
+which {ref}`eki-jax` states as a rule and which the compilation-count
+obligation covers.
 
 (eki-references)=
 ## References
