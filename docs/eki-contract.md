@@ -380,7 +380,7 @@ arbitrary intermediate level. `EKIResult.status` records which happened, and
 | `StepRecord` | pytree | one row of the run's history: scalars only |
 | `EKIResult` | frozen dataclass | the final state, the history, and why the run ended |
 | `EnsembleUpdate` | protocol | one ensemble update, given an increment |
-| `Schedule` | protocol | the increment, and whether the ladder is finished |
+| `Schedule` | protocol | the increment, plus the two attributes that say how long the ladder is |
 | `StoppingRule` | protocol | whether to stop, given the current misfits |
 | `Inflation` | protocol | a transformation of the ensemble, applied before each forward evaluation |
 | `run`, `iterate`, `step` | functions | the driver, as a function, as a generator, and as one iteration |
@@ -463,7 +463,7 @@ because `state.step` is 4.
 The same property makes *chaining a second, different ladder* onto a finished
 state a silent no-op. After `FixedSchedule.uniform(10)` completes,
 `state.step == 10`; handing that state to a fresh `FixedSchedule.uniform(10)`
-finds `exhausted(10, ...)` already true, and `run` returns immediately with
+finds `step >= n_steps` already true, and `run` returns immediately with
 `status="schedule_exhausted"`, an empty history, and the ensemble unchanged.
 Nothing raises, because an already-finished ladder legitimately returns.
 
@@ -568,7 +568,7 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
 
 Steps 4, 6 and 8 read concrete values, so a step **synchronizes with the device
 a small fixed number of times** — at most three here, and at most four in
-`iterate`, which also reads `exhausted` and the stopping rule. The reads cannot
+`iterate`, which also reads the exhaustion check and the stopping rule. The reads cannot
 be coalesced: step 6 decides whether to dispatch the update, and step 8 reads a
 value the update produces. This is a deliberate cost: $O(1)$ scalars and one
 reduction against $J$ forward-model evaluations, and it is what allows
@@ -579,21 +579,32 @@ termination, validation and adaptive increments to be ordinary Python.
 `iterate` wraps `step` with the decisions `step` refuses to make, in this
 order, before each call:
 
-1. **Ladder exhaustion.** If `schedule.exhausted(state.step, state.beta)`, end
-   the run with status `"schedule_exhausted"`. This is checked *before* the
-   forward model is evaluated, which is why `Schedule` splits exhaustion from
-   the increment: a fixed ladder of $T$ rungs must cost exactly $T$ ensemble
-   evaluations, not $T + 1$.
-2. **Safety bound.** If `state.step >= max_steps`, raise `EKIError`. The
-   message must name `max_steps`, the schedule, and whether a stopping rule
-   was supplied, since an unbounded schedule with no stopping rule is the
-   usual cause.
+1. **Ladder exhaustion.** If the schedule's attributes say the ladder is
+   finished ({ref}`eki-schedules`), end the run with status
+   `"schedule_exhausted"`. This is checked *before* the forward model is
+   evaluated, which is why exhaustion is separated from the increment: a fixed
+   ladder of $T$ rungs must cost exactly $T$ ensemble evaluations, not $T + 1$.
+2. **Safety bound.** If this call has already completed `max_steps`
+   iterations, raise `EKIError`. The message must name `max_steps`, the
+   schedule, and whether a stopping rule was supplied, since an unbounded
+   schedule with no stopping rule is the usual cause.
 
-   The order of these two is normative and the inversion is a bug: a schedule
-   that exhausts at step $T$ **must complete under `max_steps == T`**, which is
-   the value a caller naturally passes. Checking the bound first would turn
-   every such run into an `EKIError` on its final re-entry, blaming the
-   schedule for a completed ladder.
+   **`max_steps` bounds the iterations of this call, not `state.step`.** The
+   distinction is invisible on a fresh run and decisive on a resumed one.
+   Bounding the cumulative index would make the recovery this layer
+   advertises — catch `EKIError`, checkpoint `exc.state`, resume
+   ({ref}`eki-validation`) — a guaranteed no-op for the `max_steps` raise
+   itself, since the resumed run would re-raise on entry before any
+   evaluation, with an empty history; and it would silently shrink a resumed
+   run's allowance to `max_steps - state.step` regardless of what the caller
+   passed. The counter is therefore local to the call, and a resumption gets
+   the bound the caller asked for.
+
+   The order of these two decisions is normative and the inversion is a bug: a
+   schedule that exhausts at step $T$ **must complete under
+   `max_steps == T`**, which is the value a caller naturally passes. Checking
+   the bound first would turn every such run into an `EKIError` on its final
+   re-entry, blaming the schedule for a completed ladder.
 3. **Evaluate and summarize** — steps 1–5 of `step` above, which `iterate`
    needs before it can consult the stopping rule or the schedule.
 
@@ -609,11 +620,11 @@ order, before each call:
 4. **Stopping rule.** If `stop is not None and stop(summary)`, end the run
    with status `"stopping_rule"`, emitting a terminal record
    ({ref}`eki-diagnostics`) and leaving the state unchanged.
-5. **Increment.** `dbeta = schedule.increment(summary)`. A schedule may return
-   `None` to declare the ladder finished on evidence only the summary carries
-   ({ref}`eki-schedules`), which ends the run with status
+5. **Increment.** `dbeta = schedule.next_increment(evaluation)`. A schedule may
+   return `None` to declare the ladder finished on evidence only the evaluation
+   carries ({ref}`eki-schedules`), which ends the run with status
    `"schedule_exhausted"` and emits the same terminal record as a stopping
-   rule; any other value is validated and used as `step`'s increment.
+   rule; any other value is validated and used as the increment.
 
 (eki-updates)=
 ## Update rules
@@ -708,60 +719,98 @@ keyword and is what the sampling-form literature describes.
 (eki-schedules)=
 ## Schedules
 
-A `Schedule` has two methods.
+A `Schedule` is **one method and two declarative attributes**.
 
-| method | signature | contract |
-| ------ | --------- | -------- |
-| `exhausted` | `(step: int, beta: Array) -> bool` | is the ladder finished, on bookkeeping alone? Decided before any forward evaluation. Must return a Python `bool`. |
-| `increment` | `(summary: StepSummary) -> Array \| float \| None` | the next increment, or `None` for "finished after all". Called only when `exhausted` is false. A returned value must be scalar, finite and strictly positive. |
+| member | kind | contract |
+| ------ | ---- | -------- |
+| `n_steps` | `int \| None` | the ladder's length in rungs, or `None` if it is not step-bounded |
+| `beta_target` | `float \| None` | the temperature budget, or `None` for an unbounded ladder |
+| `next_increment` | `(evaluation: Evaluation) -> Array \| float \| None` | the next increment, or `None` for "finished after all". A returned value must be scalar, finite and strictly positive. |
 
-`exhausted` is misfit-independent and is called before any forward evaluation,
-so a run whose ladder is already finished pays nothing; `increment` may read the
-current misfits, so adaptivity costs no evaluation either.
-Both must be pure: a schedule that counted its own calls could not be resumed
-from a checkpoint, and `step` is passed precisely so that it need not.
+**The driver decides exhaustion, not the schedule.** A ladder is finished when
 
-**Why `increment` may also end the ladder.** `exhausted` sees only `(step,
-beta)`, so a schedule whose finishing condition depends on the *misfits* has no
-way to express it there — an adaptive ladder that should give up when its
-target has become unattainable above the floor, for instance. Without a second
-exit such a schedule must either crawl at its floor until `max_steps` raises,
-spending the whole evaluation budget to report a failure, or the caller must
-restate the schedule's own configuration and criterion inside a separate
-`StoppingRule` and keep the two objects consistent by hand. Returning `None` is
-the smaller mechanism: it ends the run with `status="schedule_exhausted"`, and
-the evaluation that produced the summary is recorded as the terminal record,
-exactly as for a stopping rule.
+```python
+(sched.n_steps is not None and step >= sched.n_steps) or (
+ sched.beta_target is not None and beta >= sched.beta_target - budget_tol)
+```
 
-The two exits mean different things and both are needed. `exhausted` is "I can
-tell from the bookkeeping that there is nothing left to do", and costs no
-evaluation; `None` is "having seen this ensemble, there is nothing useful left
-to do", and costs the evaluation that produced the summary. Neither shipped
-schedule returns `None`; both reach their budgets through `exhausted`.
+with `budget_tol` as {ref}`eki-adaptive` gives it. The check is
+misfit-independent and runs before any forward evaluation, so a run whose
+ladder is already finished pays nothing; `next_increment` may read the current
+misfits, so adaptivity costs no evaluation either.
+
+The attributes are read, never called, and must be constant for the life of the
+object — they are static metadata on a frozen policy, not state. A schedule
+with both `None` is legal and unbounded, and must be ended by a stopping rule.
+
+**Why exhaustion is data rather than a method.** An earlier form of this
+protocol had a second method, `exhausted(step, beta) -> bool`. Four things go
+wrong with it, and all four are fixed by the attributes:
+
+- *A step-size rule could not be a plain function.* {ref}`eki-objects`'s rule 2
+  permits a bare function wherever a protocol has a single method, and a
+  two-method protocol withdraws that permission from every schedule — including
+  the unbounded step-size rules whose `exhausted` is `return False`, a required
+  method with a constant body.
+- *"Is this a budgeted ladder?" was unanswerable without calling something.*
+  The driver can now check the schedule against `max_steps` at entry
+  ({ref}`eki-driver`), and warn on the `DiscrepancyStop`-on-a-budget trap
+  ({ref}`eki-axes`), neither of which is possible when the answer is hidden
+  behind a method.
+- *`budget_tol` was duplicated into every schedule* that wanted a budget, and
+  silently omitted by any that forgot it.
+- *The two shipped families already carry the attributes as fields*, so the
+  protocol now costs them nothing: `FixedSchedule.n_steps` is
+  `len(increments)`, and the adaptive schedules' `beta_target` is the budget
+  field itself.
+
+**Why `next_increment` may also end the ladder.** The attributes describe
+bookkeeping only, so a schedule whose finishing condition depends on the
+*misfits* has no way to express it there — an adaptive ladder that should give
+up when its target has become unattainable above the floor, for instance.
+Without a second exit such a schedule must either crawl at its floor until
+`max_steps` raises, spending the whole evaluation budget to report a failure,
+or the caller must restate the schedule's own configuration and criterion
+inside a separate `StoppingRule` and keep the two consistent by hand. Returning
+`None` is the smaller mechanism: it ends the run with
+`status="schedule_exhausted"`, and the evaluation that produced it is recorded
+as the terminal record, exactly as for a stopping rule
+({ref}`eki-diagnostics`).
+
+The two exits mean different things and both are needed. The attributes say "I
+can tell from the bookkeeping that there is nothing left to do", and cost no
+evaluation; `None` says "having seen this ensemble, there is nothing useful
+left to do", and costs the evaluation that produced it. Neither shipped
+schedule returns `None`; both reach their budgets through the attributes.
+
+`next_increment` must be **pure**: a schedule that counted its own calls could
+not be resumed from a checkpoint, and `evaluation.step` is passed precisely so
+that it need not.
 
 **No schedule performs a trial update or a trial forward evaluation.** Both
 shipped criteria read nothing but the misfit vector $(\Phi_1,\dots,\Phi_J)$ and
 the current level, so adaptivity costs $O(\texttt{n\_bisect}\cdot J)$ per step
 for a bisecting schedule and $O(J)$ for a closed-form one, on top of a whitening
-the driver pays anyway. Two consequences: the increment-rescaling identity that
-{doc}`gaussian-contract` records for candidate steps
-($S(R/\delta) = \sqrt{\delta}\,S(R)$) is never needed here, because no
-candidate is ever evaluated; and choosing an increment can never cost a
-model evaluation, which is the resource the whole layer is organized around.
+the driver pays anyway. Two consequences: the increment-rescaling identity
+{doc}`gaussian-contract` records for candidate steps is never needed here,
+because no candidate is ever evaluated; and choosing an increment can never
+cost a model evaluation, which is the resource the whole layer is organized
+around.
 
-A custom schedule is not confined to the misfits, though — the summary carries
-the whole whitened residual matrix, and hence the whitened prediction anomalies
-({ref}`eki-diagnostics`), which is what a step-size rule of the
-Langevin family needs. What no schedule can do is evaluate the forward model
-again; that restriction is the protocol's, and it is deliberate
-({ref}`eki-excluded`).
+A custom schedule is not confined to the misfits, though — the evaluation
+carries the whole whitened residual matrix, and hence the whitened prediction
+anomalies, as well as the members and their predictions
+({ref}`eki-diagnostics`), which is what a step-size rule of the Langevin family
+needs. What no schedule can do is evaluate the forward model again; that
+restriction is the protocol's, and it is deliberate ({ref}`eki-excluded`).
 
 ### `FixedSchedule(increments)`
 
 A ladder given in advance. `increments` is a non-empty tuple of Python floats,
 static metadata, each strictly positive and finite (`ValueError` otherwise).
-`exhausted(step, beta)` is `step >= len(increments)`; `increment(summary)`
-returns `increments[summary.step]` and ignores everything else.
+`n_steps` is `len(increments)` and `beta_target` is `None`;
+`next_increment(evaluation)` returns `increments[evaluation.step]` and ignores
+everything else.
 
 Because it indexes by the state's cumulative step, a `FixedSchedule` resumes a
 partially-completed ladder correctly and treats a *finished* state as finished
@@ -796,23 +845,24 @@ once.
 
 | field | default | meaning |
 | ----- | ------- | ------- |
-| `beta_final` | `1.0` | the temperature budget, or `None` for an unbounded ladder |
+| `beta_target` | `1.0` | the temperature budget, or `None` for an unbounded ladder |
 | `min_increment` | `1e-3` | a floor guaranteeing progress |
 | `max_increment` | `1.0` | a ceiling |
 
-All three are static metadata. `beta_final`, when given, must be strictly
+All three are static metadata. `beta_target`, when given, must be strictly
 positive; the floor must be positive and no greater than the ceiling
 (`ValueError` otherwise).
 
-**Exhaustion.** `exhausted(step, beta)` is
-`beta_final is not None and beta >= beta_final - budget_tol`, with
-`budget_tol = 1e-12 * beta_final`, relative so that a small budget is not
-swallowed whole: an absolute floor would make any `beta_final` at or below it
+**Exhaustion.** Both schedules set `n_steps = None` and expose the budget as
+`beta_target`, so the driver's check is
+`beta_target is not None and beta >= beta_target - budget_tol`, with
+`budget_tol = 1e-12 * beta_target` — relative, so that a small budget is not
+swallowed whole: an absolute floor would make any `beta_target` at or below it
 exhaust at $\beta = 0$, returning an untouched ensemble and an empty history
-with nothing raised. It is always false when
-`beta_final is None`, so an unbounded ladder must be ended by a stopping rule;
-a run with neither is a `max_steps` `EKIError`, and that error's message must
-say so ({ref}`eki-driver`).
+with nothing raised. It is never satisfied when `beta_target is None`, so an
+unbounded ladder must be ended by a stopping rule; a run with neither is a
+`max_steps` `EKIError`, and that error's message must say so
+({ref}`eki-driver`).
 
 **Clamping, and its precedence.** Each schedule computes an unclamped
 criterion value $\delta^\star$ and returns
@@ -821,11 +871,11 @@ $$
 \delta \;=\; \min\Bigl(\,
 \max\bigl(\delta^\star,\ \delta_{\min}\bigr),\ \
 \delta_{\max},\ \
-\beta_{\text{final}} - \beta
+\beta_{\text{target}} - \beta
 \,\Bigr).
 $$
 
-**The budget term is present only when `beta_final is not None`.** For an
+**The budget term is present only when `beta_target is not None`.** For an
 unbounded ladder the clamp is
 $\min(\max(\delta^\star, \delta_{\min}), \delta_{\max})$; writing the
 three-term form unconditionally is a `TypeError` on every unbounded run, which
@@ -839,31 +889,31 @@ The order is normative, and both inversions of it are bugs. The floor beats
 the criterion, so a step is always taken even where the criterion would demand
 an arbitrarily small one — without which an adaptive ladder can stall short of
 its budget for an unbounded number of steps. The **budget cap beats the
-floor**, so the ladder cannot overshoot $\beta_{\text{final}}$ — without which
+floor**, so the ladder cannot overshoot $\beta_{\text{target}}$ — without which
 a sampling run silently conditions on more data than it has. Positivity of the
-result follows from `exhausted` having returned false, which guarantees a
+result follows from the exhaustion check having been false, which guarantees a
 remaining budget strictly above `budget_tol`.
 
-With a floor $\delta_{\min}$ and a budget, a run reaches $\beta_{\text{final}}$
-in at most $\lceil \beta_{\text{final}} / \delta_{\min}\rceil$ steps.
+With a floor $\delta_{\min}$ and a budget, a run reaches $\beta_{\text{target}}$
+in at most $\lceil \beta_{\text{target}} / \delta_{\min}\rceil$ steps.
 
 **The shipped defaults are chosen so that this bound is reachable, and the
-arithmetic is part of the contract.** With `beta_final=1.0` and
+arithmetic is part of the contract.** With `beta_target=1.0` and
 `min_increment=1e-3` the worst case is $\lceil 1/10^{-3}\rceil = 1000$ steps,
 which is exactly the driver's default `max_steps=1000`
 ({ref}`eki-driver`). A budgeted adaptive schedule at the defaults therefore
 **cannot** raise on the safety bound: the floor-bound ladder finishes on its
-last permitted step. A caller who lowers `min_increment` must raise
-`max_steps` correspondingly, and the implementation must keep the two defaults
-consistent if either changes — a floor of $10^{-4}$ against a bound of 1000
-would guarantee an `EKIError` on precisely the badly-conditioned problems the
-floor exists to rescue, after spending the entire evaluation budget.
+last permitted step. A caller who lowers `min_increment`, or *raises*
+`beta_target`, breaks that relation — a floor of $10^{-4}$, or a budget of 2,
+against a bound of 1000 needs 10000 or 2000 rungs respectively. Neither is
+left to be discovered: the driver checks the arithmetic at entry and raises
+`ValueError` before spending an evaluation ({ref}`eki-driver`).
 
 **The degenerate ensemble.** When every member has the same misfit — a
 collapsed ensemble, or a forward model insensitive to the current spread — no
 increment changes the target's shape relative to the ensemble, and both
 schedules must take the **largest allowed step**, that is
-$\min(\delta_{\max}, \beta_{\text{final}} - \beta)$. Each criterion below
+$\min(\delta_{\max}, \beta_{\text{target}} - \beta)$. Each criterion below
 reaches that conclusion on its own; the requirement is recorded here so that an
 implementation cannot satisfy one schedule's version of it and not the other's.
 
@@ -935,8 +985,8 @@ $$
 clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
 
 - **Bisect on a bracket, and return the safe end.** Take
-  $\delta_{\mathrm{hi}} = \min(\delta_{\max},\, \beta_{\text{final}} -
-  \beta)$, or $\delta_{\max}$ when `beta_final is None`. Bisect
+  $\delta_{\mathrm{hi}} = \min(\delta_{\max},\, \beta_{\text{target}} -
+  \beta)$, or $\delta_{\max}$ when `beta_target is None`. Bisect
   $[0, \delta_{\mathrm{hi}}]$ for exactly `n_bisect` iterations, maintaining
   $\mathrm{ESS}(\text{lo}) \ge \text{target}\cdot J >
   \mathrm{ESS}(\text{hi})$, and return `lo`. The guarantee is therefore
@@ -1018,8 +1068,8 @@ $$
 $$
 
 clamped as {ref}`eki-adaptive` specifies — where the budget clamp
-$\beta_{\text{final}} - \beta$ is what makes a run terminate exactly at
-$\beta_{\text{final}}$ with the increments summing to it.
+$\beta_{\text{target}} - \beta$ is what makes a run terminate exactly at
+$\beta_{\text{target}}$ with the increments summing to it.
 
 **The `max` is deliberate and is not a `min`.** Read as two independent
 benchmarks the `max` looks merely permissive — take the longest step meeting at
@@ -1564,7 +1614,8 @@ by the driver rather than obtained from `effective_sample_size`, since
 `exp(log J)` is not `J` in floating point. It appears at most once, always
 last, and in exactly two cases: a stopping rule fired
 ({ref}`eki-stopping`), or a schedule's `increment` returned `None`
-({ref}`eki-schedules`). A run ended by `exhausted` performs no such evaluation
+({ref}`eki-schedules`). A run ended by the schedule's attributes performs no
+such evaluation
 and emits no such record. A zero increment in a
 record therefore means "evaluated, then stopped"; this is the one zero
 increment the layer permits, and it is written by the driver, never returned
@@ -1663,7 +1714,7 @@ themselves:
 
 | status | meaning |
 | ------ | ------- |
-| `"schedule_exhausted"` | the ladder finished, by `exhausted` or by an `increment` returning `None` |
+| `"schedule_exhausted"` | the ladder finished, by the schedule's attributes or by `next_increment` returning `None` |
 | `"stopping_rule"` | the stopping rule fired; the last record is terminal |
 | `"interrupted"` | the run was ended by its caller, not by a policy |
 
@@ -1710,6 +1761,24 @@ no API to add without dropping to `iterate`, is a gap rather than a design
 choice — while instrumentation as a feature (timings, profiles, progress bars)
 stays excluded ({ref}`eki-excluded`).
 
+**The budget and the bound are checked against each other at entry.** A
+schedule exposing `beta_target` and a floor implies a worst case of
+$\lceil \beta_{\text{target}} / \delta_{\min} \rceil$ rungs, and the driver
+raises `ValueError` **before the first forward evaluation** when `max_steps` is
+below it. This is possible only because exhaustion is declarative
+({ref}`eki-schedules`), and it converts the layer's sharpest remaining
+foot-gun — a run that spends its entire evaluation budget and then reports
+`EKIError` on precisely the badly-conditioned problems the floor exists to
+rescue — into an immediate, actionable error. A schedule that does not expose a
+floor is not checked.
+
+The shipped defaults satisfy it with no slack: `beta_target=1.0` and
+`min_increment=1e-3` give $\lceil 1/10^{-3} \rceil = 1000 = $ the default
+`max_steps` ({ref}`eki-adaptive`). Note that **raising the budget breaks the
+relation just as lowering the floor does** — `beta_target=2.0` at the default
+floor needs 2000 — which is why the check is arithmetic on the attributes
+rather than a note telling the caller to keep two defaults in step.
+
 **Arguments not otherwise specified.** `y` must be a `(N,)` array;
 `noise_cov` a `PSDLinOp` of side $N$ supporting `whiten`, with
 `batch_shape == ()`; `max_steps` a positive `int`; `on_failure` one of the two
@@ -1749,7 +1818,7 @@ because they are pure Python over shapes.
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
-| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `target` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `theta` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_final` $\le 0$; `tau \le 0` |
+| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `target` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `theta` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_target` $\le 0$; `tau \le 0` |
 | 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)` or not finite; `noise_cov` side ≠ $N$ or a family; `max_steps` not a positive `int`; the forward model's output not `(J, N)` or not of a real floating dtype; an inflation's output not `(J, P)`; an update's output not `(J, P)`; `AdditiveInflation.cov` of side ≠ $P$; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
 | 4. value (debug) | finiteness of the initial ensemble and of `beta`; finiteness of inflation fields; positivity of `anomaly_factor` | violations yield `nan` or a silently wrong ladder outside debug mode |
 
@@ -1884,7 +1953,7 @@ revisit the design.
 
 | variant | expressed as |
 | ------- | ------------ |
-| approximate posterior sampling by tempering (the ensemble smoother with multiple data assimilation of Emerick and Reynolds) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_final=1.0)`, with the default `SquareRootUpdate` |
+| approximate posterior sampling by tempering (the ensemble smoother with multiple data assimilation of Emerick and Reynolds) | `FixedSchedule.uniform(T)` or `AdaptiveESSSchedule(beta_target=1.0)`, with the default `SquareRootUpdate` |
 | the same, in its classical perturbed-observation form | those schedules with `update=StochasticUpdate()` |
 | a single Kalman update (the one-step linearized approximation) | `FixedSchedule.constant(1.0, 1)` |
 | EKI as an iterative regularization method | `FixedSchedule.constant(1.0, n)` with `stop=DiscrepancyStop()` |
@@ -1932,7 +2001,7 @@ still get a posterior, the initial ensemble must be **diffuse** rather than
 prior-distributed, so that the appended block is the only place the prior
 enters.
 
-Pairing this recipe with `AdaptiveESSSchedule(beta_final=1.0)` from a prior
+Pairing this recipe with `AdaptiveESSSchedule(beta_target=1.0)` from a prior
 ensemble is therefore a confidently wrong posterior with no error, which is
 precisely the quiet wrongness this package refuses — so it is stated here
 rather than left to be discovered.
@@ -1950,7 +2019,7 @@ prior-drift and a diffusion term to the Kalman-like term and are driven by a ste
 than a temperature budget. They need the ensemble, the predictions, $y$, the
 noise, a step size, a key, and the prior — which is exactly the update
 signature plus a field on the rule, and it is why `increment` is passed
-separately from `noise_cov` ({ref}`eki-updates`) and why `beta_final=None`
+separately from `noise_cov` ({ref}`eki-updates`) and why `beta_target=None`
 exists. For such a rule `EKIState.beta` reads as accumulated pseudo-time
 rather than a tempering level; the layer keeps the name and the bookkeeping,
 which are identical.
@@ -2027,7 +2096,7 @@ Type name and static sizes, never array contents, matching
 `EKIState(n_members=64, u_dim=12, step=3)`,
 `StepSummary(step=3, n_members=64)`, `StepRecord(step=3)`. Policy objects
 print their static fields, which are small and informative:
-`AdaptiveESSSchedule(target=0.5, beta_final=1.0)`,
+`AdaptiveESSSchedule(target=0.5, beta_target=1.0)`,
 `MultiplicativeInflation(anomaly_factor=1.02)` — with the one exception that a
 policy holding a *large* static field summarizes it instead
 (`FixedSchedule(n_steps=200, total=200.0)`, {ref}`eki-schedules`), since the
@@ -2090,21 +2159,47 @@ written independently of the code under test. The suite must verify at least:
    evaluations, **and completes under `max_steps == T`** — the executable form
    of the exhaustion-before-bound ordering of {ref}`eki-step`, and a
    regression test for the inversion that would make the natural `max_steps`
-   always raise. A schedule whose `increment` returns `None` ends the run with
-   `status="schedule_exhausted"` and a terminal record. The shipped defaults
-   are mutually reachable: a budgeted adaptive schedule at
-   `min_increment=1e-3` never raises at `max_steps=1000`, asserted by
-   arithmetic on the two defaults rather than by running $10^3$ steps. **Both** adaptive schedules reach `beta_final` without
-   overshoot, never return a non-positive increment, respect the documented
-   clamp precedence of {ref}`eki-adaptive` (a case where the floor binds, a
-   case where the budget cap beats the floor, a case where `max_increment`
-   binds), and take the largest allowed step when every misfit is identical.
+   always raise. A schedule whose `next_increment` returns `None` ends the run
+   with `status="schedule_exhausted"` and a terminal record.
+
+   **Both** adaptive schedules reach `beta_target` to within `budget_tol`
+   without ever exceeding it, leave the exhaustion check true on arrival,
+   never return a non-positive increment, and respect the clamp precedence of
+   {ref}`eki-adaptive` — a case where the floor binds, a case where the budget
+   cap beats the floor, and a case where `max_increment` binds. Each takes
+   exactly $\min(\delta_{\max}, \beta_{\text{target}} - \beta)$ when every
+   misfit is identical, and each runs unbounded (`beta_target=None`) without
+   raising, which is the executable form of the conditional budget term.
+
+   **Rung counts are asserted exactly, not approximately**, by an instrumented
+   model: a budgeted schedule whose criterion is `inf` and whose ceiling is
+   $0.3$ against a budget of 1 takes exactly four rungs, with increments
+   $(0.3, 0.3, 0.3, 0.1)$. One test pins the `>=` in the exhaustion check,
+   `budget_tol`, cap-beats-floor, and the absence of a trailing dribble rung.
+
    `AdaptiveESSSchedule`'s returned increment attains its ESS target before
-   the floor is applied. `AdaptiveMisfitSchedule` returns the larger of its two
-   bounds, with a test for each regime — the mean bound binding when the misfit
-   coefficient of variation exceeds $\sqrt{2/N}$ and the variance bound below
-   it — and is `inf`-guarded rather than `nan` at zero misfit spread, at zero
-   mean misfit, and at `theta = 0`.
+   the floor is applied — asserted at a **small `n_bisect`**, since at the
+   default of 50 the two bracket ends differ by $2^{-50}$ and no float64
+   tolerance can tell them apart, so the obligation would not distinguish
+   returning `lo` from returning `hi`. A second test reproduces the increment
+   against a hand-written bisection at the same `n_bisect`, pinning the
+   iteration count and the log-space computation together. Both run in the
+   interior regime, with neither clamp binding.
+
+   `AdaptiveMisfitSchedule` returns the larger of its two bounds, with a test
+   for each regime — the mean bound binding when the misfit coefficient of
+   variation exceeds $1/\sqrt{\theta}$ and the variance bound below it — and
+   is `inf`-guarded rather than `nan` at zero misfit spread and at zero mean
+   misfit. A `nan` misfit must **not** yield the largest allowed step, which
+   the single-`where` guard would deliver silently.
+
+   **The entry-time budget check** of {ref}`eki-driver` raises before the
+   first evaluation when `max_steps` cannot accommodate the schedule's own
+   floor-bound worst case, and does not raise at the shipped defaults. Both
+   halves are asserted by arithmetic on the attributes rather than by running
+   $10^3$ steps; a scaled-down ladder (`beta_target=0.01`,
+   `min_increment=1e-3`, `max_steps=10`) exercises the bound executably at 1%
+   of the cost.
 5. **The ESS criterion.** `effective_sample_size` is $J$ at zero increment,
    monotone non-increasing along a grid of increments, correct against a
    direct small-value computation, equal to $J/(1+\mathrm{cv}^2)$ for the
