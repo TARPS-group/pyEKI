@@ -549,9 +549,9 @@ class PSDLowRank(PSDLinOp):
     :func:`~pyeki.linalg.debug_checks`.
 
     Construction validates the rank and sizes of ``F`` always, and its
-    finiteness in debug mode — the same tier-4 check :class:`DensePSD`
-    applies to its own factor, since a non-finite factor makes every
-    operation ``nan`` with no exception.
+    finiteness when debug checks are enabled — the same check
+    :class:`DensePSD` applies to its own factor, since a non-finite factor
+    makes every operation ``nan`` with no exception.
     """
 
     F: Array

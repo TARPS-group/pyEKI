@@ -478,8 +478,8 @@ def test_3_sqrt_transform_satisfies_the_stably_formed_invariant(J, N, sigma_max)
 
 
 @pytest.mark.parametrize(("J", "N"), [(6, 9), (50, 60)], ids=["small", "large-J"])
-def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centring(J, N):
-    """T = T^T for every s; T 1 = 1 for mean-centred s only.
+def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centering(J, N):
+    """T = T^T for every s; T 1 = 1 for mean-centered s only.
 
     Both terms of the tolerance are needed and both scale. The mean shift the
     modifier induces is O((eps sigma_max)^2), but the *computed* T @ 1 carries
@@ -502,7 +502,7 @@ def test_3_sqrt_transform_is_symmetric_and_preserves_mean_centring(J, N):
         shift = np.abs(T @ np.ones(J) - 1.0).max()
         assert shift <= 8 * J * EPS + 16 * (EPS * sigma_max) ** 2
 
-    # on general (uncentred) s no such identity holds
+    # on general (uncentered) s no such identity holds
     general = jnp.asarray(RNG.normal(size=(J, N)) + 5.0)
     assert np.abs(np.asarray(sqrt_transform(general)) @ np.ones(J) - 1.0).max() > 0.1
 
@@ -877,7 +877,7 @@ def test_10_conditioning_call_validation():
 
     wrong_side = DensePSD.from_matrix(jnp.asarray(_psd(N + 1)))
     for call in calls(y, wrong_side):
-        with pytest.raises(ValueError, match="side 4"):
+        with pytest.raises(ValueError, match="dimension 4"):
             call()
 
 
@@ -1332,8 +1332,8 @@ def test_regression_mixing_perturbation_representations_corrupts_the_update():
     assert np.abs(WL - np.eye(N)).max() > 0.1
 
 
-def test_regression_uncentred_transform_shifts_the_ensemble_mean():
-    """T 1 = 1 holds only for mean-centred s, and the update depends on it.
+def test_regression_uncentered_transform_shifts_the_ensemble_mean():
+    """T 1 = 1 holds only for mean-centered s, and the update depends on it.
 
     Building s from raw samples rather than anomalies still produces a
     perfectly valid (I + s s^T)^-1/2 — no exception, no shape error — but it no
@@ -1343,26 +1343,26 @@ def test_regression_uncentred_transform_shifts_the_ensemble_mean():
     """
     J, P, N = 6, 3, 4
     U, V, R, y = _problem(J, P, N)
-    V = V + 20.0  # a large mean makes the uncentred error unmistakable
+    V = V + 20.0  # a large mean makes the uncentered error unmistakable
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
     joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, _ = _dense_posterior(U, V, R, y)
 
-    # the layer centres, so its transform fixes the ones vector and the
+    # the layer centers, so its transform fixes the ones vector and the
     # updated ensemble's mean is the posterior mean
-    centred = jnp.asarray(_scaled_whitened_anomalies(V, noise_cov, J))
+    centered = jnp.asarray(_scaled_whitened_anomalies(V, noise_cov, J))
     np.testing.assert_allclose(
-        sqrt_transform(centred) @ jnp.ones(J), jnp.ones(J), rtol=0, atol=1e3 * EPS
+        sqrt_transform(centered) @ jnp.ones(J), jnp.ones(J), rtol=0, atol=1e3 * EPS
     )
     members = np.asarray(joint.transform_update(jnp.asarray(y), noise_cov))
     np.testing.assert_allclose(
         members.mean(axis=0), m_post, rtol=0, atol=1e3 * EPS * np.abs(m_post).max()
     )
 
-    # the uncentred version does not, and shifts the mean
+    # the uncentered version does not, and shifts the mean
     W = _recovered_whitener(noise_cov, N)
-    uncentred = jnp.asarray(V @ W.T / np.sqrt(J - 1))
-    T_bad = sqrt_transform(uncentred)
+    uncentered = jnp.asarray(V @ W.T / np.sqrt(J - 1))
+    T_bad = sqrt_transform(uncentered)
     assert np.abs(np.asarray(T_bad) @ np.ones(J) - 1.0).max() > 0.1
     Au = U - U.mean(axis=0)
     shifted = m_post + np.asarray(T_bad @ jnp.asarray(Au))
@@ -1391,17 +1391,17 @@ def test_regression_svd_gradient_is_nan_at_an_exactly_collapsed_operand():
         jnp.all(jnp.isfinite(jax.grad(lambda s: jnp.sum(sqrt_transform(s)))(generic)))
     )
 
-    # and so does the float-generic degeneracy of mean-centring: at N >= J the
+    # and so does the float-generic degeneracy of mean-centering: at N >= J the
     # smallest singular value is ~1e-16, which is not an exact tie
     A = RNG.normal(size=(5, 7))
-    centred = jnp.asarray((A - A.mean(axis=0)) / np.sqrt(4))
-    sigma = np.linalg.svd(np.asarray(centred), compute_uv=False)
+    centered = jnp.asarray((A - A.mean(axis=0)) / np.sqrt(4))
+    sigma = np.linalg.svd(np.asarray(centered), compute_uv=False)
     assert sigma[-1] < 1e-14 and sigma[-1] != 0.0
     for fn in (
         lambda s: jnp.sum(sqrt_transform(s)),
         lambda s: jnp.sum(gain_weights(s, jnp.ones(7))),
     ):
-        assert bool(jnp.all(jnp.isfinite(jax.grad(fn)(centred))))
+        assert bool(jnp.all(jnp.isfinite(jax.grad(fn)(centered))))
 
 
 def test_regression_singular_noise_covariance_yields_nan_without_raising():
@@ -1459,7 +1459,7 @@ def test_regression_all_three_methods_report_a_nan_result_in_debug_mode():
             lambda: joint.transform_update(jnp.asarray(y), singular),
             lambda: joint.condition(jnp.asarray(y), singular),
         ):
-            with pytest.raises(ValueError, match="is not finite"):
+            with pytest.raises(ValueError, match="must be finite"):
                 call()
         # the message points at the cause the check cannot itself detect
         with pytest.raises(ValueError, match="singular noise_cov"):
@@ -1517,7 +1517,7 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
     """Whitening the anomalies and the residuals in two calls costs 2J
     applications of W in the stochastic update, twice what is needed.
 
-    Whitening is linear, so it commutes with centring and with subtracting y:
+    Whitening is linear, so it commutes with centering and with subtracting y:
     one call on the J + 1 stacked rows [V; y] yields every whitened quantity
     the kernel needs. For a dense whitener those applications are the dominant
     O(J N^2) term, so a second call is a silent 2x — it produces correct
@@ -1539,7 +1539,7 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
         assert applied == J + 1, f"{name} whitened {applied} vectors, expected {J + 1}"
 
     # and the numbers are unchanged by the grouping: the dense reference
-    # centres before whitening, the implementation whitens before centring
+    # centers before whitening, the implementation whitens before centering
     plain = DensePSD.from_matrix(jnp.asarray(R))
     m_post, _ = _dense_posterior(U, V, R, y)
     np.testing.assert_allclose(
@@ -1550,11 +1550,11 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
     )
 
 
-def test_regression_anomalies_are_centred_before_whitening():
-    """The kernel must centre before whitening, and only accuracy shows it.
+def test_regression_anomalies_are_centered_before_whitening():
+    """The kernel must center before whitening, and only accuracy shows it.
 
     Whitening is linear, so the two groupings give the same S in exact
-    arithmetic — but not the same accuracy. Centring *whitened* predictions
+    arithmetic — but not the same accuracy. Centering *whitened* predictions
     makes the cancellation ratio ||W v_bar|| / ||W a_j|| rather than
     ||v_bar|| / ||a_j||, so the error grows with kappa(W) = sqrt(kappa(R))
     when the prediction mean lies along a precise direction of the noise.
@@ -1582,7 +1582,7 @@ def test_regression_anomalies_are_centred_before_whitening():
     joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     shipped = np.asarray(joint.condition(y, noise_cov).mean)
 
-    # the same kernel, whitening before centring -- the reverted grouping
+    # the same kernel, whitening before centering -- the reverted grouping
     whitened_v = np.asarray(noise_cov.whiten(jnp.asarray(V)))
     s_bad = (whitened_v - whitened_v.mean(axis=0)) / np.sqrt(J - 1)
     r_bad = np.asarray(noise_cov.whiten(y)) - whitened_v.mean(axis=0)
@@ -1701,7 +1701,7 @@ def test_regression_check_order_with_two_simultaneous_violations():
         joint.transform_update(bad_y, family)
 
     # the side check stays behind the capability check but ahead of y
-    with pytest.raises(ValueError, match="side"):
+    with pytest.raises(ValueError, match="dimension"):
         joint.transform_update(bad_y, DensePSD.from_matrix(jnp.asarray(_psd(N + 1))))
 
     # and the family guard on the joint precedes everything

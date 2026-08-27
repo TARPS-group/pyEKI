@@ -26,8 +26,8 @@ Conventions shared by everything in the module:
 - **Anomalies are raw deviations from the sample mean**, with no
   normalization folded in, and **empirical covariances use the divisor**
   :math:`J - 1`.
-- **Vectors passed to methods are exactly core-shaped**: an observation is a
-  ``(N,)`` array, a mean a ``(dim,)`` array. A family of distributions or
+- **Vectors passed to methods carry no batch axes**: an observation is a
+  ``(N,)`` array and a mean a ``(dim,)`` array, exactly. A family of distributions or
   updates is expressed with :func:`jax.vmap` over the pytree, never with
   stored batch axes. The two conditioning primitives are the exception —
   they are array-level and follow the operator layer's batch contract — as
@@ -83,220 +83,15 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from .linalg import PSDLinOp, PSDLowRank, dense_matvec, linop, value_check
-from .linalg.base import _broadcast_batch
+from .linalg import PSDLinOp, PSDLowRank, dense_matvec, value_check
+from .linalg.base import _broadcast_batch, _pytree_dataclass
 
 __all__ = ["EnsembleJoint", "Gaussian", "gain_weights", "sqrt_transform"]
 
 
 # ---------------------------------------------------------------------------
-# validation helpers
+# the conditioning primitives
 # ---------------------------------------------------------------------------
-
-
-def _check_field_rank(cls_name: str, field_name: str, value, core_ndim: int) -> None:
-    """Tier 2: an array field has exactly its core rank, with positive sizes.
-
-    Objects in this layer are unbatched; a family is built with
-    :func:`jax.vmap` over the pytree, never by storing extra leading axes.
-    Enforcing that in the constructor is safe because pytree unflattening
-    bypasses it.
-
-    Raises
-    ------
-    TypeError
-        If the field has no shape at all — a list, a tuple, a scalar. These
-        checks are unconditional, so a field that cannot be inspected is
-        rejected rather than waved through: passing it silences every check
-        that follows, including those on the *other* field, and yields an
-        object whose every accessor raises ``AttributeError`` instead. Arrays
-        that merely are not JAX arrays, such as NumPy's, have a shape and are
-        accepted.
-    """
-    ndim = getattr(value, "ndim", None)
-    if ndim is None:
-        raise TypeError(
-            f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, got "
-            f"{type(value).__name__}, which has no shape to check. Pass a JAX "
-            f"array — jnp.asarray() on a nested list."
-        )
-    if ndim != core_ndim:
-        raise ValueError(
-            f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, got "
-            f"shape {value.shape}. Objects in pyeki.gauss are unbatched; build a "
-            f"family with jax.vmap over the pytree, not with extra leading axes."
-        )
-    if any(size < 1 for size in value.shape):
-        raise ValueError(
-            f"{cls_name}.{field_name}: core sizes must be positive, got shape "
-            f"{value.shape}."
-        )
-
-
-def _check_batched_operand(where: str, name: str, x, size: int) -> Array:
-    """Tier 3: a batched vector operand — rank at least 1, trailing axis ``size``.
-
-    Without this check a short operand broadcasts against the core arrays and
-    the call returns a finite, plausible, wrong number.
-    """
-    x = jnp.asarray(x)
-    if x.ndim < 1 or x.shape[-1] != size:
-        raise ValueError(
-            f"{where}: expected {name} of core shape (..., {size}), got shape "
-            f"{x.shape}"
-        )
-    return x
-
-
-def _check_core_vector(where: str, name: str, x, size: int) -> Array:
-    """Tier 3: an exactly core-shaped vector operand — rank 1, length ``size``.
-
-    Unlike operator operands, the vectors these classes take carry no batch
-    axes: a family of updates is :func:`jax.vmap` over the method.
-    """
-    x = jnp.asarray(x)
-    if x.ndim != 1 or x.shape[0] != size:
-        raise ValueError(
-            f"{where}: expected {name} of shape ({size},), got shape {x.shape}. "
-            f"This argument takes no batch axes; map a family of calls with "
-            f"jax.vmap over the method."
-        )
-    return x
-
-
-def _check_not_family(obj, operation: str) -> None:
-    """Refuse an operation on a vmapped family, before any other check."""
-    batch = obj.batch_shape
-    if batch != ():
-        raise ValueError(
-            f"{obj!r}.{operation}: a vmapped family cannot be used directly; its "
-            f"batch shape is {batch}. Apply it under jax.vmap, member by member."
-        )
-
-
-def _check_operator_side(where: str, name: str, op, size: int) -> None:
-    """Tier 3: an operator argument has the side the core shapes require."""
-    if op.shape[0] != size:
-        raise ValueError(
-            f"{where}: expected {name} of side {size}, got {op!r} of shape "
-            f"{op.shape}"
-        )
-
-
-def _require(op, *names: str) -> None:
-    """Demand operations of a covariance, in order, raising from the operator layer.
-
-    The ``UnsupportedOpError`` is constructed by the operator that lacks the
-    operation and propagated unmodified: this layer never wraps it and never
-    falls back to dense linear algebra on the caller's behalf.
-    """
-    for name in names:
-        op._require(name)
-
-
-def _check_finite(where: str, name: str, x) -> None:
-    """Tier 4: finiteness of an operand, when debug checks are enabled."""
-    value_check(
-        x,
-        lambda arr: bool(jnp.all(jnp.isfinite(arr))),
-        f"{where}: {name} must be finite",
-    )
-
-
-def _check_result_finite(where: str, name: str, x) -> None:
-    """Tier 4: finiteness of a computed result, when debug checks are enabled.
-
-    A postcondition rather than a precondition: it reads a value this layer
-    produced, not one the caller supplied. It exists because a conditioning
-    result becomes the *next* iteration's input — a ``nan`` ensemble is fed
-    straight to an expensive forward-model evaluation, and a model that
-    returns finite nonsense for ``nan`` parameters launders it beyond
-    recovery. The likeliest cause is a singular noise covariance, which
-    nothing here can detect before the fact, so this after-the-fact check is
-    the only cheap detection available for it.
-    """
-    value_check(
-        x,
-        lambda arr: bool(jnp.all(jnp.isfinite(arr))),
-        f"{where}: {name} is not finite. The likeliest cause is a singular "
-        f"noise_cov: whiten's precondition is that the noise covariance is "
-        f"nonsingular, and nothing here can detect a violation before the fact.",
-    )
-
-
-# ---------------------------------------------------------------------------
-# the conditioning kernel
-# ---------------------------------------------------------------------------
-
-
-def _centred(x: Array) -> Array:
-    """Deviations from the sample mean over the member axis, formed stably.
-
-    Mathematically :math:`x - \\mathbf{1}\\bar x^\\top`, computed by removing
-    the first member before averaging. Two things follow, neither of them true
-    of a direct subtraction of :func:`jax.numpy.mean`:
-
-    - **Identical members give exactly zero.** ``jnp.mean`` of :math:`J`
-      bit-identical rows sums and divides, which does not in general return
-      the value it was given, so a collapsed ensemble otherwise acquires
-      spurious anomalies of about :math:`\\varepsilon\\lvert\\bar x\\rvert`.
-      The gain amplifies those into a wrong, finite, ``nan``-free update once
-      the members are large: at :math:`v \\equiv 6\\times10^{23}` the spurious
-      update is of order 1 where the exact answer is no update at all.
-    - **Cancellation is governed by the spread, not the magnitude.** The error
-      is :math:`O(\\varepsilon \\max_j \\lvert x_j - x_0 \\rvert)` rather than
-      :math:`O(\\varepsilon \\max_j \\lvert x_j \\rvert)`, which matters
-      whenever the mean is large relative to the anomalies — a converged
-      ensemble, late in a tempering run.
-    """
-    shifted = x - x[..., :1, :]
-    return shifted - jnp.mean(shifted, axis=-2)
-
-
-def _thin_svd(s: Array) -> tuple[Array, Array, Array]:
-    """Thin SVD :math:`s = U \\Sigma V^\\top`, as ``(U, sigma, Vt)``.
-
-    Shapes are ``(J, rho)``, ``(rho,)`` and ``(rho, N)`` for
-    ``rho = min(J, N)``. The single SVD call site of the module: a class
-    method calls this once and feeds both pieces below, so "one method call,
-    one SVD" holds by construction.
-    """
-    return jnp.linalg.svd(s, full_matrices=False)
-
-
-def _weights_from_svd(U: Array, sigma: Array, Vt: Array, b: Array) -> Array:
-    """Apply the gain multipliers in the whitened SVD basis.
-
-    Computes :math:`U \\operatorname{diag}(\\sigma_i/(1+\\sigma_i^2)) V^\\top b`,
-    contracting the trailing axis of ``b`` and carrying its batch axes.
-    Neither :math:`s^\\top s` nor :math:`s s^\\top` appears.
-    """
-    coefficients = dense_matvec(Vt, b) * (sigma / (1.0 + sigma**2))
-    return dense_matvec(U, coefficients)
-
-
-def _transform_from_svd(U: Array, sigma: Array, n_members: int) -> Array:
-    """Assemble :math:`T = I_J + U((I+\\Sigma^2)^{-1/2} - I)U^\\top`.
-
-    The identity completion is what makes this exact at every rank: for a
-    thin SVD the naive :math:`U(I+\\Sigma^2)^{-1/2}U^\\top` omits the identity
-    on the orthogonal complement of :math:`U`'s columns and is simply wrong
-    whenever :math:`\\rho < J`.
-
-    :math:`T\\mathbf{1} = \\mathbf{1}` survives floating point for
-    mean-centred input because the modifier decays *quadratically*: the
-    numerically-zero singular value's column of :math:`U` need not be
-    orthogonal to :math:`\\mathbf{1}`, but its modifier is
-    :math:`O(\\sigma_i^2)`, so the induced mean shift is
-    :math:`O((\\varepsilon\\sigma_{\\max})^2)` rather than
-    :math:`O(\\varepsilon\\sigma_{\\max})`. Computed as written, the modifier
-    is in fact exactly ``0.0`` once :math:`\\sigma_i^2` falls below the
-    resolution of ``1.0``, which is the same bound reached the short way.
-    """
-    modifier = 1.0 / jnp.sqrt(1.0 + sigma**2) - 1.0
-    # (J, rho) @ (rho, J): both operands are core-shaped, so this is the
-    # plain matrix product, not a batch of vectors.
-    return jnp.eye(n_members, dtype=U.dtype) + (U * modifier) @ U.swapaxes(-1, -2)
 
 
 def gain_weights(s: Array, b: Array) -> Array:
@@ -352,7 +147,7 @@ def gain_weights(s: Array, b: Array) -> Array:
     ``(J, N)`` operand.
 
     Callers own the semantics of ``s`` and ``b``. The function cannot check
-    that they are scaled, whitened and centred as conditioning requires,
+    that they are scaled, whitened and centered as conditioning requires,
     which is why the methods of :class:`EnsembleJoint` — where those
     conventions are enforced — are the default interface and this is the
     escape hatch.
@@ -362,7 +157,7 @@ def gain_weights(s: Array, b: Array) -> Array:
     exactly collapsed ``s``, or the zero-padded columns a masked local
     analysis may produce — the SVD's gradient is ``nan`` even though this
     function is smooth there, equalling the rational form above. The
-    float-generic degeneracy of mean-centring (:math:`\\sigma_{\\min} \\sim
+    float-generic degeneracy of mean-centering (:math:`\\sigma_{\\min} \\sim
     10^{-16}` when :math:`N \\ge J`) is not an exact tie and differentiates
     finitely.
     """
@@ -410,7 +205,7 @@ def sqrt_transform(s: Array) -> Array:
     ----------
     s
         Array of shape ``(J, N)``, exactly 2-D, both sizes at least 1. No
-        batch axes, and no centring requirement: on general ``s`` the result
+        batch axes, and no centering requirement: on general ``s`` the result
         is still :math:`(I + ss^\\top)^{-1/2}`.
 
     Returns
@@ -429,7 +224,7 @@ def sqrt_transform(s: Array) -> Array:
     :math:`T\\mathbf{1} = \\mathbf{1}` — so transformed anomalies still sum
     to zero and a posterior ensemble's mean is not silently shifted —
     follows from :math:`\\mathbf{1}^\\top s = 0` and holds only for such
-    mean-centred ``s``, which is the only case the conditioning kernel
+    mean-centered ``s``, which is the only case the conditioning kernel
     produces. On general ``s``, :math:`T\\mathbf{1}` is whatever that matrix
     makes it.
 
@@ -455,7 +250,7 @@ def sqrt_transform(s: Array) -> Array:
 # ---------------------------------------------------------------------------
 
 
-@linop
+@_pytree_dataclass
 class Gaussian:
     """A Gaussian distribution :math:`\\mathcal{N}(m, C)`.
 
@@ -564,8 +359,8 @@ class Gaussian:
         different factors, hence different samples from the same key. Only
         the distribution is shared.
         """
-        _check_not_family(self, "sample")
-        _require(self.cov, "factor")
+        _check_not_vmap_family(self, "sample")
+        _require_cov_ops(self.cov, "factor")
         if type(n_samples) is not int:
             raise TypeError(
                 f"{self!r}.sample: n_samples must be a Python int, got "
@@ -622,8 +417,8 @@ class Gaussian:
         shorter ``x`` would otherwise broadcast against ``mean`` and return a
         finite, plausible, wrong number.
         """
-        _check_not_family(self, "log_density")
-        _require(self.cov, "whiten", "logdet")
+        _check_not_vmap_family(self, "log_density")
+        _require_cov_ops(self.cov, "whiten", "logdet")
         where = f"{self!r}.log_density"
         x = _check_batched_operand(where, "x", x, self.n)
         _check_finite(where, "x", x)
@@ -648,7 +443,7 @@ class Gaussian:
 # ---------------------------------------------------------------------------
 
 
-@linop
+@_pytree_dataclass
 class EnsembleJoint:
     """The joint Gaussian determined by an ensemble's empirical moments.
 
@@ -768,13 +563,13 @@ class EnsembleJoint:
     @property
     def u_mean(self) -> Array:
         """The sample mean :math:`\\bar u`, a ``(P,)`` array."""
-        _check_not_family(self, "u_mean")
+        _check_not_vmap_family(self, "u_mean")
         return jnp.mean(self.u_samples, axis=-2)
 
     @property
     def v_mean(self) -> Array:
         """The sample mean :math:`\\bar v`, a ``(N,)`` array."""
-        _check_not_family(self, "v_mean")
+        _check_not_vmap_family(self, "v_mean")
         return jnp.mean(self.v_samples, axis=-2)
 
     @property
@@ -783,107 +578,15 @@ class EnsembleJoint:
 
         A ``(J, P)`` array.
         """
-        _check_not_family(self, "u_anomalies")
-        return _centred(self.u_samples)
+        _check_not_vmap_family(self, "u_anomalies")
+        return _centered(self.u_samples)
 
     @property
     def v_anomalies(self) -> Array:
         """The anomalies :math:`A_v`, a ``(J, N)`` array."""
-        _check_not_family(self, "v_anomalies")
-        return _centred(self.v_samples)
+        _check_not_vmap_family(self, "v_anomalies")
+        return _centered(self.v_samples)
 
-    def _validate_call(self, method: str, y, noise_cov) -> tuple[Array, str]:
-        """Run the shared checks of a conditioning call.
-
-        Returns the validated ``y`` and the call's description, which the
-        method reuses for its result check rather than rebuilding it.
-
-        In the operator layer's order, with one departure the type system
-        forces: the family guard, then ``noise_cov``'s type and family —
-        which must precede the capability check, since ``supports`` cannot
-        be consulted on an object not known to be an operator — then the
-        capability check, then the remaining operand shapes, then, in debug
-        mode, operand value checks. Result checks run last, in the method,
-        once there is a result to check.
-        """
-        _check_not_family(self, method)
-        where = f"{self!r}.{method}"
-        if not isinstance(noise_cov, PSDLinOp):
-            raise TypeError(
-                f"{where}: noise_cov must be a pyeki.linalg.PSDLinOp, got "
-                f"{type(noise_cov).__name__}"
-            )
-        if noise_cov.batch_shape != ():
-            raise ValueError(
-                f"{where}: noise_cov is a vmapped family with batch shape "
-                f"{noise_cov.batch_shape}; apply a family of noise operators "
-                f"with jax.vmap over the method, not directly."
-            )
-        _require(noise_cov, "whiten")
-        _check_operator_side(where, "noise_cov", noise_cov, self.v_dim)
-        y = _check_core_vector(where, "y", y, self.v_dim)
-        _check_finite(where, "y", y)
-        return y, where
-
-    def _whiten_anomalies_and_residual(self, y, noise_cov):
-        """Apply :math:`W` to the prediction anomalies and to the mean residual.
-
-        Returns :math:`(W a_j` for each :math:`j`, :math:`W(y - \\bar v))`, of
-        shapes ``(J, N)`` and ``(N,)``, from a single ``whiten`` call on the
-        :math:`J + 1` stacked rows :math:`[A_v;\\, y - \\bar v]`. Every
-        whitened quantity the kernel needs follows: :math:`S` is the first
-        block over :math:`\\sqrt{J-1}`, the deterministic paths want the
-        second as it stands, and the stochastic path's per-member residual is
-        :math:`W(y - v_j) = W(y - \\bar v) - W a_j`. Whitening the anomalies
-        and the residuals in two calls would instead cost :math:`2J`
-        applications of :math:`W` in the stochastic update, which for a dense
-        whitener is the dominant term.
-
-        Centring and differencing happen *before* the whitener is applied,
-        deliberately. Whitening is linear, so the orders agree in exact
-        arithmetic — but they are not equally stable. Centring *whitened*
-        predictions makes the cancellation ratio
-        :math:`\\lVert W\\bar v\\rVert / \\lVert W a_j \\rVert` in place of
-        :math:`\\lVert \\bar v\\rVert / \\lVert a_j \\rVert`, so the error
-        grows with :math:`\\kappa(W) = \\sqrt{\\kappa(R)}` whenever the
-        prediction mean is aligned with a precise direction of the noise.
-        Whitening last costs nothing and avoids it.
-        """
-        anomalies = _centred(self.v_samples)
-        residual = y - jnp.mean(self.v_samples, axis=-2)
-        stacked = jnp.concatenate([anomalies, residual[None, :]], axis=-2)
-        whitened = noise_cov.whiten(stacked)
-        return whitened[..., :-1, :], whitened[..., -1, :]
-
-    def _conditioning_svd(self, whitened_anomalies: Array):
-        """The thin SVD of :math:`S = A_v W^\\top/\\sqrt{J-1}`, computed once."""
-        return _thin_svd(whitened_anomalies / math.sqrt(self.n_members - 1))
-
-    def _posterior_mean_and_transform(self, y, noise_cov) -> tuple[Array, Array]:
-        """The posterior mean and the transform :math:`T`, from a single SVD.
-
-        Shared by :meth:`transform_update` and :meth:`condition`, which are
-        two representations of the same posterior, so computing it once makes
-        them agree by construction.
-        """
-        whitened_anomalies, whitened_residual = self._whiten_anomalies_and_residual(
-            y, noise_cov
-        )
-        U, sigma, Vt = self._conditioning_svd(whitened_anomalies)
-        mean = self.u_mean + self._combine_anomalies(
-            _weights_from_svd(U, sigma, Vt, whitened_residual)
-        )
-        return mean, _transform_from_svd(U, sigma, self.n_members)
-
-    def _combine_anomalies(self, weights: Array) -> Array:
-        """Apply the :math:`u`-anomalies to weights: :math:`A_u^\\top w/\\sqrt{J-1}`.
-
-        Carries any batch axes of ``weights``, so one call handles both a
-        single weight vector and the :math:`J` per-member vectors of a
-        stochastic update.
-        """
-        anomalies = self.u_anomalies.swapaxes(-1, -2)  # (P, J)
-        return dense_matvec(anomalies, weights) / math.sqrt(self.n_members - 1)
 
     def pathwise_update(self, key, y, noise_cov) -> Array:
         """The stochastic (perturbed-observation) update: ``(J, P)``.
@@ -970,7 +673,7 @@ class EnsembleJoint:
         members = self.u_samples + self._combine_anomalies(
             _weights_from_svd(U, sigma, Vt, b)
         )
-        _check_result_finite(where, "the updated ensemble", members)
+        _check_finite(where, "the updated ensemble", members, cause=_SINGULAR_NOISE)
         return members
 
     def transform_update(self, y, noise_cov) -> Array:
@@ -991,7 +694,7 @@ class EnsembleJoint:
         posterior mean and its sample covariance (divisor :math:`J - 1`)
         equals the posterior covariance, both in exact arithmetic. Because
         :math:`T\\mathbf{1} = \\mathbf{1}`, the transformed anomalies remain
-        centred, so the two summands really are the posterior mean and the
+        centered, so the two summands really are the posterior mean and the
         posterior anomalies.
 
         Parameters
@@ -1028,10 +731,10 @@ class EnsembleJoint:
         """
         y, where = self._validate_call("transform_update", y, noise_cov)
         mean, transform = self._posterior_mean_and_transform(y, noise_cov)
-        # (J, J) @ (J, P): both operands are core-shaped, so this is the
+        # (J, J) @ (J, P): both operands are exactly 2-D, so this is the
         # plain matrix product, not a batch of vectors.
         members = mean + transform @ self.u_anomalies
-        _check_result_finite(where, "the updated ensemble", members)
+        _check_finite(where, "the updated ensemble", members, cause=_SINGULAR_NOISE)
         return members
 
     def condition(self, y, noise_cov) -> Gaussian:
@@ -1108,8 +811,10 @@ class EnsembleJoint:
         # Both halves of the result, checked before the covariance and the
         # distribution are built, so the diagnosis names this call rather
         # than a constructor further down.
-        _check_result_finite(where, "the posterior mean", mean)
-        _check_result_finite(where, "the posterior covariance factor", factor)
+        _check_finite(where, "the posterior mean", mean, cause=_SINGULAR_NOISE)
+        _check_finite(
+            where, "the posterior covariance factor", factor, cause=_SINGULAR_NOISE
+        )
         return Gaussian(mean, PSDLowRank(factor))
 
     def __repr__(self) -> str:
@@ -1123,3 +828,299 @@ class EnsembleJoint:
         except Exception:
             return "<EnsembleJoint (unprintable leaves)>"
         return f"vmapped({base}, batch={batch})" if batch != () else base
+
+    # -- private: call validation, and the whitened-SVD assembly --
+    def _validate_call(self, method: str, y, noise_cov) -> tuple[Array, str]:
+        """Run the shared checks of a conditioning call.
+
+        Returns the validated ``y`` and the call's description, which the
+        method reuses for its result check rather than rebuilding it.
+
+        In the operator layer's order, with one departure the type system
+        forces: the family guard, then ``noise_cov``'s type and family —
+        which must precede the capability check, since ``supports`` cannot
+        be consulted on an object not known to be an operator — then the
+        capability check, then the remaining operand shapes, then, in debug
+        mode, operand value checks. Result checks run last, in the method,
+        once there is a result to check.
+        """
+        _check_not_vmap_family(self, method)
+        where = f"{self!r}.{method}"
+        if not isinstance(noise_cov, PSDLinOp):
+            raise TypeError(
+                f"{where}: noise_cov must be a pyeki.linalg.PSDLinOp, got "
+                f"{type(noise_cov).__name__}"
+            )
+        if noise_cov.batch_shape != ():
+            raise ValueError(
+                f"{where}: noise_cov is a vmapped family with batch shape "
+                f"{noise_cov.batch_shape}; apply a family of noise operators "
+                f"with jax.vmap over the method, not directly."
+            )
+        _require_cov_ops(noise_cov, "whiten")
+        _check_noise_cov_dim(where, noise_cov, self.v_dim)
+        y = _check_unbatched_operand(where, "y", y, self.v_dim)
+        _check_finite(where, "y", y)
+        return y, where
+
+    def _whiten_anomalies_and_residual(self, y, noise_cov):
+        """Apply :math:`W` to the prediction anomalies and to the mean residual.
+
+        Returns :math:`(W a_j` for each :math:`j`, :math:`W(y - \\bar v))`, of
+        shapes ``(J, N)`` and ``(N,)``, from a single ``whiten`` call on the
+        :math:`J + 1` stacked rows :math:`[A_v;\\, y - \\bar v]`. Every
+        whitened quantity the kernel needs follows: :math:`S` is the first
+        block over :math:`\\sqrt{J-1}`, the deterministic paths want the
+        second as it stands, and the stochastic path's per-member residual is
+        :math:`W(y - v_j) = W(y - \\bar v) - W a_j`. Whitening the anomalies
+        and the residuals in two calls would instead cost :math:`2J`
+        applications of :math:`W` in the stochastic update, which for a dense
+        whitener is the dominant term.
+
+        Centering and differencing happen *before* the whitener is applied,
+        deliberately. Whitening is linear, so the orders agree in exact
+        arithmetic — but they are not equally stable. Centering *whitened*
+        predictions makes the cancellation ratio
+        :math:`\\lVert W\\bar v\\rVert / \\lVert W a_j \\rVert` in place of
+        :math:`\\lVert \\bar v\\rVert / \\lVert a_j \\rVert`, so the error
+        grows with :math:`\\kappa(W) = \\sqrt{\\kappa(R)}` whenever the
+        prediction mean is aligned with a precise direction of the noise.
+        Whitening last costs nothing and avoids it.
+        """
+        anomalies = _centered(self.v_samples)
+        residual = y - jnp.mean(self.v_samples, axis=-2)
+        stacked = jnp.concatenate([anomalies, residual[None, :]], axis=-2)
+        whitened = noise_cov.whiten(stacked)
+        return whitened[..., :-1, :], whitened[..., -1, :]
+
+    def _conditioning_svd(self, whitened_anomalies: Array):
+        """The thin SVD of :math:`S = A_v W^\\top/\\sqrt{J-1}`, computed once."""
+        return _thin_svd(whitened_anomalies / math.sqrt(self.n_members - 1))
+
+    def _posterior_mean_and_transform(self, y, noise_cov) -> tuple[Array, Array]:
+        """The posterior mean and the transform :math:`T`, from a single SVD.
+
+        Shared by :meth:`transform_update` and :meth:`condition`, which are
+        two representations of the same posterior, so computing it once makes
+        them agree by construction.
+        """
+        whitened_anomalies, whitened_residual = self._whiten_anomalies_and_residual(
+            y, noise_cov
+        )
+        U, sigma, Vt = self._conditioning_svd(whitened_anomalies)
+        mean = self.u_mean + self._combine_anomalies(
+            _weights_from_svd(U, sigma, Vt, whitened_residual)
+        )
+        return mean, _transform_from_svd(U, sigma, self.n_members)
+
+    def _combine_anomalies(self, weights: Array) -> Array:
+        """Apply the :math:`u`-anomalies to weights: :math:`A_u^\\top w/\\sqrt{J-1}`.
+
+        Carries any batch axes of ``weights``, so one call handles both a
+        single weight vector and the :math:`J` per-member vectors of a
+        stochastic update.
+        """
+        anomalies = self.u_anomalies.swapaxes(-1, -2)  # (P, J)
+        return dense_matvec(anomalies, weights) / math.sqrt(self.n_members - 1)
+
+
+# ---------------------------------------------------------------------------
+# private helpers: validation, and the conditioning kernel
+# ---------------------------------------------------------------------------
+
+
+def _check_field_rank(cls_name: str, field_name: str, value, core_ndim: int) -> None:
+    """Require an array field of exactly its own rank, with positive sizes.
+
+    Objects in this layer are unbatched; a family is built with
+    :func:`jax.vmap` over the pytree, never by storing extra leading axes.
+    Enforcing that in the constructor is safe because pytree unflattening
+    bypasses it.
+
+    Raises
+    ------
+    TypeError
+        If the field has no shape at all — a list, a tuple, a scalar. These
+        checks are unconditional, so a field that cannot be inspected is
+        rejected rather than waved through: passing it silences every check
+        that follows, including those on the *other* field, and yields an
+        object whose every accessor raises ``AttributeError`` instead. Arrays
+        that merely are not JAX arrays, such as NumPy's, have a shape and are
+        accepted.
+    """
+    ndim = getattr(value, "ndim", None)
+    if ndim is None:
+        raise TypeError(
+            f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, got "
+            f"{type(value).__name__}, which has no shape to check. Pass a JAX "
+            f"array — jnp.asarray() on a nested list."
+        )
+    if ndim != core_ndim:
+        raise ValueError(
+            f"{cls_name}.{field_name}: expected an array of rank {core_ndim}, got "
+            f"shape {value.shape}. Objects in pyeki.gauss are unbatched; build a "
+            f"family with jax.vmap over the pytree, not with extra leading axes."
+        )
+    if any(size < 1 for size in value.shape):
+        raise ValueError(
+            f"{cls_name}.{field_name}: core sizes must be positive, got shape "
+            f"{value.shape}."
+        )
+
+
+def _check_batched_operand(where: str, name: str, x, size: int) -> Array:
+    """Require an operand of shape ``(..., size)``, batch axes allowed.
+
+    Without this check a short operand broadcasts against the stored arrays
+    and the call returns a finite, plausible, wrong number.
+    """
+    x = jnp.asarray(x)
+    if x.ndim < 1 or x.shape[-1] != size:
+        raise ValueError(
+            f"{where}: expected {name} of core shape (..., {size}), got shape "
+            f"{x.shape}"
+        )
+    return x
+
+
+def _check_unbatched_operand(where: str, name: str, x, size: int) -> Array:
+    """Require an operand of shape exactly ``(size,)``, with no batch axes.
+
+    Unlike operator operands, the vectors these classes take carry no batch
+    axes: a family of updates is :func:`jax.vmap` over the method.
+    """
+    x = jnp.asarray(x)
+    if x.ndim != 1 or x.shape[0] != size:
+        raise ValueError(
+            f"{where}: expected {name} of shape ({size},), got shape {x.shape}. "
+            f"This argument takes no batch axes; map a family of calls with "
+            f"jax.vmap over the method."
+        )
+    return x
+
+
+def _check_not_vmap_family(obj, operation: str) -> None:
+    """Refuse an operation on a vmapped family, before any other check."""
+    batch = obj.batch_shape
+    if batch != ():
+        raise ValueError(
+            f"{obj!r}.{operation}: a vmapped family cannot be used directly; its "
+            f"batch shape is {batch}. Apply it under jax.vmap, member by member."
+        )
+
+
+def _check_noise_cov_dim(where: str, noise_cov, size: int) -> None:
+    """Require a noise covariance of the dimension the observed block has.
+
+    Noise covariances are square, so one dimension describes them.
+    """
+    if noise_cov.shape[0] != size:
+        raise ValueError(
+            f"{where}: expected noise_cov of dimension {size}, got "
+            f"{noise_cov!r} of shape {noise_cov.shape}"
+        )
+
+
+def _require_cov_ops(cov, *names: str) -> None:
+    """Demand operations of a covariance, in order, raising from the operator layer.
+
+    The ``UnsupportedOpError`` is constructed by the operator that lacks the
+    operation and propagated unmodified: this layer never wraps it and never
+    falls back to dense linear algebra on the caller's behalf.
+    """
+    for name in names:
+        cov._require(name)
+
+
+def _check_finite(where: str, name: str, x, *, cause: str | None = None) -> None:
+    """Require a finite array, only when debug checks are enabled.
+
+    Used both on arguments the caller supplied and on values this layer
+    produced. ``cause`` appends a hint to the message, for the results, where
+    the reason is not visible at the point the check fires.
+    """
+    hint = f" {cause}" if cause else ""
+    value_check(
+        x,
+        lambda arr: bool(jnp.all(jnp.isfinite(arr))),
+        f"{where}: {name} must be finite.{hint}",
+    )
+
+
+#: Why a conditioning result goes non-finite, which the check cannot itself see.
+_SINGULAR_NOISE = (
+    "The likeliest cause is a singular noise_cov: whiten's precondition is "
+    "that the noise covariance is nonsingular, and nothing here can detect a "
+    "violation before the fact."
+)
+
+
+def _centered(x: Array) -> Array:
+    """Deviations from the sample mean over the member axis, formed stably.
+
+    Mathematically :math:`x - \\mathbf{1}\\bar x^\\top`, computed by removing
+    the first member before averaging. Two things follow, neither of them true
+    of a direct subtraction of :func:`jax.numpy.mean`:
+
+    - **Identical members give exactly zero.** ``jnp.mean`` of :math:`J`
+      bit-identical rows sums and divides, which does not in general return
+      the value it was given, so a collapsed ensemble otherwise acquires
+      spurious anomalies of about :math:`\\varepsilon\\lvert\\bar x\\rvert`.
+      The gain amplifies those into a wrong, finite, ``nan``-free update once
+      the members are large: at :math:`v \\equiv 6\\times10^{23}` the spurious
+      update is of order 1 where the exact answer is no update at all.
+    - **Cancellation is governed by the spread, not the magnitude.** The error
+      is :math:`O(\\varepsilon \\max_j \\lvert x_j - x_0 \\rvert)` rather than
+      :math:`O(\\varepsilon \\max_j \\lvert x_j \\rvert)`, which matters
+      whenever the mean is large relative to the anomalies — a converged
+      ensemble, late in a tempering run.
+    """
+    shifted = x - x[..., :1, :]
+    return shifted - jnp.mean(shifted, axis=-2)
+
+
+def _thin_svd(s: Array) -> tuple[Array, Array, Array]:
+    """Thin SVD :math:`s = U \\Sigma V^\\top`, as ``(U, sigma, Vt)``.
+
+    Shapes are ``(J, rho)``, ``(rho,)`` and ``(rho, N)`` for
+    ``rho = min(J, N)``. The single SVD call site of the module: a class
+    method calls this once and feeds both pieces below, so "one method call,
+    one SVD" holds by construction.
+    """
+    return jnp.linalg.svd(s, full_matrices=False)
+
+
+def _weights_from_svd(U: Array, sigma: Array, Vt: Array, b: Array) -> Array:
+    """Apply the gain multipliers in the whitened SVD basis.
+
+    Computes :math:`U \\operatorname{diag}(\\sigma_i/(1+\\sigma_i^2)) V^\\top b`,
+    contracting the trailing axis of ``b`` and carrying its batch axes.
+    Neither :math:`s^\\top s` nor :math:`s s^\\top` appears.
+    """
+    coefficients = dense_matvec(Vt, b) * (sigma / (1.0 + sigma**2))
+    return dense_matvec(U, coefficients)
+
+
+def _transform_from_svd(U: Array, sigma: Array, n_members: int) -> Array:
+    """Assemble :math:`T = I_J + U((I+\\Sigma^2)^{-1/2} - I)U^\\top`.
+
+    The identity completion is what makes this exact at every rank: for a
+    thin SVD the naive :math:`U(I+\\Sigma^2)^{-1/2}U^\\top` omits the identity
+    on the orthogonal complement of :math:`U`'s columns and is simply wrong
+    whenever :math:`\\rho < J`.
+
+    :math:`T\\mathbf{1} = \\mathbf{1}` survives floating point for
+    mean-centered input because the modifier decays *quadratically*: the
+    numerically-zero singular value's column of :math:`U` need not be
+    orthogonal to :math:`\\mathbf{1}`, but its modifier is
+    :math:`O(\\sigma_i^2)`, so the induced mean shift is
+    :math:`O((\\varepsilon\\sigma_{\\max})^2)` rather than
+    :math:`O(\\varepsilon\\sigma_{\\max})`. Computed as written, the modifier
+    is in fact exactly ``0.0`` once :math:`\\sigma_i^2` falls below the
+    resolution of ``1.0``, which is the same bound reached the short way.
+    """
+    modifier = 1.0 / jnp.sqrt(1.0 + sigma**2) - 1.0
+    # (J, rho) @ (rho, J): both operands are exactly 2-D, so this is the
+    # plain matrix product, not a batch of vectors.
+    return jnp.eye(n_members, dtype=U.dtype) + (U * modifier) @ U.swapaxes(-1, -2)
+

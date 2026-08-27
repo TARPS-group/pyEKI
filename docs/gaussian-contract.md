@@ -277,11 +277,11 @@ Two structural facts, both load-bearing and both conformance-checked:
 
 Whitening costs $J + 1$ applications of $W$ — every prediction and the
 observation, from one call on the stacked rows $[\mathsf{V}; y]$. Whitening
-is a fixed linear map applied row-wise, so it commutes with centring and
+is a fixed linear map applied row-wise, so it commutes with centering and
 with subtraction: $W A_v^\top$ is the whitened predictions minus *their*
-mean, and $W(y - v_j)$ is $Wy - Wv_j$. The grouping is **not** free, however: centring
+mean, and $W(y - v_j)$ is $Wy - Wv_j$. The grouping is **not** free, however: centering
 and differencing must happen *before* the whitener is applied. The two
-orders agree in exact arithmetic but are not equally stable — centring
+orders agree in exact arithmetic but are not equally stable — centering
 *whitened* predictions makes the cancellation ratio
 $\lVert W\bar v\rVert / \lVert W a_j\rVert$ in place of
 $\lVert \bar v\rVert / \lVert a_j\rVert$, so the error grows with
@@ -289,7 +289,7 @@ $\kappa(W) = \sqrt{\kappa(R)}$ whenever the prediction mean is aligned
 with a precise direction of the noise. Measured against an exact reference
 at $\kappa(R) = 10^4$ with a prediction mean of $10^8$ along $R$'s most
 precise direction, whitening first gives a posterior-mean error of $4.9$
-where centring first gives $2\times10^{-6}$. Whitening $[A_v;\, y-\bar v]$
+where centering first gives $2\times10^{-6}$. Whitening $[A_v;\, y-\bar v]$
 costs the same $J+1$ applications and does not have that failure mode. What
 must **not** be done is whitening the anomalies and the residuals in two
 separate calls, which costs $2J$ applications in the stochastic update —
@@ -354,7 +354,7 @@ Rules:
   required to; note that for `sqrt_transform` that means a Fréchet
   derivative of $A \mapsto A^{-1/2}$, materially more work than
   `gain_weights`'s rational form.
-- `sqrt_transform` imposes no centring requirement on `s`. The
+- `sqrt_transform` imposes no centering requirement on `s`. The
   $T\mathbf{1} = \mathbf{1}$ property of {ref}`gauss-kernel` follows from
   $\mathbf{1}^\top s = 0$ and holds only for such `s`; on general `s` the
   transform is still $(I + ss^\top)^{-1/2}$, and $T\mathbf{1}$ is
@@ -380,6 +380,13 @@ supplies, and the posterior that `EnsembleJoint.condition` returns
 {class}`~pyeki.linalg.PSDLinOp` of side `n`. Construction validates the rank
 of `mean`, the operator type of `cov`, and their agreement
 (tier 2, shape-only — {ref}`gauss-validation`). `n` is a property computed from `mean`.
+
+The size properties across the layer follow one rule: an object with a
+single dimension names it `n`, matching {class}`~pyeki.linalg.SquareLinOp`
+one layer down; an object with several qualifies each one, as
+`EnsembleJoint`'s `n_members`, `u_dim` and `v_dim` do. So `Gaussian.n` and
+`EnsembleJoint.u_dim` are the same convention applied to different arities,
+not an inconsistency.
 
 **Capabilities delegate to the covariance.** `Gaussian` defines no
 capability system of its own: each method requires specific operations of
@@ -560,7 +567,7 @@ posterior mean and its sample covariance (divisor $J-1$) equals the
 posterior covariance, both in exact arithmetic — the identity of
 {ref}`gauss-kernel`, and the bridge the conformance suite uses between the
 update and the hand-written dense reference. Because
-$T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centred, so
+$T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centered, so
 the two summands above really are the posterior mean and posterior
 anomalies.
 
@@ -573,7 +580,7 @@ $\bigl(C^{\text{post}}_{ii}(KRK^\top)_{jj} +
 C^{\text{post}}_{jj}(KRK^\top)_{ii} +
 2(KRK^\top)_{ij}^2\bigr)^{1/2}\!/\sqrt{J}$ — in relative terms
 $\sqrt{J}$ times looser than the mean's. The unbiasedness of the
-covariance is particular to the $J-1$ divisor, whose centring of the
+covariance is particular to the $J-1$ divisor, whose centering of the
 perturbations cancels exactly.
 Individual pathwise members are not posterior draws — conditional on the
 ensemble, member $j$ is distributed
@@ -984,7 +991,7 @@ must verify at least:
    $\sigma = (10^{10}, 10^5, 1, 1, 1)$ they separate by eight orders of
    magnitude, which is the regime the check must use.
    It satisfies $T = T^\top$ for every
-   `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centred `s`**
+   `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centered `s`**
    ($\mathbf{1}^\top s = 0$, which is the only case the conditioning
    kernel produces) to a tolerance of
    $c_1 J \varepsilon + c_2 (\varepsilon \sigma_{\max})^2$; for general
@@ -1059,7 +1066,7 @@ earlier: the layer's user-guide page ({ref}`gauss-scope`) and the
 
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
-a mixed-representation perturbation, a mean shift from an uncentred
+a mixed-representation perturbation, a mean shift from an uncentered
 transform, a `nan` gradient at an exactly collapsed `s`, a singular
 noise covariance turning an update into an all-`nan` result with no
 exception outside debug mode (assert the `nan`, so the day it starts raising
