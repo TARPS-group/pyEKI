@@ -35,6 +35,7 @@ contract.
 .. autoclass:: pyeki.linalg.Triangular
 .. autoclass:: pyeki.linalg.DensePSD
    :members: from_matrix
+.. autoclass:: pyeki.linalg.PSDLowRank
 ```
 
 ### Operators built from other operators

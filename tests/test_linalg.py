@@ -28,6 +28,7 @@ from pyeki.linalg import (
     PSDDiagCongruence,
     PSDDiagonal,
     PSDLinOp,
+    PSDLowRank,
     PSDScaled,
     Scaled,
     SquareLinOp,
@@ -37,6 +38,7 @@ from pyeki.linalg import (
     UnsupportedOpError,
     block_diag,
     debug_checks,
+    dense_matvec,
     densify,
     diag_congruence,
     hstack,
@@ -224,6 +226,121 @@ def test_unsupported_error_pickles_and_rebuilds_from_args():
 
 
 # ---------------------------------------------------------------------------
+# PSDLowRank
+# ---------------------------------------------------------------------------
+
+
+def _low_rank_widths() -> list[tuple[int, int]]:
+    """(n, k) at every relation: thin, square, wide."""
+    return [(5, 2), (4, 4), (3, 6)]
+
+
+@pytest.mark.parametrize("n,k", _low_rank_widths())
+def test_psd_low_rank_to_dense_is_the_outer_product(n, k):
+    """to_dense assembles F F.T from the stored array, matching a
+    hand-written dense product -- never routed through matvec, which would
+    make every dense comparison in the suite compare matvec with itself."""
+    F = RNG.normal(size=(n, k))
+    op = PSDLowRank(jnp.asarray(F))
+    assert op.shape == (n, n)
+    np.testing.assert_allclose(np.asarray(op.to_dense()), F @ F.T, rtol=1e-12)
+
+
+@pytest.mark.parametrize("n,k", _low_rank_widths())
+def test_psd_low_rank_factor_round_trips(n, k):
+    """factor() hands back the stored factor itself: a (n, k) Dense whose
+    L L.T is the operator, with no factorization computed anywhere."""
+    F = RNG.normal(size=(n, k))
+    op = PSDLowRank(jnp.asarray(F))
+    L = op.factor()
+    assert type(L) is Dense and L.shape == (n, k)
+    np.testing.assert_allclose(np.asarray(L.to_dense()), F, rtol=1e-12)
+    Ld = np.asarray(L.to_dense())
+    np.testing.assert_allclose(Ld @ Ld.T, np.asarray(op.to_dense()), rtol=1e-12)
+
+
+@pytest.mark.parametrize("n,k", _low_rank_widths())
+def test_psd_low_rank_diag_is_the_rowwise_sum_of_squares(n, k):
+    """diag reduces over the factor's trailing axis; reducing over the
+    wrong one is shape-valid when k == n and silently wrong."""
+    F = RNG.normal(size=(n, k))
+    op = PSDLowRank(jnp.asarray(F))
+    np.testing.assert_allclose(np.asarray(op.diag()), np.diag(F @ F.T), rtol=1e-12)
+
+
+@pytest.mark.parametrize("n,k", _low_rank_widths())
+def test_psd_low_rank_withholds_solve_whiten_and_logdet_at_every_width(n, k):
+    """Capabilities are exactly {"diag", "factor"} regardless of width.
+
+    The k >= n instances are generically nonsingular, so `solve`, `whiten`
+    and `logdet` all exist mathematically and are still withheld: support
+    is a property of the type, not of the stored shape. This test pins that
+    decision so the hooks are not "helpfully" added later.
+    """
+    op = PSDLowRank(jnp.asarray(RNG.normal(size=(n, k))))
+    assert op.capabilities() == frozenset({"diag", "factor"})
+    if k >= n:  # ... and the withheld operations are not vacuous here
+        assert np.linalg.matrix_rank(np.asarray(op.to_dense())) == n
+    for name in ("solve", "solve_mat", "logdet", "whiten", "whiten_mat"):
+        assert not op.supports(name)
+    with pytest.raises(UnsupportedOpError, match=r"no cheap `solve`"):
+        op.solve(jnp.ones(n))
+    with pytest.raises(UnsupportedOpError, match=r"no cheap `solve_mat`"):
+        op.solve_mat(jnp.ones((n, 2)))
+    with pytest.raises(UnsupportedOpError, match=r"no cheap `logdet`"):
+        op.logdet()
+    with pytest.raises(UnsupportedOpError, match=r"no cheap `whiten`"):
+        op.whiten(jnp.ones(n))
+    with pytest.raises(UnsupportedOpError, match=r"no cheap `whiten_mat`"):
+        op.whiten_mat(jnp.ones((n, 2)))
+
+
+def test_psd_low_rank_validation_is_not_covered_by_conformance():
+    """The tier-2 checks are load-bearing precisely because check_operator
+    misses them: an otherwise identical operator with no __post_init__
+    passes the whole suite, yet accepts a rank-3 factor (yielding a
+    *directly constructed* operator that reports a non-empty batch_shape,
+    which the contract forbids) and k = 0 (an empty core axis).
+    """
+    from pyeki.linalg.testing import check_operator
+
+    @linop
+    class Unvalidated(PSDLinOp):  # PSDLowRank minus its __post_init__
+        F: Array
+
+        @property
+        def shape(self):
+            n = self.F.shape[-2]
+            return (n, n)
+
+        @property
+        def batch_shape(self):
+            return tuple(self.F.shape[:-2])
+
+        def _matvec(self, x):
+            return dense_matvec(self.F, dense_matvec(self.F.swapaxes(-1, -2), x))
+
+        def _diag(self):
+            return jnp.sum(self.F * self.F, axis=-1)
+
+        def _factor(self):
+            return Dense(self.F)
+
+        def _to_dense(self):
+            return self.F @ self.F.swapaxes(-1, -2)
+
+    check_operator(Unvalidated(jnp.asarray(RNG.normal(size=(5, 2)))))  # passes
+    assert Unvalidated(jnp.ones((2, 5, 3))).batch_shape == (2,)  # yet accepts
+    assert Unvalidated(jnp.ones((5, 0))).shape == (5, 5)  # ... and this
+
+    # PSDLowRank refuses both at construction.
+    with pytest.raises(ValueError, match="vmap"):
+        PSDLowRank(jnp.ones((2, 5, 3)))
+    with pytest.raises(ValueError, match="positive"):
+        PSDLowRank(jnp.ones((5, 0)))
+
+
+# ---------------------------------------------------------------------------
 # operand and constructor validation
 # ---------------------------------------------------------------------------
 
@@ -247,6 +364,8 @@ def test_constructors_reject_batched_arrays():
         PSDDiagonal(jnp.ones((100, 6)))  # an ensemble where a diagonal was meant
     with pytest.raises(ValueError, match="vmap"):
         Dense(jnp.ones((4, 3, 3)))
+    with pytest.raises(ValueError, match="vmap"):
+        PSDLowRank(jnp.ones((2, 5, 3)))  # a stack of factors, not one factor
     with pytest.raises(ValueError, match="rank"):
         PSDDiagonal(jnp.asarray(2.0))  # below core rank
     As = jnp.asarray(np.stack([_psd(3) for _ in range(4)]))
@@ -265,6 +384,10 @@ def test_constructors_reject_empty_operators():
         Dense(jnp.zeros((3, 0)))
     with pytest.raises(ValueError, match="positive"):
         Triangular(jnp.zeros((0, 0)))
+    with pytest.raises(ValueError, match="positive"):
+        PSDLowRank(jnp.zeros((5, 0)))  # k = 0: an operator of rank zero
+    with pytest.raises(ValueError, match="positive"):
+        PSDLowRank(jnp.zeros((0, 5)))
     with pytest.raises(ValueError, match="positive"):
         Identity(0)
 

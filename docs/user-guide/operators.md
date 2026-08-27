@@ -27,6 +27,15 @@ operator. The full behavioural specification is the
 | `DenseSquare.from_matrix(A)` | a dense square matrix | stored with its LU; what `densify` returns for square non-PSD operators |
 | `Triangular(L, lower)` | a triangular matrix | what `DensePSD.factor()` returns |
 | `DensePSD.from_matrix(A)` | a dense PSD matrix | stored as its Cholesky factor |
+| `PSDLowRank(F)` | $FF^\top$ for a factor $F$ of shape $(n, k)$ | singular when $k < n$; provides `diag` and `factor` only |
+
+`PSDLowRank` imposes no relation between $n$ and $k$, and computes nothing
+at construction: the stored factor *is* the factorization, so `factor()`
+hands it straight back as a `Dense`. It withholds `solve`, `whiten` and
+`logdet` at *every* width — forced when $k < n$, where the operator is
+singular by construction, and a deliberate choice when $k \ge n$, since
+capabilities belong to the type and no shape can rule out a rank-deficient
+wide factor. Densify an instance you know to be full rank if you need them.
 
 `DensePSD` and `DenseSquare` are built with `from_matrix`, which factorizes
 once at construction. Operators never factorize lazily on first use, because
@@ -136,7 +145,8 @@ Two related operations, with different guarantees:
 
 The shape of `factor()` is informative. `k > n` means the operator is a sum
 of simpler pieces, as in low-rank-plus-diagonal. `k < n` means it is
-genuinely singular, so it supports neither `solve` nor `whiten`.
+genuinely singular, so it supports neither `solve` nor `whiten` —
+`PSDLowRank` is the shipped operator in that position.
 
 The whitener is *not* promised to invert the factor: `whiten(L.matvec(eps))`
 agrees with `eps` in distribution, never elementwise. Use one representation
@@ -152,6 +162,7 @@ For an operator of side $n$:
 | `PSDDiagonal` | $O(n)$ | $O(n)$ | $O(n)$ | $O(n)$ |
 | `DensePSD`, `DenseSquare` | $O(n^2)$ | $O(n^2)$ | $O(n^2)$ | $O(n)$ after the constructor's $O(n^3)$ |
 | `Triangular` | $O(n^2)$ | $O(n^2)$ | — | $O(n)$ |
+| `PSDLowRank` (factor width $k$) | $O(nk)$ | — | — | — |
 | block diagonals | sum over blocks | sum over blocks | sum over blocks | sum over blocks |
 | `PSDDiagCongruence`, scaled operators | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ | base $+ O(n)$ |
 | `Product`, `HStack` | sum over factors | — | — | — |

@@ -20,6 +20,7 @@ from pyeki.linalg import (
     Identity,
     LinOp,
     PSDDiagonal,
+    PSDLowRank,
     Transposed,
     Triangular,
     block_diag,
@@ -49,6 +50,11 @@ def _instances() -> list[LinOp]:
         Triangular(jnp.linalg.cholesky(_psd(5)), lower=True),
         Triangular(jnp.linalg.cholesky(_psd(4)).T, lower=False),
         DensePSD.from_matrix(_psd(5)),
+        # a low-rank PSD operator at each width: thin (singular), square,
+        # and wide (generically nonsingular, yet still no solve/whiten)
+        PSDLowRank(jnp.asarray(RNG.normal(size=(5, 2)))),
+        PSDLowRank(jnp.asarray(RNG.normal(size=(4, 4)))),
+        PSDLowRank(jnp.asarray(RNG.normal(size=(3, 6)))),
         # composites
         product(PSDDiagonal(d), Dense(jnp.asarray(RNG.normal(size=(6, 4))))),
         hstack(
