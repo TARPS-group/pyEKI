@@ -230,3 +230,69 @@ axes, which would push that convention through every consumer.
 The layer here is deliberately small and aimed at what EKI requires. If
 stochastic trace or log-determinant estimation later becomes routine, borrowing
 a specialist implementation for those calls is preferable to growing one here.
+
+## EKI schedule criteria
+
+Two derivations the EKI contract states as facts and uses, recorded here so
+that page can stay a specification. Notation is that page's.
+
+### Why the ESS is monotone in the increment
+
+Write $E_\lambda$ for expectation under the tilted weights
+$w_j(\lambda) \propto e^{-\lambda\Phi_j}$. Since
+$\log \mathrm{ESS}(\delta) = 2\,\mathrm{lse}(-\delta\Phi) - \mathrm{lse}(-2\delta\Phi)$
+and $\frac{d}{d\lambda}\log\sum_j e^{-\lambda\Phi_j} = -E_\lambda[\Phi]$,
+
+$$
+\frac{d}{d\delta}\log \mathrm{ESS}(\delta)
+= 2\bigl(E_{2\delta}[\Phi] - E_{\delta}[\Phi]\bigr)
+= -\,2\delta \int_{1}^{2} \operatorname{Var}_{s\delta}(\Phi)\,ds
+\;\le\; 0 ,
+$$
+
+the second equality by integrating
+$\frac{d}{d\lambda}E_\lambda[\Phi] = -\operatorname{Var}_\lambda(\Phi)$ from
+$\lambda = \delta$ to $\lambda = 2\delta$ and substituting
+$\lambda = s\delta$. The inequality is strict for $\delta > 0$ unless every
+$\Phi_j$ is equal.
+
+Two things follow that the contract relies on. The decay rate is a variance of
+the misfits under the tilted weights, so the criterion is measuring ensemble
+disagreement about the data rather than an arbitrary monotone quantity. And the
+$-2\delta$ prefactor vanishes at $\delta = 0$: the function is flat at the left
+endpoint, so bisection is the right root find and a derivative-based one is not.
+
+One precondition, which pyEKI satisfies structurally: the argument assumes the
+ensemble arrives equally weighted. It does, since the layer carries no
+importance weights at all — but a variant that introduced them would have to
+revisit this before reusing the bisection.
+
+### Why the misfit criterion takes a max of its two bounds
+
+Iglesias and Yang obtain the criterion by controlling the Jeffreys
+(symmetrized Kullback–Leibler) divergence between consecutive tempered
+measures, requiring it to stay below $\theta$. That divergence is exactly
+$\delta\,(E_\beta[\Phi] - E_{\beta+\delta}[\Phi])$ — the $\log Z$ terms
+cancel — and cannot be evaluated at step $t$, since it depends on the next
+measure. It is therefore approximated in two regimes: dropping the unknown
+non-negative term gives the upper bound $\delta\,\overline{\Phi}$, accurate
+when the mean misfit falls substantially across the rung; and a first-order
+expansion of $\overline{\Phi}$ in $\delta$ gives $\delta^2\sigma^2_\Phi$,
+accurate when it barely moves. Neither is valid throughout, so the divergence is
+approximated by the **smaller** of the two,
+
+$$
+D_{\mathrm{J}} \;\approx\; \min\bigl\{\, \delta\,\overline{\Phi},\ \
+\delta^2 \sigma^2_\Phi \,\bigr\} \;\le\; \theta .
+$$
+
+Both expressions increase in $\delta$, so a `min` bounded by $\theta$ holds
+exactly on the interval up to the **larger** of the two thresholds. The `max` in
+the criterion is that `min` turned inside out.
+
+The threshold $\theta = N/2$ is then fixed by a statistical discrepancy
+principle rather than tuned. At the step's own noise level the whitened misfit
+$\chi_j = 2\delta\Phi_j$ would be $\chi^2_N$ if the target were well
+specified, so requiring its mean below $N$ and its variance below $2N$ gives
+$\theta = N/2$ in both bounds — which is the sense in which the schedule has no
+free parameter: the observation dimension supplies it.

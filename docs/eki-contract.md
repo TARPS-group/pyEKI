@@ -335,8 +335,8 @@ assert fit.stop_fired                # False means the ladder ran out first
 Neither result is named `posterior`. `sampled.ensemble` is an approximate
 posterior ensemble under the caveats of {ref}`eki-honesty`, and `fit.ensemble`
 is a collapsing ensemble around a regularized fit, which is not a posterior at
-all; naming either one `posterior` in a script is the first step towards
-reporting the second as though it were the first.
+all; naming either one `posterior` in a script invites reporting the second as
+though it were the first.
 
 Each axis is a **protocol**, not a base class, and each has shipped
 implementations. This is the one place where pyEKI is deliberately open to
@@ -702,7 +702,7 @@ order, before each call:
    forward model is therefore called **exactly once per rung** in both, which
    an implementation that had `iterate` call `step` naively would violate by
    evaluating twice — the one cost the layer exists to economize.
-4. **Stopping rule.** If `stop is not None and stop(summary)`, end the run
+4. **Stopping rule.** If `stop is not None and stop(evaluation)`, end the run
    with status `"stopping_rule"`, emitting a terminal record
    ({ref}`eki-diagnostics`) and leaving the state unchanged.
 5. **Increment.** `dbeta = schedule.next_increment(evaluation)`. A schedule may
@@ -1040,41 +1040,19 @@ w_j(\delta) = e^{-\delta \Phi_j},
 $$
 
 $\mathrm{ESS}$ is $J$ at $\delta = 0$ and **monotone non-increasing** in
-$\delta$, so the target level is reached by bisection. The monotonicity is a
-fact rather than a hope, and the whole construction rests on it, so the
-derivation is recorded here. Write $E_\lambda$ for expectation under the
-tilted weights $w_j(\lambda) \propto e^{-\lambda\Phi_j}$. Then
-
-$$
-\frac{d}{d\delta}\log \mathrm{ESS}(\delta)
-= 2\bigl(E_{2\delta}[\Phi] - E_{\delta}[\Phi]\bigr)
-= -\,2\delta \int_{1}^{2} \operatorname{Var}_{s\delta}(\Phi)\,ds
-\;\le\; 0 ,
-$$
-
-the second equality by integrating
-$\frac{d}{d\lambda}E_\lambda[\Phi] = -\operatorname{Var}_\lambda(\Phi)$ from
-$\lambda = \delta$ to $\lambda = 2\delta$. The inequality is strict for
-$\delta > 0$ unless every $\Phi_j$ is equal, which is the degenerate case
-{ref}`eki-adaptive` covers.
-
-Two consequences of that identity are load-bearing for the implementation.
-The rate of decay is a variance of the misfits under the tilted weights, so
-the criterion is genuinely measuring ensemble disagreement about the data.
-And **the derivative vanishes at $\delta = 0$**: the function is flat at the
-left endpoint, so a derivative-based root find started there stalls. Bisection
-is not merely convenient, it is the right method.
-
-One precondition, which pyEKI satisfies structurally: the argument assumes the
-ensemble arrives **equally weighted**. It does — this layer carries no
-importance weights at all ({ref}`eki-excluded`) — but a variant that
-introduced them would have to revisit the monotonicity before reusing this
-bisection.
+$\delta$, strictly so unless every $\Phi_j$ is equal — the degenerate case
+{ref}`eki-adaptive` covers — so the target level is reached by bisection.
+{doc}`design` derives it. Two consequences of that derivation bind the
+implementation. The rate of decay is a variance of the misfits under the tilted
+weights, so the criterion measures ensemble disagreement about the data. And
+**the derivative vanishes at $\delta = 0$**, so the function is flat at the left
+endpoint and a derivative-based root find started there stalls, which is why the
+method is bisection.
 
 The criterion is
 
 $$
-\delta^\star \;=\; \sup\{\delta \,:\, \mathrm{ESS}(\delta) \ge \texttt{target}\cdot J\},
+\delta^\star \;=\; \sup\{\delta \,:\, \mathrm{ESS}(\delta) \ge \texttt{ess\_fraction}\cdot J\},
 $$
 
 clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
@@ -1174,31 +1152,15 @@ $\beta_{\text{target}} - \beta$ is what makes a run terminate exactly at
 $\beta_{\text{target}}$ with the increments summing to it.
 
 **The `max` is deliberate and is not a `min`.** Read as two independent
-benchmarks the `max` looks merely permissive — take the longest step meeting at
-least one of them — but the source's derivation makes it forced, and that
-derivation is worth recording because the inversion is an easy and silent
-mistake.
-
-Iglesias and Yang obtain the criterion by controlling the **Jeffreys
-(symmetrized Kullback–Leibler) divergence between consecutive tempered
-measures**, requiring it to stay below $\theta$. That divergence cannot be
-evaluated at step $t$, since it depends on the next measure, so it is
-approximated in two regimes: dropping the unknown term gives the upper bound
-$\delta\,\overline{\Phi}$, accurate when the mean misfit falls substantially
-across the rung; and a first-order expansion of $\overline{\Phi}$ in $\delta$
-gives $\delta^2\sigma^2_\Phi$, accurate when it barely moves. Neither is valid
-throughout, so the divergence is approximated by the **smaller** of the two,
-
-$$
-D_{\mathrm{J}} \;\approx\; \min\bigl\{\, \delta\,\overline{\Phi},\ \
-\delta^2 \sigma^2_\Phi \,\bigr\} \;\le\; \theta ,
-$$
-
-and a `min` bounded by $\theta$ is satisfied exactly when $\delta$ is below the
-**larger** of the two thresholds. The `max` in the criterion is that `min`
-turned inside out; writing `min` there would impose both approximations at
-once, including whichever one is invalid in the current regime, and would stall
-the ladder on the invalid one.
+benchmarks the `max` looks merely permissive, but the source's derivation makes
+it forced: the Jeffreys divergence between consecutive tempered measures is
+approximated by the *smaller* of two expressions valid in different regimes, and
+a `min` bounded by $\theta$ is satisfied exactly when $\delta$ is below the
+*larger* of the two thresholds. Writing `min` in the criterion would impose both
+approximations at once, including whichever is invalid in the current regime,
+and would stall the ladder on the invalid one. {doc}`design` gives the
+derivation; inverting this is a silent error, and conformance obligation 4 pins
+each regime.
 
 The threshold $\theta = N/2$ is then fixed by a *statistical discrepancy
 principle* rather than tuned. At the step's own noise level the whitened misfit
@@ -1259,7 +1221,7 @@ stylistic.
 (eki-stopping)=
 ## Stopping rules
 
-A `StoppingRule` is a callable `stop(summary) -> bool`, returning a Python
+A `StoppingRule` is a callable `stop(evaluation) -> bool`, returning a Python
 `bool`, pure, and — like schedules — forbidden from holding iteration state.
 It is consulted before the increment is chosen, so a run that already fits the
 data takes no further update.
@@ -1280,7 +1242,7 @@ $$
 $$
 
 where $\bar v = \frac1J\sum_j v_j$ is the **mean prediction** and
-$\Phi(\bar v)$ is the summary's `centre_misfit`.
+$\Phi(\bar v)$ is the evaluation's `centre_misfit`.
 
 The scaling is the natural one. At the true parameter, the whitened residual is
 the whitened noise, so $2\Phi$ is a $\chi^2_N$ variate with mean $N$ and
@@ -1312,8 +1274,7 @@ be evaluated and updated ({ref}`eki-step`). The keyword-only convention and the
 inflation schedule is common practice and the alternative is a rule that
 mutates a counter and cannot be resumed.
 
-That placement deserves a word, because both "before" and "after" the analysis
-appear in the literature. **In the interior of a run they coincide**: inflating
+Both "before" and "after" the analysis appear in the literature. **In the interior of a run they coincide**: inflating
 the analysis ensemble at the end of step $t$ and inflating it at the start of
 step $t+1$ produce identical sequences, since nothing happens in between. They
 differ at the two ends, and the difference is why the start is chosen —
@@ -1321,7 +1282,7 @@ placing it at the start means the ensemble a run *returns* is a clean posterior
 ensemble rather than an inflated one, and that predictions always match the
 members they update.
 
-The cost of that choice, stated so it is not discovered later: the **initial**
+The cost of that choice: the **initial**
 ensemble is inflated before it is ever evaluated, so a run with inflation on
 never evaluates exactly the ensemble the caller supplied, and the final
 ensemble is never inflated. A caller who needs the pristine initial ensemble
@@ -1529,7 +1490,7 @@ the *surviving* members too, so each one is moved outward from the centre; the
 pair $(u_j, v_j)$ is no longer forward-model-consistent; and the run's returned
 ensemble can contain members never evaluated at their own parameters.
 
-Quantitatively that is not a rounding concern. At $J = 100$ with $10\%$ of
+The factor is not small. At $J = 100$ with $10\%$ of
 members failing, the factor is $\sqrt{99/89} \approx 1.055$ — a $5.5\%$
 re-injection of spread, *per step*, larger than the multiplicative inflation
 factors practitioners actually use, applied silently and by default. The layer
@@ -1563,23 +1524,25 @@ $\Phi(\hat v)$ — the misfit of the valid centre, which by the identity of
 $\tfrac{J_v-1}{2J_v}\operatorname{tr}(W \widehat C_{vv} W^\top)$. The bias in
 $\overline{\Phi}$ is therefore downward, which makes the reported misfit
 spread and the ESS slightly optimistic and makes
-`AdaptiveMisfitSchedule`'s mean bound slightly permissive; `n_valid` is in the summary so that a
+`AdaptiveMisfitSchedule`'s mean bound slightly permissive; `n_valid` is in the evaluation so that a
 criterion may account for it.
 
 (eki-diagnostics)=
 ## Diagnostics
 
-Two classes, split by lifetime rather than by subject. The **summary** is
-transient: it exists for the duration of one step, carries the full whitened
-residual matrix, and is what a schedule and a stopping rule are shown. The
-**record** is kept for the whole run: it carries scalars only, so a history of
-hundreds of steps costs nothing, and it is what a caller reads afterwards.
+Two classes, split by lifetime rather than by subject. An **`Evaluation`** is
+transient: it exists for the duration of one step, carries the members, their
+predictions and the whitened residual matrix, and is what a schedule and a
+stopping rule are shown. A **`HistoryRecord`** is kept for the whole run: it
+carries scalars only, so a history of hundreds of steps costs nothing, and it is
+what a caller reads afterwards.
 
-The driver builds the record from the summary and the chosen increment, so the
-summary is the single source of truth for everything both describe — a record
-field that could disagree with the summary it came from would be a defect. The
-one field the record adds from outside is the increment, which is not known
-until the schedule has seen the summary.
+The driver builds the record from the evaluation and the chosen increment, so
+the evaluation is the single source of truth for everything both describe — a
+record field that could disagree with the evaluation it came from would be a
+defect ({ref}`eki-conformance`, obligation 21). The one field the record adds
+from outside is the increment, which is not known until the schedule has seen
+the evaluation.
 
 ### `Evaluation`
 
@@ -1629,15 +1592,13 @@ $$
 so the misfits, the misfit of the mean prediction, **and the whitened
 prediction anomalies** are all recoverable from this one array — the last
 being, up to a sign and the $\sqrt{J-1}$, exactly the scaled whitened anomaly
-matrix $S$ that {doc}`gaussian-contract`'s kernel is built on. Carrying the
-matrix rather than the misfit vector costs nothing: the driver must whiten the
-residuals anyway in order to compute the misfits at all, so this is the array
-it already has. What it buys is that a step-size rule needing the anomaly
-structure — a Langevin-type scheme sets its step from the $J \times J$ matrix
-$\langle W(v_k - \bar v),\, b_j\rangle$ — is expressible as a `Schedule`
-instead of being locked out of the protocol. $N$ is likewise recoverable, from
-the trailing axis, so a criterion may be calibrated to the observation
-dimension without the schedule storing it.
+matrix $S$ that {doc}`gaussian-contract`'s kernel is built on. It costs nothing:
+the driver must whiten the residuals to compute the misfits at all, so this is
+the array it already has. It buys the expressibility of a step-size rule that
+needs the anomaly structure — a Langevin-type scheme sets its step from the
+$J \times J$ matrix $\langle W(v_k - \bar v),\, b_j\rangle$. $N$ is likewise
+recoverable from the trailing axis, so a criterion may be calibrated to the
+observation dimension without the schedule storing it.
 
 Every method and derived property below raises on a vmapped family, and the
 class is otherwise an ordinary unbatched frozen pytree ({ref}`eki-jax`).
@@ -1657,17 +1618,14 @@ $O(\varepsilon\sqrt{\kappa(R)}\,\lVert W\bar v\rVert / \lVert W A_v\rVert)$
 diagnostic, never a substitute for the update's own.
 
 For structured whiteners applying in $O(N)$ per vector this is absorbed by the
-update's own $O(NJ^2)$. For a **dense** whitener it is not:
-{doc}`gaussian-contract` notes that the $O(JN^2)$ whitening dominates an update
-there, so this layer doubles the dominant cost of a step on exactly the
-worst-conditioned problems. The duplication buys a strict separation —
-diagnostics are computed here, the conditioning kernel stays sealed in
-`pyeki.gauss`, and no intermediate crosses between them — and removing it would
-mean either threading a precomputed whitened matrix through the update's
-signature or hoisting the conditioning primitives into this layer's driver.
-Neither is worth a constant factor today; if a dense-whitener consumer makes it
-worth one, the fix is the first of the two, and it is a contract change rather
-than an optimization.
+update's own $O(NJ^2)$. For a **dense** whitener it is not: the $O(JN^2)$
+whitening dominates an update there, so the layer doubles the dominant cost of a
+step on exactly the worst-conditioned problems. The duplication buys a strict
+separation — diagnostics here, the conditioning kernel sealed in `pyeki.gauss`,
+no intermediate crossing between them. If a dense-whitener consumer ever makes
+the constant factor worth removing, the fix is to thread a precomputed whitened
+matrix through the update's signature, and it is a contract change rather than
+an optimization.
 :::
 
 **Derived properties**, computed on access, not cached:
@@ -1698,7 +1656,7 @@ absent: computing it costs an extra forward-model evaluation
 
 ### `HistoryRecord`
 
-One row of the history, built by the driver from the summary and the chosen
+One row of the history, built by the driver from the evaluation and the chosen
 increment. **Every field is a 0-d array**, `step` and `n_valid` included (as
 0-d integer arrays): `step`, `n_valid`, `beta`, `increment`, `beta_next`,
 `misfit_mean`, `misfit_min`, `misfit_max`, `centre_misfit`, `spread`, and
@@ -1727,7 +1685,7 @@ value cannot do.
 - The per-member `misfits` vector is deliberately absent, as is anything else
   of size $J$ or larger: a history of hundreds of steps must stay cheap. A
   caller who wants per-member or per-observation quantities uses `iterate` and
-  keeps them themselves, from `summary.whitened_residuals`.
+  keeps them themselves, from `evaluation.whitened_residuals`.
 
 **Conditioning diagnostics are the caller's to compute, and they are
 reachable.** The most-watched number in a run is the leading singular value of
@@ -1736,8 +1694,8 @@ ensemble collapsing — and no field here reports it. Two reasons: the update
 computes its own SVD internally and has no channel to return one, and having
 the driver compute a second SVD would add an $O(NJ^2)$ cost per step, the same
 order as the update itself, for a diagnostic. It is not lost, because
-`summary.whitened_residuals` **determines $S$ completely** — centring its rows
-gives $-A_v W^\top$, as the summary's own section shows, to the accuracy that
+`evaluation.whitened_residuals` **determines $S$ completely** — centring its rows
+gives $-A_v W^\top$, as the evaluation's own section shows, to the accuracy that
 section records — so a caller who wants the spectrum takes one SVD in an
 `iterate` loop and pays for it deliberately. The related identity
 $\log\det(\widehat C_{vv} + R) = \log\det R + \sum_i \log(1+\sigma_i^2)$,
@@ -1962,7 +1920,7 @@ bound is a safety net against a schedule that can never be exhausted and a run
 with no stopping rule; a genuinely step-limited run is a `FixedSchedule` with
 that many rungs, or a `break` in an `iterate` loop. A sampling run that
 silently returned an ensemble at $\beta = 0.7$ labelled as a posterior is
-exactly the kind of quiet wrongness this package refuses.
+the failure `stop_fired` and `budget_complete` exist to expose.
 
 **Progress reporting.** The driver emits one record per step at `INFO` on the
 logger named `pyeki.eki`, carrying the step, the level, the increment and the
@@ -2063,19 +2021,12 @@ whether a stopping rule was supplied.
 
 **`EKIError` carries the run, and this is normative.** It has two attributes,
 `state` and `history`: the last good `EKIState` and the records accumulated up
-to the failure, populated on **every** raise path in the driver. Without them
-the exception's stated reason for existing is empty — there would be nothing
-to checkpoint, because `run` builds its `EKIResult` internally and the state
-lives inside the generator, so the object a caller catches would be a bare
-`RuntimeError` subclass carrying a sentence.
-
-The scenario is concrete and not rare: a 200-member ensemble on a cluster, 40
-of 50 rungs completed, one step returns $J_v = 1$. With the attributes that is
-a resumable checkpoint and a diagnosable failure; without them it is thirty
-hours of forward-model evaluations discarded. The same applies to a non-finite
-update at rung 39 and to `max_steps` on an adaptive run. The cost is two
-attribute assignments, so the three "lose the run" failures become three
-recoverable ones:
+to the failure, populated on **every** raise path. Without them a caller
+catching it has nothing to checkpoint — `run` builds its `EKIResult` internally
+and the state lives inside the driver — so the four failures that lose a run
+become four recoverable ones for the cost of two attribute assignments. On an
+expensive model with most of a long ladder completed, that is the difference
+between a resumable checkpoint and discarded work:
 
 ```python
 try:
@@ -2162,9 +2113,9 @@ and the point of the machinery is that it says so.
 (eki-variants)=
 ## Expressing variants
 
-Not normative, but it is the evidence for the three-axis claim of
-{ref}`eki-axes`, and a variant that cannot be expressed here is a reason to
-revisit the design.
+Not normative. This section is the evidence for the three-axis claim of
+{ref}`eki-axes`: a variant that cannot be expressed here is a reason to revisit
+the design.
 
 | variant | expressed as |
 | ------- | ------------ |
@@ -2178,8 +2129,7 @@ revisit the design.
 | localized EKI | `update=` an update rule from `pyeki.localize` |
 | a Langevin-type ensemble sampler (the ensemble Kalman sampler of Garbuno-Iñigo and co-authors) | a custom `EnsembleUpdate` holding the prior, using `increment` as its step size |
 
-**Two of these deserve detail**, because they are where the design either
-earns its keep or does not.
+**Two need detail.**
 
 *Tikhonov regularization needs no code at all.* Appending the parameters to
 the predictions and the prior mean to the data,
@@ -2218,8 +2168,7 @@ enters.
 
 Pairing this recipe with `AdaptiveESSSchedule(beta_target=1.0)` from a prior
 ensemble is therefore a confidently wrong posterior with no error, which is
-precisely the quiet wrongness this package refuses — so it is stated here
-rather than left to be discovered.
+the failure this warning exists to expose.
 :::
 
 The regularization weight is the noise block's scale: `block_diag(noise_cov, (1 / lam) * prior.cov)` gives the penalty
@@ -2239,33 +2188,21 @@ exists. For such a rule `EKIState.beta` reads as accumulated pseudo-time
 rather than a tempering level; the layer keeps the name and the bookkeeping,
 which are identical.
 
-One caveat, worth a line because it cuts against a property the package
-advertises. The drift term involves the prior **precision** $C_0^{-1}$, so such
+One caveat, which cuts against a property the package advertises. The drift term involves the prior **precision** $C_0^{-1}$, so such
 a rule needs `prior.cov.supports("solve")` — while a plain run needs only
 `factor`, which is why {doc}`design` can say that a prior with no cheap inverse
 is perfectly usable. The most structurally interesting priors are exactly the
 ones where that matters: a `factor`-only covariance drives every shipped
 configuration and raises `UnsupportedOpError` at the first Langevin step. The
 step-size rule such a variant wants is expressible as a `Schedule`, since the
-summary carries the whitened residual matrix ({ref}`eki-schedules`).
+evaluation carries the whitened residual matrix ({ref}`eki-schedules`).
 
-**What does not fit**, recorded so the boundary is visible. Three families, and
-the reason differs in each case:
-
-- **Mean-field and unscented schemes.** Their members are deterministic
-  quadrature nodes regenerated from a mean and a covariance at every step, so
-  their *state* is $(m, C)$ and not an ensemble at all. The distinguishing
-  feature is that the members do not move freely and are not carried between
-  steps — not the value of $J$, which such a scheme also has.
-- **Multiple coupled ensembles.** Multilevel schemes carry several ensembles at
-  different forward-model fidelities and combine their moments through a
-  telescoping-sum estimator. Every member moves freely, so the criterion above
-  admits them, but `EKIState` holds one ensemble and one $J$ and the driver
-  takes one `forward`. They would need a different state and a different
-  driver.
-- **Anything that changes the data between rungs.** The driver binds
-  `(forward, y, noise_cov)` for the whole run. See {ref}`eki-excluded`, where
-  `step` is the answer.
+**What does not fit** is settled by one criterion: a variant belongs here when
+its members move freely and are carried between steps, when there is one
+ensemble and one forward model, and when the data are fixed for the run.
+Mean-field and unscented schemes fail the first, multilevel schemes the second,
+mini-batch schemes the third. {ref}`eki-excluded` gives each its entry and its
+reason.
 
 (eki-consumers)=
 ## How the layers around this one connect
@@ -2287,8 +2224,7 @@ things it must bring itself, neither of which this layer supplies: observation
 **locations**, which appear nowhere in `pyeki.eki` and so live as static fields
 on the rule, and the neighbourhood and taper definitions.
 
-One real limit, recorded here rather than discovered during that
-implementation. A local analysis needs the noise covariance restricted to a
+One real limit. A local analysis needs the noise covariance restricted to a
 neighbourhood, and {ref}`gauss-consumers` states that extracting a principal
 submatrix of a *correlated* block is not an operator-layer operation. So
 localization composes cleanly for **diagonal noise, or neighbourhoods aligned
@@ -2471,25 +2407,25 @@ written independently of the code under test. The suite must verify at least:
    weights it defines, and finite for misfits of order $10^{4}$ where the
    naive non-log-space formula returns `nan` — the latter as a targeted
    regression test.
-5a. **The two adaptive criteria are distinct, and measurably so.** On the same
+6. **The two adaptive criteria are distinct, and measurably so.** On the same
    ensemble, `AdaptiveMisfitSchedule`'s increment drives the effective sample
    size to within a few members of its floor of 1, and is at least five times
    `AdaptiveESSSchedule`'s at a target of $1/2$ — pinning the comparison in
    both directions, so that neither schedule can silently drift into
    implementing the other's criterion. Both halves are asserted; the first is
    the executable form of {ref}`eki-schedules`' floor claim.
-6. **Stopping.** `DiscrepancyStop` fires exactly when $2\Phi(\bar v) \le
+7. **Stopping.** `DiscrepancyStop` fires exactly when $2\Phi(\bar v) \le
    \tau^2 N$, is consulted before the increment, ends the run with status
    `"stopping_rule"` and a terminal record whose increment is exactly zero,
    and can end a run at step 0 with an empty update history.
-7. **`max_steps` and the error payload.** An unbounded schedule with no
+8. **`max_steps` and the error payload.** An unbounded schedule with no
    stopping rule raises `EKIError` at the bound, with a message naming the
    schedule; the bound is never reached by a schedule with a budget and a
    positive floor. **Every `EKIError` raise path carries `state` and
    `history`** — the bound, $J_v < 2$, `on_failure="raise"`, and a non-finite
    update — and resuming a run from a caught `exc.state` continues it exactly,
    which is what makes the attributes worth having.
-8. **Failure handling.** `repair_failed_members` leaves valid members
+9. **Failure handling.** `repair_failed_members` leaves valid members
    **bit-identical**, maps failed members to the valid centre, reproduces the
    valid-member mean exactly, and gives an all-$J$ covariance and
    cross-covariance equal to the valid-member ones scaled by exactly
@@ -2500,66 +2436,67 @@ written independently of the code under test. The suite must verify at least:
    `on_failure` raises `ValueError` rather than defaulting; $J_v < 2$ raises
    under either mode; a `nan` prediction row does not produce a `nan` misfit
    statistic.
-9. **Inflation.** `MultiplicativeInflation` preserves the mean exactly and
-   scales the empirical covariance by `anomaly_factor**2` exactly; a run with it is
-   unchanged in the members' span. `AdditiveInflation` preserves the mean
-   exactly, matches its pinned elementwise definition, and moves the ensemble
-   out of its initial affine subspace — while a run without it stays inside,
-   which is the executable form of {ref}`eki-subspace`.
-10. **Misfits.** `misfits` matches a dense
+10. **Inflation.** `MultiplicativeInflation` preserves the mean exactly and
+    scales the empirical covariance by `anomaly_factor**2` exactly; a run with it is
+    unchanged in the members' span. `AdditiveInflation` preserves the mean
+    exactly, matches its pinned elementwise definition, and moves the ensemble
+    out of its initial affine subspace — while a run without it stays inside,
+    which is the executable form of {ref}`eki-subspace`.
+11. **Misfits.** `misfits` matches a dense
     $\tfrac12 (y-v)^\top R^{-1} (y-v)$ at batch ranks 0, 1 and 2, is invariant
     across two noise operators representing the same $R$ with different
     whiteners, and pins the factor of $\tfrac12$ against a closed-form case.
     `centre_misfit` differs from `misfit_mean` by exactly
     $\tfrac{J-1}{2J}\operatorname{tr}(W\widehat{C}_{vv}W^\top)$ — a divisor
     the derivation gets wrong easily and which no tolerance-based test would
-    catch. `misfits` and `centre_misfit` are recovered from the summary's
+    catch. `misfits` and `centre_misfit` are recovered from the evaluation's
     stored `whitened_residuals` alone, and the whitened prediction anomalies
     recovered from it agree with $-W A_v$.
-11. **Reproducibility and resumption.** The same initial state and policies
+12. **Reproducibility and resumption.** The same initial state and policies
     give bit-identical results. Stopping a run after $k$ steps and resuming
     from the returned state reproduces the uninterrupted run's remaining
     records and final ensemble bit-exactly — the executable form of the
     policy-purity rule. `iterate` and `run` agree.
-12. **The optimization form.** On an affine problem, a run with
+13. **The optimization form.** On an affine problem, a run with
     `FixedSchedule.constant(1.0, n)` and `DiscrepancyStop` terminates, its
     misfit decreases monotonically in the affine case, and its centre
     approaches the least-squares solution restricted to the initial
     ensemble's affine subspace — the correct target given
     {ref}`eki-subspace`, not the unrestricted minimizer.
-13. **JAX.** The array computations run under `jit`; a multi-step run
+14. **JAX.** The array computations run under `jit`; a multi-step run
     **compiles a bounded number of times, independent of the number of
     steps** (asserted against a compilation counter, not inspected by eye) —
     the executable form of the traced-increment requirement; flatten and
     unflatten preserve type and behaviour for all three pytree classes, with
     sentinel leaves; families report their batch shape, take the
     `vmapped(...)` repr, and refuse every method.
-13a. **The history stacks.** `jax.tree.map(lambda *xs: jnp.stack(xs),
-    *result.history)` succeeds on a multi-step run and yields a `HistoryRecord`
-    with `batch_shape == (T,)` and `(T,)`-shaped fields — including `step` and
-    `n_valid`. This is a targeted regression test for the treedef trap of
-    {ref}`eki-diagnostics`: declaring either as static metadata makes every
-    record a different pytree type and the documented one-liner raises. An
-    empty history is checked to raise from `jax.tree.map` rather than to
-    return something misleading.
-13b. **The step is public and composes.** `step` with an explicit increment
-    reproduces the corresponding rung of an equivalent `run` bit-exactly;
-    re-stepping twice from the same state with different increments leaves the
-    original state untouched and yields the two corresponding results, which is
-    the property the backtracking pattern of {ref}`eki-step` relies on; and
-    `iterate` yields exactly what a hand-written loop over `step` with the same
-    schedule decisions yields.
-14. **Degeneracy.** $J = 2$, $N = 1$, and $P = 1$ all work. A collapsed
+15. **The history stacks.** `result.stacked` yields a `HistoryRecord` with
+    `batch_shape == (T,)` and `(T,)`-shaped fields, including `step` and
+    `n_valid`, and `(0,)`-shaped fields on an empty history. This is a targeted
+    regression test for the treedef trap of {ref}`eki-diagnostics`: declaring
+    either field as static metadata makes every record a different pytree type,
+    and the underlying `jax.tree.map` then raises.
+16. **The two phases are public and compose.** `advance` equals
+    `apply(state, evaluate(...))` bit-exactly, and reproduces the corresponding
+    rung of an equivalent `run`. Applying twice from one `Evaluation` at
+    different increments leaves both the state and the evaluation untouched and
+    yields the two corresponding results — the property the backtracking loop of
+    {ref}`eki-step` relies on — with the forward model called **once**, counted
+    by an instrumented model. `apply` raises `ValueError` on an `Evaluation`
+    belonging to a different state, and validates its increment before the
+    model would have run. `iterate` yields what a hand-written loop over the two
+    phases yields, given the same schedule decisions.
+17. **Degeneracy.** $J = 2$, $N = 1$, and $P = 1$ all work. A collapsed
     ensemble produces no `nan` and, with zero prediction anomalies, no
     movement. A forward model returning `nan` for every member raises rather
     than propagating. A `nan`-producing update raises `EKIError` naming the
     step.
-15. **Validation and repr.** Every tier-2 and tier-3 rule of
+18. **Validation and repr.** Every tier-2 and tier-3 rule of
     {ref}`eki-validation` raises as specified; reprs match {ref}`eki-repr`
     with no array data, and `FixedSchedule`'s summarizes rather than printing
     its increments; the pinned prior draw and a short run's output are
     snapshotted so a JAX-side PRNG change is detected rather than absorbed.
-16. **The result reports the run.** `status` takes only the three permitted
+19. **The result reports the run.** `status` takes only the three permitted
     values and equals the exported constants. `stop_fired` and
     `budget_complete` are each true exactly on their own status, tested on
     four runs: a completed budget with no stopping rule (`budget_complete`
@@ -2583,7 +2520,7 @@ written independently of the code under test. The suite must verify at least:
     `result.stacked` succeeds on a multi-step run with `(T,)`-shaped fields
     including `step` and `n_valid`, and returns `(0,)`-shaped fields on an
     empty history rather than raising.
-17. **Inflation sees the ladder, and is applied where the contract says.** An
+20. **Inflation sees the ladder, and is applied where the contract says.** An
     `Inflation` and an `EnsembleUpdate` that record their `step` and `beta`
     arguments observe the true sequence, and a rule varying with `beta` gives a
     run that is still exactly resumable — the point of passing the arguments
@@ -2598,7 +2535,7 @@ written independently of the code under test. The suite must verify at least:
     was otherwise untested, that the initial ensemble is inflated before it is
     ever evaluated. `result.ensemble` is asserted to be an update output, never
     an inflation output.
-18. **The record agrees with the evaluation it came from.** Over a multi-rung
+21. **The record agrees with the evaluation it came from.** Over a multi-rung
     run with distinct increments, every `HistoryRecord` field is checked
     against an independently recomputed value: `step` and `beta` against the
     state entering the rung, `beta_next` against the state leaving it,
@@ -2611,7 +2548,7 @@ written independently of the code under test. The suite must verify at least:
     `misfit_min`/`misfit_max`, an `ess` computed at `beta` instead of at the
     increment, or a `beta_next` off by one rung — none of which any other test
     would notice, since every one of them stays a plausible scalar.
-19. **`rms_parameter_spread` is exact against a closed form.** On a
+22. **`rms_parameter_spread` is exact against a closed form.** On a
     QR-of-ones fixture with covariance factor $c I_P$, every coordinate has
     empirical variance exactly $c^2$, so the field is exactly $c$; a second
     fixture with distinct per-coordinate variances pins the root-mean-square
@@ -2619,7 +2556,7 @@ written independently of the code under test. The suite must verify at least:
     divisor of $J$ rather than $J-1$, and a missing $1/\sqrt{P}$ — are
     separately distinguishable at $J = 5$, $P = 3$, and the field is otherwise
     covered by no obligation at all despite being reported in the history.
-20. **A finished ladder is a no-op, and says so.** Running a completed
+23. **A finished ladder is a no-op, and says so.** Running a completed
     `FixedSchedule` state through a fresh schedule of the same length gives
     `status="schedule_exhausted"`, `n_steps == 0`, an empty history,
     `last_evaluation is None`, a bit-identical ensemble, and **zero** forward
@@ -2627,15 +2564,15 @@ written independently of the code under test. The suite must verify at least:
     ladder. The adaptive counterpart is asserted too, since it exhausts on
     `beta` rather than on `step`. {ref}`eki-state` devotes a warning to this
     trap and nothing tested it.
-21. **The driver hands the update what it repaired.** With a model failing one
+24. **The driver hands the update what it repaired.** With a model failing one
     member of six, a recording `EnsembleUpdate` receives an `ensemble` and
     `predictions` bit-identical to `repair_failed_members` applied to the
     inflated ensemble and the raw predictions — **both** elements.
     {doc}`gaussian-contract` warns that differing masks between the two blocks
     corrupt $\widehat C_{uv}$ with no exception, so repairing one and not the
-    other is a silent wrong answer that obligation 8 does not reach, since it
+    other is a silent wrong answer that obligation 9 does not reach, since it
     exercises the helper rather than the driver.
-22. **The axes compose.** A smoke matrix over every schedule, both updates,
+25. **The axes compose.** A smoke matrix over every schedule, both updates,
     every inflation and both stopping-rule settings, on a tiny affine problem
     of three rungs, asserting only that each run terminates, reports a
     permitted `status`, stacks, stays finite, and matches an instrumented
@@ -2644,7 +2581,7 @@ written independently of the code under test. The suite must verify at least:
     otherwise checked at a single point of the space. It also catches a driver
     that inspects one axis to decide another — an `ess` computed only for the
     ESS schedule, say.
-23. **The document's own recipes run.** Every runnable block in this page is
+26. **The document's own recipes run.** Every runnable block in this page is
     executed by a test: the two-form example, the pinned prior draw,
     `restart()`, the backtracking loop, `AdditiveInflation`'s definition, the
     `stacked` one-liner, the `EKIError` checkpoint pattern, the `iterate`
@@ -2723,7 +2660,7 @@ any of the above prescribes.
 (eki-excluded)=
 ## Deliberately excluded
 
-Recorded so their absence reads as a decision, not an oversight.
+Their absence is a decision, not an oversight.
 
 **A `lax.scan` driver.** The forward model is an arbitrary callable and may
 not be traceable at all, so the loop cannot be a scan. Everything that *can*
@@ -2736,19 +2673,13 @@ this contract is largely about; no consumer has asked for the trade.
 passed to `run`, `iterate`, `step` and the helpers, and a container would
 document its shape agreement once.
 
-The tempting objection — that a field holding an arbitrary callable can be
-neither pytree data nor hashable static metadata, so the container could not be
-a pytree — **does not hold**, and is recorded as rejected so it is not
-rediscovered: `EKIResult` is already a plain frozen dataclass rather than a
-pytree, on the ground that it is never an argument to traced code, and a
-`Problem` would qualify under exactly the same rule since the driver unpacks it
-and never traces the forward model.
-
-It is excluded on the honest ground instead: three arguments are not many, the
-container would carry no behaviour, and every call site that takes the triple
-would then accept either form or force a conversion. The shape agreement it
-would document is validated once per run anyway ({ref}`eki-driver`). Revisit if
-a fourth element joins the triple, at which point the balance changes.
+Not excluded because it could not be a pytree — `EKIResult` is already a plain
+frozen dataclass on the ground that it never crosses a trace boundary, and a
+`Problem` would qualify the same way. Excluded because three arguments are not
+many, the container would carry no behaviour, and every call site taking the
+triple would then accept either form or force a conversion. The shape agreement
+it would document is validated once per run anyway ({ref}`eki-driver`). Revisit
+if a fourth element joins the triple.
 
 **A `callback` argument.** `iterate` is the extension point, and a callback
 would be a second way to do the same thing. `run`'s documentation shows the
@@ -2780,9 +2711,8 @@ against the driver. They are expressible against `step`, which takes the triple
 per call, so the variant is a five-line loop rather than a missing feature
 ({ref}`eki-step`). The driver keeps the binding because a fixed $N$ is what
 lets it validate shapes once and lets a stopping rule mean the same thing at
-every rung. Recorded because the three-axis table of {ref}`eki-axes` names
-schedule, update and inflation, and never the data — an omission a reader would
-otherwise assume was an oversight.
+every rung. Noted because the three-axis table of {ref}`eki-axes` names schedule, update
+and inflation, and never the data.
 
 **Importance weights and resampling.** The ESS appears as a step-size
 heuristic and a diagnostic only. Carrying weights, resampling, and the
@@ -2802,7 +2732,9 @@ Domain localization is the plan, as an update rule.
 
 **Mean-field and unscented variants.** Their members are deterministic
 quadrature nodes regenerated from a mean and a covariance each step, so the
-state they need is $(m, C)$ rather than an ensemble; see {ref}`eki-variants`.
+state they need is $(m, C)$ rather than an ensemble. The distinguishing feature
+is that the members do not move freely and are not carried between steps — not
+the value of $J$, which such a scheme also has.
 
 **Multilevel and multi-fidelity variants.** They carry several coupled
 ensembles at different forward-model resolutions and estimate moments by a
@@ -2811,11 +2743,8 @@ telescoping sum across them. `EKIState` holds one ensemble, `run` takes one
 different driver rather than a policy. Adjacent to the fixed-$J$ decision
 below.
 
-**The moment-exact repair of failed members.** Rescaling every anomaly by
-$\sqrt{(J-1)/(J_v-1)}$ matches the valid members' moments exactly, but moves
-the surviving members outward by a data-dependent factor at every step —
-silent inflation, in the configuration nobody changes. The shipped repair
-damps instead; {ref}`eki-failures` gives the arithmetic.
+**The moment-exact repair of failed members.** {ref}`eki-failures` gives the
+construction, its arithmetic, and why the shipped repair damps instead.
 
 **Stopping on parameter stagnation.** A rule comparing consecutive ensembles
 would need history, which would make stopping rules stateful and runs
@@ -2829,32 +2758,26 @@ above.
 
 **Composing inflations, adaptive inflation, and the relaxation-to-prior
 family.** Two inflations compose in a three-line callable. An inflation that
-adapts to the misfits would need the summary, enlarging the protocol for no
+adapts to the misfits would need the evaluation, enlarging the protocol for no
 current consumer. The relaxation schemes — blending the posterior ensemble's
 anomalies or spread back toward the prior step's — need *both* the pre-update
 and post-update ensembles, so they are not `Inflation`s at all under this
 layer's signature; they are post-update transformations, and adding them would
-mean a fifth protocol. All three are recorded rather than designed, and all
-three are writable as a custom `EnsembleUpdate` wrapping a shipped one, which
-does see both ensembles.
+mean a fifth protocol. All three are writable as a custom `EnsembleUpdate` wrapping a shipped one,
+which does see both ensembles.
 
-**The misfit at the mean parameter, $\Phi(G(\bar u))$.** A third misfit
-diagnostic alongside the two the summary provides, and the one some
-discrepancy criteria are written against. It costs an extra forward-model
-evaluation per step — a $1/J$ increase in the run's dominant cost for a
-diagnostic — so it is the caller's to compute in an `iterate` loop if wanted.
+**The misfit at the mean parameter, $\Phi(G(\bar u))$.** An extra forward-model
+evaluation per step for a diagnostic, a $1/J$ increase in the run's dominant
+cost. The caller's to compute in an `iterate` loop; {ref}`eki-diagnostics`
+distinguishes it from the two the evaluation carries.
 
 **Conditioning diagnostics in the history.** The singular values of the scaled
 whitened anomaly matrix, and the marginal-likelihood term
-$\sum_i\log(1+\sigma_i^2)$ that {doc}`gaussian-contract` derives from the same
-decomposition, are the natural answer to "is my ensemble collapsing". They are
-excluded from `HistoryRecord` because the update's SVD is internal to
-`pyeki.gauss` and has no return channel, so the driver would have to compute a
-second one at $O(NJ^2)$ — the update's own order — for a diagnostic. They stay
-reachable: `summary.whitened_residuals` determines the matrix completely, so a
-caller takes the SVD in an `iterate` loop and pays for it on purpose
-({ref}`eki-diagnostics`). Revisit if `pyeki.gauss` ever grows a decomposition
-accessor, which it records as awaiting a consumer.
+$\sum_i\log(1+\sigma_i^2)$ built from the same decomposition, would cost the
+driver a second $O(NJ^2)$ decomposition — the update's own order, for a
+diagnostic — because the update's SVD is internal to `pyeki.gauss`.
+{ref}`eki-diagnostics` gives the recovery route. Revisit if `pyeki.gauss` ever
+grows a decomposition accessor, which it records as awaiting a consumer.
 
 **Wall-clock and profiling instrumentation.** The record holds the algorithmic
 diagnostics, and the driver emits one `logging` record per step
