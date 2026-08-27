@@ -55,15 +55,17 @@ package's permanent scope boundary), parameter transformations and
 constraints, and localization (`pyeki.localize`, which plugs in as an update
 rule). {ref}`eki-excluded` lists what else is left out and why.
 
-The layer's arithmetic is deliberately shallow, and the boundary is worth
-stating precisely rather than loosely: **this layer forms no covariance and
-factorizes nothing.** Every operation on a covariance — whitening, factoring,
-solving, the conditioning kernel itself — happens in `pyeki.linalg` or
-`pyeki.gauss`. What does happen here is elementwise: whitened residuals and
-their norms, log-space weight ratios, mean-and-subtract on an ensemble, and
-centred draws from an operator's factor. A step of this layer that assembled a
-covariance, or that re-derived any part of the conditioning kernel, would be a
-layering violation ({ref}`eki-updates`).
+**This layer implements no covariance arithmetic of its own.** It *calls*
+`whiten`, `factor` and the conditioning methods of the layers below — the
+diagnostics whiten a $(J, N)$ residual block every step
+({ref}`eki-diagnostics`), and `AdditiveInflation` requires a factor
+({ref}`eki-inflation`) — but every such operation is dispatched to
+`pyeki.linalg` or `pyeki.gauss`, and nothing here decomposes, inverts or
+assembles a covariance. What this layer computes itself is elementwise:
+whitened residuals' norms, log-space weight ratios, and mean-and-subtract on an
+ensemble. A step that assembled a covariance, or that re-derived any part of
+the conditioning kernel, would be a layering violation
+({ref}`eki-updates`).
 
 The implementation PR must also add the layer's user-guide page, per the
 package rule that every user-facing feature has a user-guide home; this page
@@ -198,10 +200,11 @@ property and its first conformance obligation ({ref}`eki-conformance`).
 Using $R/\beta_t$ — the accumulated level — instead of $R/\Delta\beta_t$ is
 the layer's signature silent failure. It raises nothing, produces a
 plausible-looking posterior, and gets the answer wrong by an amount that
-*grows with ladder length*: on a linear-Gaussian problem with a five-step
-uniform ladder, the increment form reproduces the one-shot posterior to
-$10^{-15}$ while the level form is off by $0.12$ in the mean and $0.25$ in
-the covariance. Write the telescoping test first.
+*grows with ladder length*. On a uniform $T$-rung ladder the level form
+accumulates $\sum_{t=1}^{T} t/T = (T+1)/2$ times the data precision instead of
+one — a factor of 3 at $T = 5$ and 5.5 at $T = 10$ — so it is exact only at
+$T = 1$ and diverges from there. Conformance test 2 pins this against a named
+fixture.
 :::
 
 The identity holds exactly for the ensemble's empirical moments under the
@@ -296,7 +299,7 @@ independent axes, and that the driver is the same in every case.
 | ---- | ------ | ------------------- |
 | how far, and when to stop | `Schedule`, `StoppingRule` | what is $\Delta\beta_t$, and when does the run end? |
 | how the ensemble moves | `EnsembleUpdate` | given the increment, what is the new ensemble? |
-| how spread is maintained | `Inflation` | what happens to the ensemble between steps? |
+| how spread is maintained | `Inflation` | what happens to the ensemble before each forward evaluation? |
 
 The two forms of EKI named in {ref}`eki-scope` are therefore **not two
 drivers, and not a flag**: they are two schedules.
@@ -379,7 +382,7 @@ arbitrary intermediate level. `EKIResult.status` records which happened, and
 | `EnsembleUpdate` | protocol | one ensemble update, given an increment |
 | `Schedule` | protocol | the increment, and whether the ladder is finished |
 | `StoppingRule` | protocol | whether to stop, given the current misfits |
-| `Inflation` | protocol | a transformation of the ensemble between steps |
+| `Inflation` | protocol | a transformation of the ensemble, applied before each forward evaluation |
 | `run`, `iterate`, `step` | functions | the driver, as a function, as a generator, and as one iteration |
 | `whitened_misfits`, `effective_sample_size`, `repair_failed_members` | functions | the array-level pieces schedules and custom drivers need |
 
@@ -405,10 +408,12 @@ Rules governing the set:
 
 Everything a run needs in order to continue.
 
-**Fields.** `ensemble`, a `(J, P)` array; `beta`, a 0-d array; `key`, a typed
-PRNG key of shape `()`; and `step`, a static `int`. Construction validates
-exact ranks, $J \ge 2$ and $P \ge 1$, `step >= 0`, and that `key` is a typed
-key (tier 2, shape-only). A Python float or 0-d array is accepted for `beta`
+**Fields**, in declaration order: `ensemble`, a `(J, P)` array; `beta`, a 0-d
+array; `step`, a static `int`; and `key`, a typed PRNG key of shape `()`.
+Construction validates exact ranks, $J \ge 2$ and $P \ge 1$, `step >= 0`, and
+that `key` is a typed key — a check on **shape and dtype** (tier 2), since a
+typed key and a 0-d float array agree on shape, and only
+`jnp.issubdtype(key.dtype, jax.dtypes.prng_key)` separates them. A Python float or 0-d array is accepted for `beta`
 and converted to a 0-d float array before storing, as the operator layer's
 scalar dunders do; `beta` must not be negative.
 
@@ -545,23 +550,29 @@ driver deliberately fixes for a whole run ({ref}`eki-excluded`).
    through the record; the driver consults the summary itself.
 6. **Validate the increment.** It must be a scalar, finite, and **strictly
    positive**, converted to a 0-d float array; otherwise `ValueError`. A zero
-   increment is not a harmless no-op — $R/0$ is infinite and the update
-   returns `nan`.
+   increment is rejected even though it raises nothing: $R/0$ is a
+   {class}`~pyeki.linalg.PSDScaled` with an infinite scalar, which whitens to
+   zero, so the gain vanishes and the ensemble is returned **unchanged** while
+   $\beta$ never advances. An adaptive ladder would then spin until
+   `max_steps`.
 7. **Update.** `u_new = update(key_update, ensemble=u, predictions=v, y=y,
    noise_cov=noise_cov, increment=dbeta, step=state.step, beta=state.beta)`,
    validated to be `(J, P)`.
 8. **Finiteness.** If `u_new` contains a non-finite entry, raise `EKIError`
    naming the step and the level. Silent `nan` propagation through a long run
-   is the worst outcome available to this layer, and the check is free given
-   that step 4 already synchronized.
+   is the worst outcome available to this layer, and the cost is one $O(JP)$
+   reduction.
 9. **Advance.** Return
    `EKIState(u_new, state.beta + dbeta, state.step + 1, key_next)` and the
    step's `StepRecord`.
 
 Steps 4, 6 and 8 read concrete values, so a step **synchronizes with the device
-once**. This is a deliberate cost: $O(1)$ scalars and one reduction against $J$
-forward-model evaluations, and it is what allows termination, validation and
-adaptive increments to be ordinary Python.
+a small fixed number of times** — at most three here, and at most four in
+`iterate`, which also reads `exhausted` and the stopping rule. The reads cannot
+be coalesced: step 6 decides whether to dispatch the update, and step 8 reads a
+value the update produces. This is a deliberate cost: $O(1)$ scalars and one
+reduction against $J$ forward-model evaluations, and it is what allows
+termination, validation and adaptive increments to be ordinary Python.
 
 ### What the driver adds
 
@@ -662,8 +673,8 @@ Two rules ship, and both are two lines over `pyeki.gauss`:
 
 | rule | delegates to | character |
 | ---- | ------------ | --------- |
-| `SquareRootUpdate()` | `EnsembleJoint(u, v).transform_update(y, noise_cov / increment)` | deterministic square-root transform; ignores the key; **the default** |
-| `StochasticUpdate()` | `EnsembleJoint(u, v).pathwise_update(key, y, noise_cov / increment)` | perturbed-observation; consumes the key |
+| `SquareRootUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov / increment)` | deterministic square-root transform; ignores the key; **the default** |
+| `StochasticUpdate()` | `EnsembleJoint(u_samples=u, v_samples=v).pathwise_update(key, y, noise_cov / increment)` | perturbed-observation; consumes the key |
 
 Neither holds any field. The entire numerical content of the update — the
 whitened-SVD kernel, the bounded gain multiplier, the identity-completed
@@ -704,9 +715,9 @@ A `Schedule` has two methods.
 | `exhausted` | `(step: int, beta: Array) -> bool` | is the ladder finished, on bookkeeping alone? Decided before any forward evaluation. Must return a Python `bool`. |
 | `increment` | `(summary: StepSummary) -> Array \| float \| None` | the next increment, or `None` for "finished after all". Called only when `exhausted` is false. A returned value must be scalar, finite and strictly positive. |
 
-The split is the load-bearing part of the interface. `exhausted` is cheap and
-misfit-independent, so a run whose ladder is finished pays nothing; `increment`
-may look at the current misfits, so adaptivity costs nothing extra either.
+`exhausted` is misfit-independent and is called before any forward evaluation,
+so a run whose ladder is already finished pays nothing; `increment` may read the
+current misfits, so adaptivity costs no evaluation either.
 Both must be pure: a schedule that counted its own calls could not be resumed
 from a checkpoint, and `step` is passed precisely so that it need not.
 
@@ -730,7 +741,8 @@ schedule returns `None`; both reach their budgets through `exhausted`.
 
 **No schedule performs a trial update or a trial forward evaluation.** Both
 shipped criteria read nothing but the misfit vector $(\Phi_1,\dots,\Phi_J)$ and
-the current level, so adaptivity costs $O(J)$ per step on top of a whitening
+the current level, so adaptivity costs $O(\texttt{n\_bisect}\cdot J)$ per step
+for a bisecting schedule and $O(J)$ for a closed-form one, on top of a whitening
 the driver pays anyway. Two consequences: the increment-rescaling identity that
 {doc}`gaussian-contract` records for candidate steps
 ($S(R/\delta) = \sqrt{\delta}\,S(R)$) is never needed here, because no
@@ -794,7 +806,10 @@ positive; the floor must be positive and no greater than the ceiling
 
 **Exhaustion.** `exhausted(step, beta)` is
 `beta_final is not None and beta >= beta_final - budget_tol`, with
-`budget_tol = 1e-12 * max(1.0, beta_final)`. It is always false when
+`budget_tol = 1e-12 * beta_final`, relative so that a small budget is not
+swallowed whole: an absolute floor would make any `beta_final` at or below it
+exhaust at $\beta = 0$, returning an untouched ensemble and an empty history
+with nothing raised. It is always false when
 `beta_final is None`, so an unbounded ladder must be ended by a stopping rule;
 a run with neither is a `max_steps` `EKIError`, and that error's message must
 say so ({ref}`eki-driver`).
@@ -809,6 +824,16 @@ $$
 \beta_{\text{final}} - \beta
 \,\Bigr).
 $$
+
+**The budget term is present only when `beta_final is not None`.** For an
+unbounded ladder the clamp is
+$\min(\max(\delta^\star, \delta_{\min}), \delta_{\max})$; writing the
+three-term form unconditionally is a `TypeError` on every unbounded run, which
+is a shipped configuration ({ref}`eki-variants`). For the same reason
+`max_increment` must be **finite**: an unbounded ladder with an infinite ceiling
+and a degenerate ensemble has no upper clamp at all, and
+$\delta^\star = +\infty$ then reaches the increment validation of
+{ref}`eki-step` and raises there instead.
 
 The order is normative, and both inversions of it are bugs. The floor beats
 the criterion, so a step is always taken even where the criterion would demand
@@ -851,8 +876,13 @@ standard ESS-based adaptive tempering of the sequential Monte Carlo literature
 {ref}`eki-references`), and is used here purely as a **step-size heuristic**:
 pyEKI computes no importance weights, does no resampling, and makes no
 importance-sampling correctness claim. Its extra field is `target`,
-the ESS level sought as a fraction of $J$, in $(0, 1)$, default `0.5`; and
-`n_bisect`, a static `int` bisection count, default `50`.
+the ESS level sought as a fraction of $J$, default `0.5`, required to lie in
+$(0,\ 1 - 10^{-6}]$ — bounded away from 1 because $\mathrm{ESS}(0)$ evaluates
+to `exp(log J)` rather than exactly $J$, so a `target` within round-off of 1
+makes $\delta = 0$ an invalid lower bracket and the invariant below false from
+the first iteration; and `n_bisect`, a static `int` bisection count, default
+`50`, required to be at least 1. Any `n_bisect` at or above 30 attains the
+target to float64 resolution.
 
 For an increment $\delta$, the weights and their effective sample size are
 
@@ -906,14 +936,24 @@ clamped as {ref}`eki-adaptive` specifies. Three implementation requirements:
 
 - **Bisect on a bracket, and return the safe end.** Take
   $\delta_{\mathrm{hi}} = \min(\delta_{\max},\, \beta_{\text{final}} -
-  \beta)$; if $\mathrm{ESS}(\delta_{\mathrm{hi}})$ already meets the target,
-  return it — the cap binds and no search is needed. Otherwise bisect
+  \beta)$, or $\delta_{\max}$ when `beta_final is None`. Bisect
   $[0, \delta_{\mathrm{hi}}]$ for exactly `n_bisect` iterations, maintaining
   $\mathrm{ESS}(\text{lo}) \ge \text{target}\cdot J >
   \mathrm{ESS}(\text{hi})$, and return `lo`. The guarantee is therefore
   one-sided: the returned increment meets the target before the floor is
-  applied. A fixed iteration count keeps the computation
-  `jit`-compatible with no data-dependent control flow.
+  applied.
+
+  When $\mathrm{ESS}(\delta_{\mathrm{hi}})$ already meets the target the cap
+  binds and $\delta_{\mathrm{hi}}$ is the answer — but that case must be folded
+  in **branchlessly**, by initialising
+  `lo = jnp.where(ess_hi >= target * J, delta_hi, 0.0)` and letting the loop run
+  unchanged, never as an early Python return on a device value. It is not an
+  optimization: without it the degenerate ensemble of {ref}`eki-adaptive`
+  reaches the largest allowed step only to $2^{-\texttt{n\_bisect}}$, and a
+  budgeted ladder never consumes its budget exactly. A fixed iteration count
+  with no data-dependent control flow is what keeps the whole criterion one
+  traced array computation; implement the loop with `lax.fori_loop`, not as an
+  unrolled Python loop.
 - **Compute the ESS in log space.** $\delta\Phi_j$ is routinely in the
   hundreds, so
   $\mathrm{ESS} = \exp\bigl(2\,\mathrm{lse}(-\delta\Phi) -
@@ -954,8 +994,10 @@ The criterion. Write $\chi_j = 2\,\delta\,\Phi_j$ for member $j$'s whitened
 misfit measured at *this step's own* noise level $R/\delta$, rather than at
 the base level. If the step's target were well specified and the ensemble were
 distributed according to it, each $\chi_j$ would be a $\chi^2_N$ variate, whose
-mean is $N$ and whose variance is $2N$. The schedule asks the increment to
-respect those two benchmarks:
+mean is $N$ and whose variance is $2N$. Those two benchmarks give two
+thresholds on $\delta$ — **alternatives, not a conjunction**; which one applies
+is settled by the derivation below, and requiring both at once is the silent
+error this section exists to prevent:
 
 $$
 \text{(mean)}\quad \overline{\chi} \le N
@@ -1014,7 +1056,9 @@ is exactly $\theta = N/2$ in both bounds. That is the sense in which the
 schedule has no free parameter: the observation dimension supplies it.
 
 Which bound binds is decided by the misfits' coefficient of variation: the mean
-bound is the larger exactly when $\sigma_\Phi/\overline{\Phi} > \sqrt{2/N}$. For
+bound is the larger exactly when $\sigma_\Phi/\overline{\Phi} > 1/\sqrt{\theta}$,
+which at the default $\theta = N/2$ is $\sqrt{2/N}$ — itself exactly the
+coefficient of variation of a $\chi^2_N$ variate. For
 any appreciable $N$ that is the common case — the source reports it holding
 throughout its own experiments, and notes that it corresponds to a prior wide
 enough to contain the truth. The variance bound takes over for an unusually
@@ -1023,12 +1067,15 @@ spread, where it correctly permits a longer step than the mean alone would.
 
 **How this differs from the ESS criterion — and why both ship.** The two are
 not variants of one idea, and they do not agree. Under the small-increment
-expansion of {ref}`eki-adaptive`'s companion section,
-$\mathrm{ESS}(\delta) \approx J/(1 + \delta^2\sigma^2_\Phi)$, so the variance
-benchmark $\delta^2\sigma^2_\Phi = N/2$ sits at a relative ESS of about
-$2/(N+2)$ — for a hundred observations, an ESS of roughly two members. The
-misfit schedule therefore takes **far longer steps** than an ESS target near
-$1/2$ would allow. That is not a defect in either: they control different
+increment the misfit schedule chooses, the effective sample size is at or near
+its **floor**: the variance benchmark puts $\delta^2\sigma^2_\Phi$ at $N/2$,
+which for any appreciable $N$ is far outside the small-increment regime in
+which $\mathrm{ESS}$ is close to $J$, and drives the weights onto one to three
+members regardless of $N$ or $J$. (For Gaussian misfits the weights are
+lognormal and $\mathrm{ESS}/J = e^{-\delta^2\sigma^2_\Phi}$, so the floor
+$\mathrm{ESS} \ge 1$ binds well before the benchmark is reached.) The misfit
+schedule therefore takes **far longer steps** than an ESS target near $1/2$
+would allow. That is not a defect in either: they control different
 things. The ESS criterion keeps each intermediate target representable by the
 ensemble that must describe it, which is what the *sampling* form needs; the
 misfit criterion absorbs as much data per rung as the noise at that rung can
@@ -1044,8 +1091,15 @@ few large steps is worth its coarser approximation.
 $+\infty$ rather than `nan` when their denominator vanishes: a collapsed
 ensemble gives $\sigma^2_\Phi = 0$, and an ensemble that already fits the data
 exactly gives $\overline{\Phi} = 0$. Compute each as
-`jnp.where(d > 0, theta / d, jnp.inf)`; the clamps of {ref}`eki-adaptive` then
-deliver the largest allowed step, as that section requires. Dividing unguarded
+
+```python
+jnp.where(d > 0, theta / jnp.where(d > 0, d, 1.0), jnp.inf)
+```
+
+— the **doubled** `where`, because `jnp.where` evaluates both branches, so the
+single-`where` form still forms `theta / 0` and yields a `nan` derivative at
+`d = 0`. The clamps of {ref}`eki-adaptive` then deliver the largest allowed
+step, as that section requires. Dividing unguarded
 happens to give `inf` for positive `theta`, but relies on the sign of a zero
 and gives `nan` at `theta = 0`, so the guard is contractual rather than
 stylistic.
@@ -1178,8 +1232,10 @@ one place in the package, the gauss layer's snapshot test covers this one too,
 and the two cannot drift apart — which they could if this layer wrote out its
 own `normal(key, (J, k))`, since nothing but review would notice the shapes
 diverging. The perturbations
-are **centred**, so the ensemble mean is preserved exactly and the empirical
-covariance is inflated by `cov` in expectation under the $J-1$ divisor. A
+are **centred**, which preserves the ensemble mean exactly. The empirical
+covariance is inflated by `cov` in expectation under the $J-1$ divisor —
+exactly, and independently of the centring, since subtracting the perturbation
+mean leaves the anomalies about the new mean unchanged. A
 scale is folded into the operator by the caller — `AdditiveInflation(0.01 *
 prior.cov)` — rather than carried as a second field. This is the only shipped
 mechanism that moves the ensemble out of its initial affine subspace, which is
@@ -1273,17 +1329,24 @@ valid members are left exactly where they are.** Then, exactly:
 - the all-$J$ empirical covariance with divisor $J-1$ equals the valid-member
   covariance with divisor $J_v-1$, scaled by $(J_v-1)/(J-1) < 1$, and
   likewise the cross-covariance — both blocks carry the same factor;
-- failed members become $(\hat u, \hat v)$, so their residual is $y - \hat v$
-  and their update lands at the posterior mean; they rejoin the ensemble
-  rather than being lost.
+- failed members become $(\hat u, \hat v)$, so their residual is $y - \hat v$;
+  they rejoin the ensemble rather than being lost. Under
+  `SquareRootUpdate` their update lands **exactly** at the posterior mean:
+  zeroing row $j$ of $A_u$ and of $A_v$ zeroes row $j$ of $S$, hence
+  $U_{ji} = 0$ for every $\sigma_i > 0$, so the transform leaves that row's
+  anomaly at zero. Under `StochasticUpdate` they land at the posterior mean
+  plus their own $\mathcal{N}(0, KRK^\top)$ perturbation.
 
 **The covariance is damped, and that is the intended trade.** The step
 conditions with $\widehat C_{uv}$ and $\widehat C_{vv}$ both multiplied by
 $c = (J_v-1)/(J-1)$, giving the gain $c\,\widehat C_{uv}(c\,\widehat C_{vv} +
-R)^{-1}$ — neither $K$ nor $cK$, but a mildly *shortened* step, equivalent in
-effect to a slightly smaller increment. The bias is towards moving less, which
-is the safe direction, it is bounded by the failure fraction, and it does not
-accumulate.
+R/\delta)^{-1} = \widehat C_{uv}(\widehat C_{vv} + R/(c\delta))^{-1}$ — neither
+$K$ nor $cK$, but exactly the gain at the shorter increment $c\delta$. For the
+mean, then, a failed member costs a slightly smaller step, which is the safe
+direction and is bounded by the failure fraction. The posterior *spread* is
+additionally narrowed by $c$, and that part **does** carry into the next step:
+with failures recurring at rates $c_t$ the ensemble carries $\prod_t c_t$. What
+does not accumulate is the factor within a single step.
 
 :::{admonition} Why the moment-exact repair is not the default
 :class: note
@@ -1331,9 +1394,12 @@ consequence for compilation is at most one extra traced variant
 **Misfits are computed after repair.** A failed member would otherwise
 contribute a `nan` misfit and poison every statistic and every adaptive
 criterion. After repair its prediction is $\hat v$, so it contributes
-$\Phi(\hat v)$ — the misfit of the valid centre. The bias is therefore
-towards the average, which makes the reported misfit spread and the ESS
-slightly optimistic when members fail; `n_valid` is in the summary so that a
+$\Phi(\hat v)$ — the misfit of the valid centre, which by the identity of
+{ref}`eki-diagnostics` sits *below* the valid members' mean misfit by
+$\tfrac{J_v-1}{2J_v}\operatorname{tr}(W \widehat C_{vv} W^\top)$. The bias in
+$\overline{\Phi}$ is therefore downward, which makes the reported misfit
+spread and the ESS slightly optimistic and makes
+`AdaptiveMisfitSchedule`'s mean bound slightly permissive; `n_valid` is in the summary so that a
 criterion may account for it.
 
 (eki-diagnostics)=
@@ -1394,8 +1460,14 @@ dimension without the schedule storing it.
 driver whitens $y - v_j$ against the base $R$ to build this array, and the
 update then whitens $A_v$ against $R/\Delta\beta$ inside
 {class}`~pyeki.gauss.EnsembleJoint`. The two are the same computation up to a
-factor: centring the rows of `whitened_residuals` gives $-A_v W^\top$ exactly,
-and the tempered whitener is $\sqrt{\Delta\beta}\,W$.
+factor: centring the rows of `whitened_residuals` gives $-A_v W^\top$ in exact
+arithmetic, and the tempered whitener is $\sqrt{\Delta\beta}\,W$. The two
+routes are **not** interchangeable in floating point: `pyeki.gauss` centres and
+then whitens, precisely because centring already-whitened predictions cancels a
+common $W\bar v$ and loses
+$O(\varepsilon\sqrt{\kappa(R)}\,\lVert W\bar v\rVert / \lVert W A_v\rVert)$
+— an error that grows as the ensemble collapses. The recovered matrix is a
+diagnostic, never a substitute for the update's own.
 
 For structured whiteners applying in $O(N)$ per vector this is absorbed by the
 update's own $O(NJ^2)$. For a **dense** whitener it is not:
@@ -1478,17 +1550,22 @@ computes its own SVD internally and has no channel to return one, and having
 the driver compute a second SVD would add an $O(NJ^2)$ cost per step, the same
 order as the update itself, for a diagnostic. It is not lost, because
 `summary.whitened_residuals` **determines $S$ completely** — centring its rows
-gives $-A_v W^\top$, as the summary's own section shows — so a caller who wants
-the spectrum takes one SVD in an `iterate` loop and pays for it deliberately. The related identity
+gives $-A_v W^\top$, as the summary's own section shows, to the accuracy that
+section records — so a caller who wants the spectrum takes one SVD in an
+`iterate` loop and pays for it deliberately. The related identity
 $\log\det(\widehat C_{vv} + R) = \log\det R + \sum_i \log(1+\sigma_i^2)$,
 which {doc}`gaussian-contract` records but does not expose, is available the
 same way.
 
-**The terminal record.** When a stopping rule ends a run, the forward
-evaluation that triggered it is recorded as a final `StepRecord` with
-`increment` exactly `0.0`, `beta_next == beta`, and `ess == J`. It appears at
-most once, always last, and only for a stopping-rule termination — a
-schedule-exhausted run performs no such evaluation. A zero increment in a
+**The terminal record.** When a run ends on an evaluation whose update is then
+discarded, that evaluation is recorded as a final `StepRecord` with `increment`
+exactly `0.0`, `beta_next == beta`, and `ess` the literal `float(J)` — written
+by the driver rather than obtained from `effective_sample_size`, since
+`exp(log J)` is not `J` in floating point. It appears at most once, always
+last, and in exactly two cases: a stopping rule fired
+({ref}`eki-stopping`), or a schedule's `increment` returned `None`
+({ref}`eki-schedules`). A run ended by `exhausted` performs no such evaluation
+and emits no such record. A zero increment in a
 record therefore means "evaluated, then stopped"; this is the one zero
 increment the layer permits, and it is written by the driver, never returned
 by a schedule.
@@ -1504,10 +1581,11 @@ The result is a `StepRecord` whose `batch_shape` is `(T,)` — a family in the
 sense of {ref}`contract-families`, inert to methods and legible in its repr,
 which is exactly what a stacked history should be.
 
-The one case to guard is the **empty history**: a run that ends before its
-first update — an already-exhausted ladder, or a stopping rule that fires at
-step 0 — has `history == ()`, and `jax.tree.map` with no trees raises. Callers
-stacking a history must check `result.n_steps` first. The layer ships no
+The one case to guard is the **empty history**: a run whose ladder is already
+exhausted on entry performs no evaluation, so `history == ()` and
+`jax.tree.map` with no trees raises. Callers stacking a history must check
+`result.n_steps` first. A stopping rule that fires at step 0 is *not* this case
+— it emits a terminal record, so `n_steps == 1`. The layer ships no
 tabular or plotting machinery.
 
 (eki-driver)=
@@ -1564,8 +1642,10 @@ Moments beyond the mean are one line through the layer below —
 posterior, and `jnp.cov` gives the raw one — so the result carries `mean` for
 convenience and stops there.
 
-`status` is one of exactly three strings, exported as module-level constants so
-that a comparison cannot be misspelled:
+`EKIResult.status` is one of exactly three strings, exported as module-level
+constants so that a comparison cannot be misspelled. `run` produces only the
+first two; the third is for a caller reporting an `iterate` loop they ended
+themselves:
 
 | status | meaning |
 | ------ | ------- |
@@ -1655,9 +1735,15 @@ because they are pure Python over shapes.
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
-| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a raw `uint32` key; `FixedSchedule` increments not all positive; `target` outside $(0,1)$; `tau \le 0` |
-| 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)`; `noise_cov` side ≠ $N$ or a family; the forward model's output not `(J, N)`; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
-| 4. value (debug) | finiteness of the initial ensemble, `y`, and inflation fields; positivity of `anomaly_factor` | violations yield `nan` or a silently wrong ladder outside debug mode |
+| 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `target` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `theta` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_final` $\le 0$; `tau \le 0` |
+| 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)` or not finite; `noise_cov` side ≠ $N$ or a family; `max_steps` not a positive `int`; the forward model's output not `(J, N)` or not of a real floating dtype; an inflation's output not `(J, P)`; an update's output not `(J, P)`; `AdditiveInflation.cov` of side ≠ $P$; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
+| 4. value (debug) | finiteness of the initial ensemble and of `beta`; finiteness of inflation fields; positivity of `anomaly_factor` | violations yield `nan` or a silently wrong ladder outside debug mode |
+
+`y`'s finiteness is checked **unconditionally**, not at tier 4, because it is
+$O(N)$ once per run and because a non-finite `y` otherwise surfaces as one of
+two unrelated and misdiagnosing errors — a full-budget run of `nan` updates
+under `AdaptiveMisfitSchedule`, or "increment not finite" under
+`AdaptiveESSSchedule` — neither of which names `y`.
 
 **String arguments are validated, never silently defaulted.** `on_failure` is
 checked against its two permitted values at the call, and an unrecognized one
@@ -1671,11 +1757,12 @@ The layer defines **one** new exception, because a run is long and expensive
 enough that a caller wants to catch its failures specifically — to checkpoint
 and investigate — without catching every `RuntimeError` in the process:
 
-**`EKIError(RuntimeError)`**, raised for the three conditions under which a
-run cannot continue: `max_steps` exceeded, fewer than two valid members (or
-any invalid member under `on_failure="raise"`), and a non-finite updated
-ensemble. Each message must name the step index, the level, and the
-condition; the `max_steps` message must additionally name the schedule and
+**`EKIError(RuntimeError)`**, raised for the four conditions under which a
+run cannot continue: `max_steps` exceeded; fewer than two valid members; any
+invalid member under `on_failure="raise"`; and a non-finite updated ensemble.
+Each message must name the step index, the level, and the condition; the
+`on_failure="raise"` message must additionally name the number and indices of
+the failed members; the `max_steps` message must additionally name the schedule and
 whether a stopping rule was supplied.
 
 **`EKIError` carries the run, and this is normative.** It has two attributes,
@@ -1757,10 +1844,12 @@ The family machinery of {ref}`contract-families` applies to the pytree value
 classes, in its gauss instantiation ({ref}`gauss-jax`):
 
 - `EKIState`, `StepSummary` and `StepRecord` each have a required
-  `batch_shape` property, computed from the leading axes of each array field
-  beyond its core rank (`ensemble` 2, `misfits` 1, `beta` and the scalar
-  statistics 0, `key` 0), combined by broadcasting with `ValueError` on
-  mismatch. Directly constructed objects always report `()`.
+  `batch_shape` property, computed from the leading axes of each array **field**
+  beyond its core rank — `EKIState.ensemble` 2,
+  `StepSummary.whitened_residuals` 2, `key` 0, and `beta`, `spread` and every
+  `StepRecord` field 0 — combined by broadcasting with `ValueError` on
+  mismatch. Derived properties such as `StepSummary.misfits` are not fields and
+  do not enter the computation. Directly constructed objects always report `()`.
 - When `batch_shape` is non-empty the object is **inert**: every method and
   array-computing property raises `ValueError` naming the object, the
   operation, the batch shape and the remedy. The static `int` properties,
@@ -1833,8 +1922,9 @@ Pairing this recipe with `AdaptiveESSSchedule(beta_final=1.0)` from a prior
 ensemble is therefore a confidently wrong posterior with no error, which is
 precisely the quiet wrongness this package refuses — so it is stated here
 rather than left to be discovered.
-::: The regularization weight is the noise block's
-scale: `block_diag(noise_cov, (1 / lam) * prior.cov)` gives the penalty
+:::
+
+The regularization weight is the noise block's scale: `block_diag(noise_cov, (1 / lam) * prior.cov)` gives the penalty
 $\tfrac{\lambda}{2}\lVert C_0^{-1/2}(u - m_0)\rVert^2$, a
 {class}`~pyeki.linalg.PSDScaled` that whitens as cheaply as `prior.cov` does.
 Centring at $m_0$ rather than at the origin is a choice, and the origin is
@@ -2008,11 +2098,12 @@ written independently of the code under test. The suite must verify at least:
    naive non-log-space formula returns `nan` — the latter as a targeted
    regression test.
 5a. **The two adaptive criteria are distinct, and measurably so.** On the same
-   ensemble, `AdaptiveMisfitSchedule`'s increment sits near the relative ESS of
-   $2/(N+2)$ that {ref}`eki-schedules` predicts for it, and is therefore much
-   larger than `AdaptiveESSSchedule`'s at a target near $1/2$ — pinning the
-   comparison in both directions, so that neither schedule can silently drift
-   into implementing the other's criterion.
+   ensemble, `AdaptiveMisfitSchedule`'s increment drives the effective sample
+   size to within a few members of its floor of 1, and is at least five times
+   `AdaptiveESSSchedule`'s at a target of $1/2$ — pinning the comparison in
+   both directions, so that neither schedule can silently drift into
+   implementing the other's criterion. Both halves are asserted; the first is
+   the executable form of {ref}`eki-schedules`' floor claim.
 6. **Stopping.** `DiscrepancyStop` fires exactly when $2\Phi(\bar v) \le
    \tau^2 N$, is consulted before the increment, ends the run with status
    `"stopping_rule"` and a terminal record whose increment is exactly zero,
