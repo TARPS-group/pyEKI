@@ -40,7 +40,7 @@ something callers assemble from `cholesky`.
 
 ## The conditioning kernel
 
-Let $\Theta'$ and $G'$ be mean-centred parameter and prediction anomalies, $J$
+Let $\Theta'$ and $G'$ be mean-centered parameter and prediction anomalies, $J$
 the ensemble size, and define the **whitened anomaly matrix**. (This page
 writes members as *columns*, $G' \in \mathbb{R}^{N \times J}$; the
 normative {doc}`gaussian-contract` writes them as rows — its $U$ and $V$

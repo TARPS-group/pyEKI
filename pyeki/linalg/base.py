@@ -193,14 +193,34 @@ def value_check(x, predicate, message: str) -> None:
     ``from_matrix``-style classmethods for preconditions that are values
     rather than shapes — positivity, finiteness, definiteness.
 
-    Skipped when debug checks are off, when ``x`` is not array-like, or
-    when ``x`` is a tracer — value checks never affect ``jit``-ed code.
+    Skipped when debug checks are off, when ``x`` is not array-like, and
+    whenever the check cannot be evaluated concretely — value checks never
+    affect ``jit``-ed code.
+
+    Notes
+    -----
+    Two skip conditions are needed, not one. A tracer operand is the obvious
+    case. The subtle case is a *concrete* operand inspected while a trace is
+    live — a closed-over constant inside :func:`jax.jit`, which is how a
+    driver loop passes an observation and a noise covariance. JAX stages a
+    primitive into the live trace regardless of whether its operands are
+    tracers, so the predicate's array work is staged there and reading its
+    result as a bool raises ``TracerBoolConversionError`` from inside a debug
+    check. Both spellings of the predicate are handled: one that returns the
+    comparison for this helper to read, and one that converts to ``bool``
+    itself, as the operators in this package do.
     """
     if not _debug_checks_enabled:
         return
     if getattr(x, "ndim", None) is None or isinstance(x, jax.core.Tracer):
         return
-    if not bool(predicate(x)):
+    try:
+        outcome = predicate(x)
+    except jax.errors.ConcretizationTypeError:
+        return
+    if isinstance(outcome, jax.core.Tracer):
+        return
+    if not bool(outcome):
         raise ValueError(message)
 
 
@@ -232,39 +252,13 @@ def _is_data_annotation(ann) -> bool:
     return False
 
 
-def linop(cls: type) -> type:
-    """Class decorator: make ``cls`` a frozen dataclass and a JAX pytree.
+def _pytree_dataclass(cls: type) -> type:
+    """Frozen dataclass plus JAX pytree registration, for any class.
 
-    Fields are classified by an allowlist: a field is a pytree *child*
-    (data) if and only if its annotation is ``jax.Array``, a :class:`LinOp`
-    subtype, or a tuple of those. Every other field must be declared with
-    :func:`static_field`.
-
-    Raises
-    ------
-    TypeError
-        If a field is neither allowlisted data nor marked static, or if a
-        field annotation cannot be resolved at class definition time.
-
-    Notes
-    -----
-    - **Pytree unflattening bypasses the constructor.** The registered
-      unflatten allocates the instance and sets its fields directly, so
-      ``__init__``/``__post_init__`` run only where code constructs an
-      operator explicitly. Constructor validation therefore runs exactly
-      once per operator, never at JAX's reconstruction boundaries — which
-      is what lets constructors demand exact core ranks while ``vmap``
-      still rebuilds batched families at its exit boundary.
-    - Operators compare by identity (``eq=False``): dataclass equality would
-      compare arrays elementwise and raise on the ambiguous truth value.
-      They hash by identity, which makes them usable as dictionary keys but
-      never as ``static_argnums`` — every call would retrace silently.
-    - No ``__repr__`` is generated (``repr=False``), so ``LinOp.__repr__``
-      applies; a generated one would print whole arrays into tracebacks and
-      test identifiers.
-    - Annotations are resolved with ``typing.get_type_hints``, so they must
-      name types importable in the defining module at class definition time:
-      no ``TYPE_CHECKING``-only names and no self- or forward-references.
+    The implementation behind :func:`linop`, under a name that does not imply
+    the decorated class is a linear operator: ``pyeki.gauss`` declares its
+    distribution classes with this. Not exported — :func:`linop` is the public
+    name, and the behaviour is documented there.
     """
     cls = dataclass(frozen=True, eq=False, repr=False)(cls)
     try:
@@ -313,6 +307,43 @@ def linop(cls: type) -> type:
 
     jax.tree_util.register_pytree_with_keys(cls, flatten_with_keys, unflatten, flatten)
     return cls
+
+
+def linop(cls: type) -> type:
+    """Class decorator: make ``cls`` a frozen dataclass and a JAX pytree.
+
+    Fields are classified by an allowlist: a field is a pytree *child*
+    (data) if and only if its annotation is ``jax.Array``, a :class:`LinOp`
+    subtype, or a tuple of those. Every other field must be declared with
+    :func:`static_field`.
+
+    Raises
+    ------
+    TypeError
+        If a field is neither allowlisted data nor marked static, or if a
+        field annotation cannot be resolved at class definition time.
+
+    Notes
+    -----
+    - **Pytree unflattening bypasses the constructor.** The registered
+      unflatten allocates the instance and sets its fields directly, so
+      ``__init__``/``__post_init__`` run only where code constructs an
+      instance explicitly. Constructor validation therefore runs exactly
+      once per object, never at JAX's reconstruction boundaries — which
+      is what lets constructors demand exact core ranks while ``vmap``
+      still rebuilds batched families at its exit boundary.
+    - Instances compare by identity (``eq=False``): dataclass equality would
+      compare arrays elementwise and raise on the ambiguous truth value.
+      They hash by identity, which makes them usable as dictionary keys but
+      never as ``static_argnums`` — every call would retrace silently.
+    - No ``__repr__`` is generated (``repr=False``), so the class's own
+      ``__repr__`` applies; a generated one would print whole arrays into
+      tracebacks and test identifiers.
+    - Annotations are resolved with ``typing.get_type_hints``, so they must
+      name types importable in the defining module at class definition time:
+      no ``TYPE_CHECKING``-only names and no self- or forward-references.
+    """
+    return _pytree_dataclass(cls)
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +587,7 @@ class LinOp(abc.ABC):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n_in``.
         """
-        self._check_not_family("matvec")
+        self._check_not_vmap_family("matvec")
         return self._matvec(_check_vec(self, "matvec", x, self.shape[1]))
 
     def rmatvec(self, x) -> Array:
@@ -578,7 +609,7 @@ class LinOp(abc.ABC):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n_out``.
         """
-        self._check_not_family("rmatvec")
+        self._check_not_vmap_family("rmatvec")
         return self._rmatvec(_check_vec(self, "rmatvec", x, self.shape[0]))
 
     def matmat(self, X) -> Array:
@@ -607,7 +638,7 @@ class LinOp(abc.ABC):
             If ``X`` has fewer than two axes, or axis ``-2`` is not
             ``n_in``.
         """
-        self._check_not_family("matmat")
+        self._check_not_vmap_family("matmat")
         return self._matmat(_check_mat(self, "matmat", X, self.shape[1]))
 
     def rmatmat(self, X) -> Array:
@@ -630,7 +661,7 @@ class LinOp(abc.ABC):
             If ``X`` has fewer than two axes, or axis ``-2`` is not
             ``n_out``.
         """
-        self._check_not_family("rmatmat")
+        self._check_not_vmap_family("rmatmat")
         return self._rmatmat(_check_mat(self, "rmatmat", X, self.shape[0]))
 
     def to_dense(self) -> Array:
@@ -648,7 +679,7 @@ class LinOp(abc.ABC):
         Use :func:`densify` for a size-guarded fallback that returns an
         operator instead of an array.
         """
-        self._check_not_family("to_dense")
+        self._check_not_vmap_family("to_dense")
         return self._to_dense()
 
     @property
@@ -735,7 +766,7 @@ class LinOp(abc.ABC):
                 name, type(self).__name__, tuple(sorted(self.capabilities()))
             )
 
-    def _check_not_family(self, method: str) -> None:
+    def _check_not_vmap_family(self, method: str) -> None:
         """Refuse the operation on a vmapped family, before any other check."""
         if self.batch_shape != ():
             raise ValueError(
@@ -767,9 +798,9 @@ class LinOp(abc.ABC):
         ValueError
             If either operand is a vmapped family.
         """
-        self._check_not_family("__matmul__")
+        self._check_not_vmap_family("__matmul__")
         if isinstance(other, LinOp):
-            other._check_not_family("__matmul__")
+            other._check_not_vmap_family("__matmul__")
             from .composite import product
 
             return product(self, other)
@@ -810,7 +841,7 @@ class LinOp(abc.ABC):
         ValueError
             If this operator is a vmapped family.
         """
-        self._check_not_family("__mul__")
+        self._check_not_vmap_family("__mul__")
         if isinstance(c, LinOp):
             raise TypeError(
                 "op1 * op2 is not defined; use op1 @ op2 for composition."
@@ -825,7 +856,7 @@ class LinOp(abc.ABC):
         Accepts, returns, and raises exactly as ``op * (1 / c)`` — see
         :meth:`__mul__`.
         """
-        self._check_not_family("__truediv__")
+        self._check_not_vmap_family("__truediv__")
         if isinstance(c, LinOp):
             raise TypeError("op1 / op2 is not defined.")
         return _scale(self, 1.0 / _as_scalar(self, c))
@@ -893,7 +924,7 @@ class SquareLinOp(LinOp):
         ValueError
             If ``b`` has no axes, or its trailing axis is not ``n``.
         """
-        self._check_not_family("solve")
+        self._check_not_vmap_family("solve")
         self._require("solve")
         return self._solve(_check_vec(self, "solve", b, self.n))
 
@@ -920,7 +951,7 @@ class SquareLinOp(LinOp):
         ValueError
             If ``B`` has fewer than two axes, or axis ``-2`` is not ``n``.
         """
-        self._check_not_family("solve_mat")
+        self._check_not_vmap_family("solve_mat")
         self._require("solve_mat")
         return self._solve_mat(_check_mat(self, "solve_mat", B, self.n))
 
@@ -940,7 +971,7 @@ class SquareLinOp(LinOp):
         UnsupportedOpError
             If this operator has no cheap log-determinant.
         """
-        self._check_not_family("logdet")
+        self._check_not_vmap_family("logdet")
         self._require("logdet")
         return self._logdet()
 
@@ -957,7 +988,7 @@ class SquareLinOp(LinOp):
         UnsupportedOpError
             If this operator has no cheap diagonal.
         """
-        self._check_not_family("diag")
+        self._check_not_vmap_family("diag")
         self._require("diag")
         return self._diag()
 
@@ -982,7 +1013,7 @@ class PSDLinOp(SquareLinOp):
 
     @property
     def T(self) -> PSDLinOp:  # noqa: N802 - mirrors the NumPy attribute
-        """The transpose: the operator itself, since it is self-adjoint."""
+        """The transpose, which is the operator itself, being self-adjoint."""
         return self
 
     # -- derived hook -----------------------------------------------------------
@@ -1011,7 +1042,7 @@ class PSDLinOp(SquareLinOp):
         UnsupportedOpError
             If this operator has no cheap square root.
         """
-        self._check_not_family("factor")
+        self._check_not_vmap_family("factor")
         self._require("factor")
         return self._factor()
 
@@ -1046,7 +1077,7 @@ class PSDLinOp(SquareLinOp):
         ValueError
             If ``x`` has no axes, or its trailing axis is not ``n``.
         """
-        self._check_not_family("whiten")
+        self._check_not_vmap_family("whiten")
         self._require("whiten")
         return self._whiten(_check_vec(self, "whiten", x, self.n))
 
@@ -1073,7 +1104,7 @@ class PSDLinOp(SquareLinOp):
         ValueError
             If ``X`` has fewer than two axes, or axis ``-2`` is not ``n``.
         """
-        self._check_not_family("whiten_mat")
+        self._check_not_vmap_family("whiten_mat")
         self._require("whiten_mat")
         return self._whiten_mat(_check_mat(self, "whiten_mat", X, self.n))
 

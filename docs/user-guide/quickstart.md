@@ -1,7 +1,8 @@
 # Quickstart
 
-This page introduces the operator layer, which is the part of pyEKI that is
-currently implemented. It takes about ten minutes.
+This page introduces the operator layer, which everything else in pyEKI is
+built on. It takes about ten minutes. For the conditioning layer above it, see
+{doc}`conditioning`.
 
 ## Why operators rather than arrays
 
@@ -146,6 +147,7 @@ densify(op).solve(b)         # explicit dense fallback, with a size guard
 ## Next steps
 
 - {doc}`operators` — the full catalogue and what each one costs.
+- {doc}`conditioning` — the Gaussian layer built on these operators.
 - {doc}`writing-an-operator` — adding a new structure.
 - {doc}`../linop-contract` — the precise behavioural contract.
 - {doc}`../design` — why the interface looks the way it does.

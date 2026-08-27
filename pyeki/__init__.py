@@ -7,7 +7,7 @@ forward evaluations. pyEKI provides the pieces that requires:
 - :mod:`pyeki.linalg` — structured linear operators, so covariance structure is
   exploited rather than materialized as dense arrays.
 - :mod:`pyeki.gauss` — joint Gaussian distributions and the conditioning
-  operations EKI is built from. *(planned)*
+  operations EKI is built from.
 - :mod:`pyeki.localize` — distance-based localization for high-dimensional
   problems. *(planned)*
 - :mod:`pyeki.eki` — the algorithms themselves: tempered EKI and variants.

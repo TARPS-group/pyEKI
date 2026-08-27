@@ -371,6 +371,33 @@ def test_psd_low_rank_validation_is_not_covered_by_conformance():
         PSDLowRank(jnp.ones((5, 0)))
 
 
+def test_psd_low_rank_factor_finiteness_is_a_debug_check():
+    """A non-finite factor makes every operation nan with no exception, the
+    same hazard DensePSD guards its own factor against.
+
+    It matters most for the factors pyeki.gauss returns from conditioning,
+    where a non-finite one means the conditioning itself failed — so the check
+    turns a nan posterior into an exception at the point it was produced.
+    """
+    nan_factor = jnp.full((4, 2), jnp.nan)
+
+    # off by default: constructs, and every operation is silently nan
+    op = PSDLowRank(nan_factor)
+    assert bool(jnp.isnan(op.matvec(jnp.ones(4))).all())
+    assert bool(jnp.isnan(op.diag()).all())
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="PSDLowRank.F must be finite"):
+            PSDLowRank(nan_factor)
+        with pytest.raises(ValueError, match="PSDLowRank.F must be finite"):
+            PSDLowRank(jnp.full((4, 2), jnp.inf))
+        PSDLowRank(jnp.ones((4, 2)))  # a finite factor still constructs
+
+    # tracers are exempt, as everywhere in tier 4
+    with debug_checks(True):
+        assert jax.jit(lambda F: PSDLowRank(F).diag())(nan_factor).shape == (4,)
+
+
 # ---------------------------------------------------------------------------
 # operand and constructor validation
 # ---------------------------------------------------------------------------
@@ -838,3 +865,39 @@ def test_check_operator_rejects_broken_operators():
 
     with pytest.raises(AssertionError, match="matvec"):
         check_operator(SlightlyWrong(jnp.asarray([1.0, 2.0, 3.0])))
+
+
+def test_value_checks_do_not_raise_from_inside_a_trace():
+    """A value check must be skipped inside a trace, not crash in it.
+
+    ``value_check`` skips when its operand is a tracer. That is not enough: a
+    *concrete* array inspected while a trace is live has its predicate staged
+    into that trace, so the predicate's ``bool`` conversion sees a tracer and
+    raises ``TracerBoolConversionError`` from inside a debug check. Closed-over
+    constants are the ordinary way this arises — an observation and a noise
+    covariance held by a compiled driver loop.
+
+    Cache-dependent, too: an already-compiled function does not re-trace, so
+    the same call passed or crashed depending on compilation history.
+    """
+    with debug_checks(True):
+        d = jnp.ones(3)
+        A = jnp.asarray(_psd(3))
+
+        # constructors, with the array closed over rather than traced
+        assert jax.jit(lambda: PSDDiagonal(d).diag()).__call__().shape == (3,)
+        assert jax.jit(lambda: DensePSD.from_matrix(A).logdet()).__call__().shape == ()
+        assert jax.jit(lambda: PSDLowRank(A).diag()).__call__().shape == (3,)
+
+        # and inside lax control flow
+        def body(carry, _):
+            return carry + PSDDiagonal(d).diag(), None
+
+        out, _ = jax.lax.scan(body, jnp.zeros(3), None, length=2)
+        np.testing.assert_allclose(out, 2.0 * np.ones(3))
+
+        # the checks still fire eagerly, which is the point of having them
+        with pytest.raises(ValueError, match="must be finite"):
+            PSDLowRank(jnp.full((3, 2), jnp.nan))
+        with pytest.raises(ValueError, match="strictly positive"):
+            PSDDiagonal(jnp.asarray([1.0, -1.0, 1.0]))

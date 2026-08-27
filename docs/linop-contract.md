@@ -661,7 +661,12 @@ conditioning, where the posterior's rank is bounded by the ensemble size.
   is met with nothing left over to compute.
 
 Constructor validation is tier 2 and shape-only: `F` must have rank
-exactly 2, and both core sizes at least 1. Neither violation is caught by
+exactly 2, and both core sizes at least 1. Tier 4, in debug mode,
+additionally asserts that `F` is finite — the same check `DensePSD` applies
+to its own factor, and for the same reason: a non-finite factor makes every
+operation `nan` with no exception, and `PSDLowRank` is the class
+`pyeki.gauss` returns from conditioning, where a non-finite factor means the
+conditioning itself failed. Neither violation is caught by
 the conformance suite, which is why they are named here — a rank-3 `F`
 produces a *directly constructed* operator reporting a non-empty
 `batch_shape`, which {ref}`contract-families` forbids, and $k = 0$

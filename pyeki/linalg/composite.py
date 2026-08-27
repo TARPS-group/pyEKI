@@ -88,7 +88,7 @@ def _check_ops_tuple(cls_name: str, field_name: str, ops, required=LinOp) -> Non
 class Transposed(LinOp):
     """The transpose of another operator, as a view.
 
-    What :attr:`~.base.LinOp.T` returns by default. A plain ``LinOp``
+    What :attr:`~pyeki.linalg.LinOp.T` returns by default. A plain ``LinOp``
     regardless of the wrapped operator's level: transposition preserves
     solvability but not the layer's knowledge of it, and operators whose
     transpose supports more override ``T`` with a structured result instead.
@@ -118,7 +118,7 @@ class Transposed(LinOp):
 
     @property
     def T(self) -> LinOp:  # noqa: N802 - mirrors the NumPy attribute
-        """The original operator: transposing a view unwraps it."""
+        """The original operator, since transposing a view unwraps it."""
         return self.op
 
     def _matvec(self, x: Array) -> Array:

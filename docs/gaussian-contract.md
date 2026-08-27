@@ -14,13 +14,13 @@ records *what* they require. The layer is built on the operator layer, and
 this contract freely references {doc}`linop-contract` rather than restating
 its rules.
 
-:::{admonition} Status: specification ahead of code
-:class: important
+:::{admonition} Status: implemented
+:class: note
 
-`pyeki.gauss` does not exist yet. This document is the design it will be
-built to, and it is the artifact to review and iterate on before
-implementation begins. Once the module ships, this page remains as the
-normative reference for its behaviour.
+`pyeki.gauss` implements this specification, and this page is the normative
+reference for its behaviour. The conformance obligations of
+{ref}`gauss-conformance` are met by `tests/test_gauss.py`; the user guide's
+{doc}`user-guide/conditioning` page covers when to reach for each piece.
 :::
 
 Readers after precision rather than implementation want
@@ -275,10 +275,28 @@ Two structural facts, both load-bearing and both conformance-checked:
 
 ### Cost
 
-Whitening costs $J$ applications of $W$; the thin SVD is
+Whitening costs $J + 1$ applications of $W$ — every prediction and the
+observation, from one call on the stacked rows $[\mathsf{V}; y]$. Whitening
+is a fixed linear map applied row-wise, so it commutes with centering and
+with subtraction: $W A_v^\top$ is the whitened predictions minus *their*
+mean, and $W(y - v_j)$ is $Wy - Wv_j$. The grouping is **not** free, however: centering
+and differencing must happen *before* the whitener is applied. The two
+orders agree in exact arithmetic but are not equally stable — centering
+*whitened* predictions makes the cancellation ratio
+$\lVert W\bar v\rVert / \lVert W a_j\rVert$ in place of
+$\lVert \bar v\rVert / \lVert a_j\rVert$, so the error grows with
+$\kappa(W) = \sqrt{\kappa(R)}$ whenever the prediction mean is aligned
+with a precise direction of the noise. Measured against an exact reference
+at $\kappa(R) = 10^4$ with a prediction mean of $10^8$ along $R$'s most
+precise direction, whitening first gives a posterior-mean error of $4.9$
+where centering first gives $2\times10^{-6}$. Whitening $[A_v;\, y-\bar v]$
+costs the same $J+1$ applications and does not have that failure mode. What
+must **not** be done is whitening the anomalies and the residuals in two
+separate calls, which costs $2J$ applications in the stochastic update —
+twice the necessary figure, and for a dense whitener on the dominant term. The thin SVD is
 $O(J N \min(J, N))$; forming weights is $O((N + J)\,\rho)$ per residual and
 combining anomalies $O(JP)$ per member. A full ensemble update is
-$O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J$ whitener applications —
+$O(NJ^2 + PJ^2)$ for $J \le N$, plus the $J + 1$ whitener applications —
 which the total absorbs for structured whiteners applying in $O(N)$, and
 which dominate ($O(JN^2)$) for a dense $W$ whenever $P \lesssim N^2/J$; at
 larger $P$ the $O(PJ^2)$ anomaly combination dominates instead. Linear in both dimensions for
@@ -336,7 +354,7 @@ Rules:
   required to; note that for `sqrt_transform` that means a Fréchet
   derivative of $A \mapsto A^{-1/2}$, materially more work than
   `gain_weights`'s rational form.
-- `sqrt_transform` imposes no centring requirement on `s`. The
+- `sqrt_transform` imposes no centering requirement on `s`. The
   $T\mathbf{1} = \mathbf{1}$ property of {ref}`gauss-kernel` follows from
   $\mathbf{1}^\top s = 0$ and holds only for such `s`; on general `s` the
   transform is still $(I + ss^\top)^{-1/2}$, and $T\mathbf{1}$ is
@@ -363,6 +381,13 @@ supplies, and the posterior that `EnsembleJoint.condition` returns
 of `mean`, the operator type of `cov`, and their agreement
 (tier 2, shape-only — {ref}`gauss-validation`). `n` is a property computed from `mean`.
 
+The size properties across the layer follow one rule: an object with a
+single dimension names it `n`, matching {class}`~pyeki.linalg.SquareLinOp`
+one layer down; an object with several qualifies each one, as
+`EnsembleJoint`'s `n_members`, `u_dim` and `v_dim` do. So `Gaussian.n` and
+`EnsembleJoint.u_dim` are the same convention applied to different arities,
+not an inconsistency.
+
 **Capabilities delegate to the covariance.** `Gaussian` defines no
 capability system of its own: each method requires specific operations of
 `cov`, and an unsupported one raises the operator layer's
@@ -378,7 +403,9 @@ Returns a `(n_samples, n)` array of independent draws. Requires
 - `n_samples` must be a Python `int`, at least 1 — it determines an output
   shape, so it can never be traced. Anything that is not an `int` —
   including `bool` and NumPy integers — is a `TypeError`; an `int` below 1
-  is a `ValueError`.
+  is a `ValueError`. Since `bool` *is* an `int` subclass, the rule is a check
+  on the exact type, not an `isinstance` test; it consequently also rejects
+  other `int` subclasses, which is intended.
 - The draw is **pinned elementwise**, not merely distributionally: with `L`
   the operator `cov.factor()` returns and `k` its width, the result is
   exactly
@@ -431,7 +458,15 @@ Gaussian conditioning applied to this fitted Gaussian. The samples are the
 ever formed.
 
 **Fields.** `u_samples`, a `(J, P)` array, and `v_samples`, a `(J, N)`
-array — member-aligned: row $j$ of each belongs to the same member.
+array — member-aligned: row $j$ of each belongs to the same member. Both are
+**keyword-only**: they are arrays of the same rank agreeing on the member
+axis, so exchanging them is shape-valid whenever $P = N$ and no check can
+detect it — the update is then computed from the wrong blocks and returns
+finite, plausible numbers. The cost is that a family is built through a
+lambda, `jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))`,
+rather than by mapping the constructor directly. `Gaussian` stays
+positional: an array and an operator cannot be exchanged silently, since
+the type check catches it.
 Construction validates exact rank 2 on both, agreement of the leading axes,
 and $J \ge 2$ (a single sample has no anomalies; the check is shape-only,
 so it is tier 2 and unconditional). $P \ge 1$ and $N \ge 1$, as everywhere.
@@ -463,7 +498,8 @@ The whitened formulation requires it even though $\widehat{C}_{vv} + R$
 is generically invertible for singular $R$ (it fails only when
 $\operatorname{nullity}(R) + \operatorname{nullity}(\widehat{C}_{vv}) > N$);
 a singular noise operator that nonetheless
-types as whitening-capable yields `nan` per tier 4. The two update methods
+types as whitening-capable yields `nan`, or the tier-4 result check of
+{ref}`gauss-validation` in debug mode. The two update methods
 return a `(J, P)` array of updated members, row $j$ updating member $j$ —
 they update $u$ only, since EKI re-evaluates the forward model to get the
 next step's $v$ — while `condition` returns the same posterior as a
@@ -472,6 +508,13 @@ distribution. All are deterministic functions of their arguments
 degrade gracefully when the prediction anomalies are zero: the updates
 return `u_samples` unchanged and `condition` returns the prior marginal's
 moments — a collapsed ensemble is a no-op, not `nan`, for finite inputs.
+This requires the anomalies of identical members to be *exactly* zero,
+which a plain subtraction of a summed-and-divided mean does not deliver;
+the anomaly properties are formed so that they do, because the alternative
+is not a `nan` but a wrong finite update, of order 1 for members of order
+$10^{23}$. Whitening can still overflow for finite inputs — a prediction of
+$10^{300}$ against a noise variance of $10^{-20}$ — and there the result is
+`nan`.
 
 ### `pathwise_update(key, y, noise_cov)`
 
@@ -524,7 +567,7 @@ posterior mean and its sample covariance (divisor $J-1$) equals the
 posterior covariance, both in exact arithmetic — the identity of
 {ref}`gauss-kernel`, and the bridge the conformance suite uses between the
 update and the hand-written dense reference. Because
-$T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centred, so
+$T\mathbf{1} = \mathbf{1}$, the transformed anomalies remain centered, so
 the two summands above really are the posterior mean and posterior
 anomalies.
 
@@ -537,7 +580,7 @@ $\bigl(C^{\text{post}}_{ii}(KRK^\top)_{jj} +
 C^{\text{post}}_{jj}(KRK^\top)_{ii} +
 2(KRK^\top)_{ij}^2\bigr)^{1/2}\!/\sqrt{J}$ — in relative terms
 $\sqrt{J}$ times looser than the mean's. The unbiasedness of the
-covariance is particular to the $J-1$ divisor, whose centring of the
+covariance is particular to the $J-1$ divisor, whose centering of the
 perturbations cancels exactly.
 Individual pathwise members are not posterior draws — conditional on the
 ensemble, member $j$ is distributed
@@ -624,18 +667,21 @@ at construction, because the stored field *is* the factorization.
 The four-tier scheme of the operator contract ({ref}`contract-validation`)
 applies with one extension: everything static is checked always, values
 only on request — and, unlike the operator layer, tier 4 here also runs at
-*call* time: in debug mode the conditioning methods check `y`, and the
-primitives their operands, for finiteness. Like the operator layer's,
+*call* time: in debug mode the conditioning methods check `y`,
+`log_density` its evaluation point `x`, and the primitives their operands,
+for finiteness, and the conditioning methods additionally check **what they
+return**. Like the operator layer's,
 these checks read array values and are therefore skipped on tracers: under
 `jit` or `vmap` they do not run, in debug mode or otherwise. A singular
-`noise_cov` is not among them — nothing here can detect it cheaply; it
-surfaces as `nan`. What each tier means here:
+`noise_cov` is not among the *operand* checks — nothing here can detect one
+before the fact; it surfaces as `nan`, or as the result check firing after
+the fact. What each tier means here:
 
 | tier | checks | examples |
 | ---- | ------ | -------- |
 | 2. construction | ranks, static sizes, operator types, cross-field shape agreement; a vmapped-family `cov` | `u_samples` rank ≠ 2; $J = 1$; `cov` not a `PSDLinOp`; `mean` and `cov` sides disagreeing |
 | 3. call | operand core shapes, operator arguments, and static non-array arguments; a vmapped-family `noise_cov` — `ValueError` for shape violations, `TypeError` for type violations, per the taxonomy below | `y` not `(N,)`; `noise_cov` side ≠ $N$; `noise_cov` not a `PSDLinOp`; primitive operands mis-shaped; `n_samples` not a positive `int` |
-| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y` and the primitives' `s` and `b` at call | violations yield `nan` or a silently wrong posterior outside debug mode |
+| 4. value (debug) | finiteness of `u_samples`, `v_samples` and `mean` at construction; of `y`, `x`, and the primitives' `s` and `b` at call; of the conditioning methods' *returned* values | violations yield `nan` or a silently wrong posterior outside debug mode |
 
 Tier-1 (field declaration) is inherited with the class machinery
 ({ref}`gauss-jax`). Error messages follow the operator contract's
@@ -646,6 +692,51 @@ Within a method the checks run in the operator layer's order: the family
 guard ({ref}`gauss-jax`) first, then the required-capability checks in the
 order the method names them, then tier-3 operand and operator-argument
 validation, then — in debug mode — tier-4 value checks.
+
+Result checks run **last**, once there is a result to check. This is the
+layer's one tier-4 *postcondition*: all three conditioning methods assert in
+debug mode that what they return is finite — the updated ensemble, or, for
+`condition`, both the posterior mean and the covariance factor, checked
+before the `PSDLowRank` and the `Gaussian` are built, so the diagnosis names
+the conditioning call rather than a constructor below it. Three points fix
+its scope:
+
+- **Why this layer checks outputs when the operator layer does not.** A
+  conditioning result becomes the *next* iteration's input: a `nan` ensemble
+  is handed straight to an expensive forward-model evaluation, and a model
+  that returns finite nonsense for `nan` parameters launders it beyond
+  recovery. An operator's result goes back to the caller who asked for it.
+  The asymmetry is deliberate, and is not an argument for adding output
+  checks to `pyeki.linalg`.
+- **It is the only cheap detection of a singular `noise_cov`.** The three
+  methods behave identically under it. Before this rule `condition` alone
+  raised, because it happened to route its mean through a constructor — and
+  even then it left the covariance factor unchecked, so the check covered
+  half of what it appeared to guard.
+- **`sample` is deliberately excluded**, and `log_density` with it. Their
+  covariance arrives already constructed, so a non-finite result implicates
+  the operator rather than this call, and the operator layer validates its
+  own fields at construction — which {class}`~pyeki.linalg.PSDLowRank` and
+  {class}`~pyeki.linalg.DensePSD` both do for their factors. The gap this
+  leaves is deliberate and worth naming: a *singular* covariance with
+  entirely finite fields makes `log_density` return `nan` with no check
+  firing, in debug mode or out. Every shipped operator rejects that at
+  construction, but the level is user-extensible, so a custom `PSDLinOp`
+  that whitens and is singular reaches it. Nonsingularity is
+  `log_density`'s stated precondition, not something this layer detects.
+
+Because tier 4 is skipped on tracers, none of this fires inside a
+`jit`-compiled driver loop. Detection there is a different mechanism, and
+belongs to the layer that owns the loop.
+
+The ordering rule has one forced exception, for the operator argument that
+*is* the capability bearer. A conditioning method cannot consult
+`noise_cov.supports("whiten")` before it knows `noise_cov` is an operator at
+all, so two of its tier-3 checks — that it is a `PSDLinOp` (`TypeError`) and
+that it is not a vmapped family (`ValueError`) — run **ahead** of the
+capability check; the side check and `y`'s shape check stay behind it. No
+such exception applies to `Gaussian`, whose `cov` is validated at
+construction.
 
 The layer defines **no new exception types**. `UnsupportedOpError` arises
 only from the operator layer, propagated unmodified from the covariance
@@ -665,6 +756,7 @@ The explicit escape hatch is the same one as everywhere:
 | any operation or array-computing property on a vmapped family | `ValueError`, at call — apply the family under `jax.vmap` |
 | a vmapped-family `cov` at construction, or `noise_cov` at call | `ValueError` |
 | violated value precondition | `ValueError` in debug mode; `nan` or a silently wrong result otherwise |
+| a non-finite conditioning result (typically a singular `noise_cov`) | `ValueError` in debug mode, from the method; `nan` otherwise |
 
 (gauss-jax)=
 ## JAX integration
@@ -744,7 +836,7 @@ u = prior.sample(key_init, n_members)
 
 for key_t, dbeta in schedule:               # increments, not levels
     v = forward(u)                          # caller's vmap-ed model: (J, N)
-    joint = EnsembleJoint(u, v)
+    joint = EnsembleJoint(u_samples=u, v_samples=v)
     u = joint.pathwise_update(key_t, y, noise_cov / dbeta)
 ```
 
@@ -888,12 +980,33 @@ must verify at least:
    $T\,(I + ss^\top)\,T^\top = I$ must not be used, because forming
    $ss^\top$ reintroduces the $\sigma_{\max}^2$-sized intermediate whose
    rounding this check exists to avoid, pushing the achievable residual to
-   $\varepsilon\sigma_{\max}^2$. It satisfies $T = T^\top$ for every
-   `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centred `s`**
+   $\varepsilon\sigma_{\max}^2$. **The spectrum of `s` must carry
+   singular values of order 1 or below alongside the large ones for this
+   comparison to mean anything.** What hides the re-formed version's loss is
+   $TT^\top \sim \sigma^{-2}$ being negligible in every direction at once,
+   which happens whenever *all* the singular values are large — spanning
+   decades is not sufficient, and is the wrong criterion: at $J=5$, $N=8$,
+   $\sigma = (10^{10}, 10^9, 10^8, 10^7, 10^6)$ spans four decades and the
+   two forms agree to a factor of $1.0$, testing nothing. With
+   $\sigma = (10^{10}, 10^5, 1, 1, 1)$ they separate by eight orders of
+   magnitude, which is the regime the check must use.
+   It satisfies $T = T^\top$ for every
+   `s`, and $T\mathbf{1} = \mathbf{1}$ **for mean-centered `s`**
    ($\mathbf{1}^\top s = 0$, which is the only case the conditioning
-   kernel produces) to a tolerance scaling as
-   $\varepsilon^2 \sigma_{\max}^2$; for general `s` no such identity
-   holds ({ref}`gauss-primitives`).
+   kernel produces) to a tolerance of
+   $c_1 J \varepsilon + c_2 (\varepsilon \sigma_{\max})^2$; for general
+   `s` no such identity holds ({ref}`gauss-primitives`). Both terms are
+   needed and **both scale**. The quadratic term is the modifier-induced
+   mean shift of {ref}`gauss-kernel`, but the *computed* $T\mathbf{1}$
+   carries ordinary round-off from its $J$-term dot products on top, and
+   that floor dominates until $\sigma_{\max}$ reaches
+   $\varepsilon^{-1/2}$: at $\sigma_{\max} = 3.3$ the observed residual is
+   $4\times10^{-16}$ against $5\times10^{-31}$ for the quadratic term
+   alone. The floor grows with $J$, so a *constant* floor calibrated at one
+   ensemble size expires at another — measured worst ratios over $J$ up to
+   400 and $\sigma_{\max}$ up to $10^{13}$ are $0.83$ against
+   $J\varepsilon$ and $2.0$ against $(\varepsilon\sigma_{\max})^2$. The
+   check must therefore be exercised at more than one $J$.
 4. **Moment exactness of the posterior**: `transform_update`'s output has
    sample mean and covariance equal to the hand-written dense posterior
    moments of the fitted joint Gaussian, to floating-point tolerance;
@@ -953,10 +1066,14 @@ earlier: the layer's user-guide page ({ref}`gauss-scope`) and the
 
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
-a mixed-representation perturbation, a mean shift from an uncentred
-transform, a `nan` gradient at an exactly collapsed `s`, and a singular
+a mixed-representation perturbation, a mean shift from an uncentered
+transform, a `nan` gradient at an exactly collapsed `s`, a singular
 noise covariance turning an update into an all-`nan` result with no
-exception (assert the `nan`, so the day it starts raising is visible) —
+exception outside debug mode (assert the `nan`, so the day it starts raising
+is visible), the whitening grouping of {ref}`gauss-kernel` (checked for
+accuracy against an exact reference, not only for its application count),
+and a collapsed ensemble at large magnitude, where a mean-and-subtract that
+does not cancel exactly turns an exact no-op into a wrong, finite update —
 under the same
 do-not-delete rule as the operator layer's.
 
