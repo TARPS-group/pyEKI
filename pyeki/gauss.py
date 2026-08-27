@@ -77,6 +77,7 @@ primitive computes its own.
 from __future__ import annotations
 
 import math
+from dataclasses import field
 
 import jax
 import jax.numpy as jnp
@@ -679,11 +680,11 @@ class EnsembleJoint:
     ----------
     u_samples
         The block to be updated — in EKI, the parameters — a ``(J, P)``
-        array, one member per row.
+        array, one member per row. Keyword-only.
     v_samples
         The observed block — in EKI, the predicted observations — a
         ``(J, N)`` array, member-aligned with ``u_samples``: row :math:`j`
-        of each belongs to the same member.
+        of each belongs to the same member. Keyword-only.
 
     Raises
     ------
@@ -694,6 +695,16 @@ class EnsembleJoint:
 
     Notes
     -----
+    Both fields are **keyword-only**. They are two arrays of the same rank
+    whose sizes agree on the member axis, so a swap is a shape-valid mistake
+    that no check can catch when :math:`P = N`: the update would be computed
+    from the wrong blocks and return finite, plausible numbers. Naming them
+    at the call site is the only thing that rules it out. The cost is that a
+    family is built through a lambda rather than by mapping the constructor
+    directly::
+
+        jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))(U, V)
+
     The four array properties — the two means and the two anomaly matrices —
     raise ``ValueError`` on a vmapped family, as the methods do.
 
@@ -710,8 +721,8 @@ class EnsembleJoint:
     not ``nan``, for finite inputs.
     """
 
-    u_samples: Array
-    v_samples: Array
+    u_samples: Array = field(kw_only=True)
+    v_samples: Array = field(kw_only=True)
 
     def __post_init__(self) -> None:
         _check_field_rank("EnsembleJoint", "u_samples", self.u_samples, 2)

@@ -451,7 +451,15 @@ Gaussian conditioning applied to this fitted Gaussian. The samples are the
 ever formed.
 
 **Fields.** `u_samples`, a `(J, P)` array, and `v_samples`, a `(J, N)`
-array — member-aligned: row $j$ of each belongs to the same member.
+array — member-aligned: row $j$ of each belongs to the same member. Both are
+**keyword-only**: they are arrays of the same rank agreeing on the member
+axis, so exchanging them is shape-valid whenever $P = N$ and no check can
+detect it — the update is then computed from the wrong blocks and returns
+finite, plausible numbers. The cost is that a family is built through a
+lambda, `jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))`,
+rather than by mapping the constructor directly. `Gaussian` stays
+positional: an array and an operator cannot be exchanged silently, since
+the type check catches it.
 Construction validates exact rank 2 on both, agreement of the leading axes,
 and $J \ge 2$ (a single sample has no anomalies; the check is shape-only,
 so it is tier 2 and unconditional). $P \ge 1$ and $N \ge 1$, as everywhere.
@@ -821,7 +829,7 @@ u = prior.sample(key_init, n_members)
 
 for key_t, dbeta in schedule:               # increments, not levels
     v = forward(u)                          # caller's vmap-ed model: (J, N)
-    joint = EnsembleJoint(u, v)
+    joint = EnsembleJoint(u_samples=u, v_samples=v)
     u = joint.pathwise_update(key_t, y, noise_cov / dbeta)
 ```
 
