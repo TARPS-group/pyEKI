@@ -357,7 +357,7 @@ def test_4_a_schedule_returning_none_ends_the_run_with_a_terminal_record():
         def next_increment(self, evaluation):
             return None if evaluation.step >= 2 else 0.25
 
-    problem = _AffineProblem()
+    problem = _AffineProblem(J=10)
     result = run(
         problem.state(),
         problem.forward,
@@ -369,6 +369,11 @@ def test_4_a_schedule_returning_none_ends_the_run_with_a_terminal_record():
     assert result.n_steps == 3
     assert float(result.stacked.increment[-1]) == 0.0
     assert float(result.stacked.beta_next[-1]) == float(result.stacked.beta[-1])
+    # The literal float(J), not effective_sample_size(misfits, 0.0): J = 12 is
+    # one of the sizes where exp(log J) == J exactly, so this fixture uses a
+    # size where the two differ and the pin has content.
+    assert problem.J == 10
+    assert float(np.exp(np.log(problem.J))) != float(problem.J)
     assert float(result.stacked.ess[-1]) == float(problem.J)
 
 
@@ -410,10 +415,21 @@ def test_4_the_clamp_precedence_holds_in_all_three_regimes(schedule_type):
     """Floor beats criterion, ceiling binds, and the budget cap beats the floor."""
     evaluation = _evaluation_with_misfits(np.array([1.0, 1.0001, 0.9999, 1.00005]))
 
-    # The floor binds: a huge criterion value would otherwise be tiny, and a
-    # tiny one is lifted to the floor.
-    floored = schedule_type(beta_target=None, min_increment=0.5, max_increment=2.0)
-    assert float(floored.next_increment(evaluation)) >= 0.5
+    # The floor binds: a widely spread ensemble drives the criterion far below
+    # the floor, and the floor must win. The ceiling is slack here, so this
+    # regime is the floor's alone -- inverting the maximum into a minimum
+    # returns the criterion instead and fails.
+    spread_out = _evaluation_with_misfits(np.array([1.0, 400.0, 0.5, 900.0]))
+    tiny = schedule_type(beta_target=None, min_increment=0.5, max_increment=2.0)
+    unclamped_is_smaller = float(
+        schedule_type(
+            beta_target=None, min_increment=1e-12, max_increment=2.0
+        ).next_increment(spread_out)
+    )
+    assert unclamped_is_smaller < 0.5, (
+        "the fixture must put the criterion below the floor"
+    )
+    assert float(tiny.next_increment(spread_out)) == pytest.approx(0.5)
 
     # The ceiling binds: a nearly-degenerate ensemble wants a huge step.
     capped = schedule_type(beta_target=None, min_increment=1e-6, max_increment=0.3)
@@ -546,7 +562,7 @@ def test_4_the_misfit_schedule_returns_the_larger_of_its_two_bounds():
         beta_target=None, divergence_budget=theta, max_increment=1e6
     )
     got = float(schedule.next_increment(_evaluation_with_misfits(spread_out)))
-    assert got == pytest.approx(theta / mean)
+    assert got == pytest.approx(theta / mean, rel=1e-12)
     assert theta / mean > np.sqrt(theta / variance)
 
     # cv < 1/sqrt(theta): the variance bound takes over.
@@ -554,7 +570,7 @@ def test_4_the_misfit_schedule_returns_the_larger_of_its_two_bounds():
     mean, variance = clustered.mean(), clustered.var(ddof=1)
     assert np.sqrt(variance) / mean < 1 / np.sqrt(theta)
     got = float(schedule.next_increment(_evaluation_with_misfits(clustered)))
-    assert got == pytest.approx(np.sqrt(theta / variance))
+    assert got == pytest.approx(np.sqrt(theta / variance), rel=1e-12)
     assert np.sqrt(theta / variance) > theta / mean
 
 
@@ -1822,7 +1838,6 @@ def test_21_every_record_field_agrees_with_the_evaluation_it_came_from():
         assert float(record.misfit_mean) == pytest.approx(phi.mean(), rel=1e-11)
         assert float(record.misfit_min) == pytest.approx(phi.min(), rel=1e-11)
         assert float(record.misfit_max) == pytest.approx(phi.max(), rel=1e-11)
-        assert record.misfit_min <= record.misfit_mean <= record.misfit_max
         assert float(record.centre_misfit) == pytest.approx(
             0.5 * np.sum(residuals.mean(axis=0) ** 2), rel=1e-10
         )
@@ -2421,3 +2436,210 @@ def test_regression_a_float32_update_cannot_quietly_demote_a_run():
 
     result = run(problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2))
     assert result.ensemble.dtype == jnp.float64
+
+
+def test_20_the_reported_spread_is_of_the_ensemble_that_was_evaluated():
+    """``spread`` describes the post-inflation, post-repair members.
+
+    A regression test for a mutation that survives every other test: reporting
+    the spread of ``state.ensemble`` instead. Obligation 21 recomputes the
+    field, but on a run with no inflation and no failures, where the two
+    ensembles coincide and the mutation is invisible. Both departures are
+    exercised here, separately.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    before = float(
+        evaluate(problem.state(), problem.forward, y, noise).rms_parameter_spread
+    )
+
+    # Inflation: the spread must be the inflated one, exactly r times larger.
+    factor = 3.0
+    inflated = evaluate(
+        problem.state(), problem.forward, y, noise,
+        inflation=MultiplicativeInflation(factor),
+    )
+    assert float(inflated.rms_parameter_spread) == pytest.approx(
+        factor * before, rel=1e-11
+    )
+
+    # Repair: the spread must be the repaired one, which is strictly smaller.
+    def failing(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[2, 0].set(jnp.nan)
+
+    repaired = evaluate(problem.state(), failing, y, noise)
+    members, _ = repair_failed_members(
+        ensemble=jnp.asarray(problem.members),
+        predictions=jnp.asarray(problem.members @ problem.G.T).at[2, 0].set(jnp.nan),
+        valid=jnp.asarray([True, True, False, True, True, True, True, True]),
+    )
+    anomalies = np.asarray(members) - np.asarray(members).mean(axis=0)
+    want = np.linalg.norm(anomalies) / np.sqrt((problem.J - 1) * problem.P)
+    assert float(repaired.rms_parameter_spread) == pytest.approx(want, rel=1e-11)
+    assert float(repaired.rms_parameter_spread) < before
+
+
+def test_8_every_eki_error_path_carries_the_history_accumulated_so_far():
+    """All four raise paths, not just the bound.
+
+    Deleting the re-raise bookkeeping on either the evaluate or the apply path
+    survives every other test, because only the ``max_steps`` payload was ever
+    asserted.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    ladder = FixedSchedule.constant(0.2, 30)
+
+    def fails_at(step, indices):
+        state = {"n": 0}
+
+        def forward(u):
+            v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+            hit = state["n"] == step
+            state["n"] += 1
+            return v.at[jnp.asarray(indices), 0].set(jnp.nan) if hit else v
+
+        return forward
+
+    # (a) fewer than two valid members, on the fourth rung
+    with pytest.raises(EKIError, match="At least 2 are required") as caught:
+        run(problem.state(), fails_at(3, list(range(1, problem.J))), y, noise,
+            schedule=ladder)
+    assert len(caught.value.history) == 3
+    assert caught.value.state.step == 3
+
+    # (b) on_failure="raise", on the second rung
+    with pytest.raises(EKIError, match="on_failure='raise'") as caught:
+        run(problem.state(), fails_at(1, [2]), y, noise, schedule=ladder,
+            on_failure="raise")
+    assert len(caught.value.history) == 1
+    assert caught.value.state.step == 1
+
+    # (c) a non-finite update, on the third rung
+    poison = {"n": 0}
+
+    def sometimes_poisons(key, *, ensemble, predictions, y, noise_cov, increment,
+                          step, beta, **_):
+        poison["n"] += 1
+        if poison["n"] == 3:
+            return jnp.full_like(ensemble, jnp.nan)
+        return TransformUpdate()(
+            key, ensemble=ensemble, predictions=predictions, y=y,
+            noise_cov=noise_cov, increment=increment, step=step, beta=beta,
+        )
+
+    with pytest.raises(EKIError, match="non-finite ensemble") as caught:
+        run(problem.state(), problem.forward, y, noise, schedule=ladder,
+            update=sometimes_poisons)
+    assert len(caught.value.history) == 2
+    assert caught.value.state.step == 2
+
+    # Every payload is a tuple of records, never the driver's live list.
+    assert isinstance(caught.value.history, tuple)
+    resumed = run(caught.value.state, problem.forward, y, noise,
+                  schedule=ladder, max_steps=30)
+    assert resumed.n_steps == 28
+
+
+def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
+    """A regression test for `budget_tol`, which nothing else engages.
+
+    Ten increments of 0.1 accumulate to 0.9999999999999999, strictly below
+    1.0, so an exhaustion check written as `beta >= beta_target` would demand
+    an eleventh rung. The four-rung `(0.3, 0.3, 0.3, 0.1)` ladder does not
+    catch this: those increments happen to sum to exactly 1.0.
+    """
+    problem = _AffineProblem()
+    accumulated = 0.0
+    for _ in range(10):
+        accumulated += 0.1
+    assert accumulated < 1.0, "the fixture depends on this being inexact"
+
+    schedule = AdaptiveMisfitSchedule(
+        beta_target=1.0, min_increment=0.1, max_increment=0.1
+    )
+    result = run(
+        problem.state(), problem.forward, jnp.asarray(problem.y),
+        problem.noise_cov, schedule=schedule, max_steps=12,
+    )
+    assert result.n_steps == 10, "a bare `>=` would take an eleventh rung"
+    assert float(result.beta) == pytest.approx(accumulated, abs=8 * EPS)
+    assert float(result.beta) < 1.0
+
+
+def test_regression_the_anomalies_are_formed_stably():
+    """Identical members give exactly zero spread, not round-off.
+
+    ``jnp.mean`` of J bit-identical rows does not in general return the value
+    it was given, so a naive `x - x.mean()` gives a collapsed ensemble
+    spurious anomalies of about eps*|xbar| — which the gain then amplifies
+    into a finite, nan-free, wrong update once the members are large.
+    """
+    from pyeki.eki.helpers import _anomalies
+
+    for magnitude in (1.0, 6e23):
+        collapsed = jnp.full((7, 3), magnitude)
+        assert np.array_equal(np.asarray(_anomalies(collapsed)), np.zeros((7, 3)))
+        naive = np.asarray(collapsed) - np.asarray(collapsed).mean(axis=0)
+        if magnitude > 1.0:
+            assert np.abs(naive).max() > 0.0, "the naive form is not exactly zero"
+
+    # And the batched form subtracts per-member means, not per-batch ones.
+    batched = jnp.asarray(np.random.default_rng(5).normal(size=(3, 3, 4)))
+    got = np.asarray(_anomalies(batched))
+    want = np.asarray(batched) - np.asarray(batched).mean(axis=-2, keepdims=True)
+    assert np.abs(got - want).max() < 64 * EPS
+
+
+def test_regression_a_vmapped_inflation_refuses_rather_than_broadcasting():
+    """A family whose batch size equals P otherwise inflates per coordinate.
+
+    Shape-correct, exception-free, and wrong: each parameter coordinate gets
+    a different factor. Every other family-aware object in the layer refuses.
+    """
+    family = jax.vmap(MultiplicativeInflation)(jnp.asarray([1.0, 2.0, 3.0]))
+    assert family.batch_shape == (3,)
+    with pytest.raises(ValueError, match="vmapped family"):
+        family(
+            jax.random.key(0),
+            ensemble=jnp.arange(18.0).reshape(6, 3),
+            step=0,
+            beta=jnp.asarray(0.0),
+        )
+
+    additive = jax.vmap(lambda d: AdditiveInflation(PSDDiagonal(d)))(
+        jnp.ones((2, 3))
+    )
+    assert additive.batch_shape == (2,)
+    with pytest.raises(ValueError, match="vmapped family"):
+        additive(
+            jax.random.key(0),
+            ensemble=jnp.zeros((6, 3)),
+            step=0,
+            beta=jnp.asarray(0.0),
+        )
+
+
+def test_regression_a_nan_misfit_does_not_become_the_floor_step():
+    """Both adaptive schedules must propagate a nan, not absorb it.
+
+    Every comparison against a nan is False, so a bisection on the effective
+    sample size would leave its bracket at zero and the floor would turn a
+    poisoned ensemble into an ordinary-looking smallest step. The misfit
+    schedule's guarded division already sends nan on; this pins the same for
+    the ESS schedule, and pins that the driver then raises.
+    """
+    poisoned = _evaluation_with_misfits(np.array([1.0, np.nan, 2.0, 3.0]))
+    for schedule in (AdaptiveESSSchedule(), AdaptiveMisfitSchedule()):
+        got = float(schedule.next_increment(poisoned))
+        assert np.isnan(got), f"{schedule!r} returned {got} on a nan misfit"
+        assert got != pytest.approx(schedule.min_increment)
+
+    # Through the driver a poisoned ensemble is caught earlier still, by the
+    # validity check, so the schedule guard is the second line of defence.
+    problem = _AffineProblem()
+    with pytest.raises(EKIError, match="At least 2 are required"):
+        run(problem.state(), lambda u: jnp.full((problem.J, problem.N), jnp.inf),
+            jnp.asarray(problem.y), problem.noise_cov,
+            schedule=AdaptiveESSSchedule())

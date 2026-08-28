@@ -78,6 +78,7 @@ from .values import (
     EKIState,
     Evaluation,
     HistoryRecord,
+    OnFailure,
 )
 
 __all__ = ["advance", "apply", "evaluate", "iterate", "run"]
@@ -108,7 +109,7 @@ def evaluate(
     noise_cov,
     *,
     inflation=None,
-    on_failure: str = "repair",
+    on_failure: OnFailure = "repair",
 ) -> Evaluation:
     """Run the forward model once and summarize what it produced.
 
@@ -222,7 +223,7 @@ def apply(
     increment,
     y,
     noise_cov,
-    update=None,
+    update=TransformUpdate(),  # noqa: B008 - frozen and field-less
 ):
     """Move ``state`` forward by ``increment``, using an evaluation of it.
 
@@ -297,7 +298,6 @@ def apply(
 
 def _apply(state, evaluation, dbeta, y, noise_cov, update):
     """Steps 6-9 of a rung, with the increment already validated."""
-    update = TransformUpdate() if update is None else update
     key_next, _, key_update = _split_key(state.key)
     updated = jnp.asarray(
         update(
@@ -342,9 +342,9 @@ def advance(
     noise_cov,
     *,
     increment,
-    update=None,
+    update=TransformUpdate(),  # noqa: B008 - frozen and field-less
     inflation=None,
-    on_failure: str = "repair",
+    on_failure: OnFailure = "repair",
 ):
     """One rung at a known increment: :func:`evaluate` then :func:`apply`.
 
@@ -390,10 +390,10 @@ def iterate(
     noise_cov,
     *,
     schedule,
-    update=None,
+    update=TransformUpdate(),  # noqa: B008 - frozen and field-less
     inflation=None,
     stop=None,
-    on_failure: str = "repair",
+    on_failure: OnFailure = "repair",
     max_steps: int = 1000,
 ):
     """The driver as a generator: yields after every rung.
@@ -478,6 +478,7 @@ def iterate(
             stop=stop,
             on_failure=on_failure,
             max_steps=max_steps,
+            where="iterate",
         )
     )
 
@@ -489,10 +490,10 @@ def run(
     noise_cov,
     *,
     schedule,
-    update=None,
+    update=TransformUpdate(),  # noqa: B008 - frozen and field-less
     inflation=None,
     stop=None,
-    on_failure: str = "repair",
+    on_failure: OnFailure = "repair",
     max_steps: int = 1000,
 ) -> EKIResult:
     """The driver as a function: run the ladder and report what happened.
@@ -567,10 +568,11 @@ def run(
         status=status,
         last_evaluation=last_evaluation,
     )
-    if result.min_n_valid is not None and result.min_n_valid < state.n_members:
+    worst = result.min_n_valid
+    if worst is not None and worst < state.n_members:
         warnings.warn(
             f"pyeki.eki.run: some forward-model evaluations failed; the worst "
-            f"step had {result.min_n_valid} of {state.n_members} members valid. "
+            f"step had {worst} of {state.n_members} members valid. "
             f"Each such step conditioned on a covariance damped by "
             f"(n_valid - 1) / (J - 1). Inspect result.stacked.n_valid.",
             stacklevel=2,
@@ -595,13 +597,15 @@ def _drive(
     stop,
     on_failure,
     max_steps,
+    where="run",
 ):
     """The loop that knows why it stopped, as a generator returning the status."""
-    _check_state(state, "run")
-    y, n_obs = _check_problem("run", y, noise_cov)
+    _check_state(state, where)
+    y, n_obs = _check_problem(where, y, noise_cov)
     _check_on_failure(on_failure)
-    _check_max_steps(max_steps)
-    _check_budget_against_bound(schedule, stop, max_steps)
+    _check_max_steps(where, max_steps)
+    _check_schedule(where, schedule)
+    _check_budget_against_bound(schedule, max_steps)
 
     records: list[HistoryRecord] = []
     completed = 0
@@ -611,7 +615,7 @@ def _drive(
             break
         if completed >= max_steps:
             raise EKIError(
-                f"run: max_steps={max_steps} reached at step {state.step}, beta "
+                f"{where}: max_steps={max_steps} reached at step {state.step}, beta "
                 f"{float(state.beta):g}, with schedule {schedule!r} and "
                 f"{'a' if stop is not None else 'no'} stopping rule. An "
                 f"unbounded schedule with no stopping rule is the usual cause.",
@@ -655,7 +659,7 @@ def _drive(
             state, record = _apply(
                 state,
                 evaluation,
-                _check_increment("run", increment),
+                _check_increment(where, increment),
                 y,
                 noise_cov,
                 update,
@@ -677,6 +681,20 @@ def _drive(
             float(state.beta),
         )
     return status
+
+
+def _check_schedule(where: str, schedule) -> None:
+    """Require the two declarative attributes the exhaustion check reads."""
+    missing = [
+        name for name in ("n_steps", "beta_target") if not hasattr(schedule, name)
+    ]
+    if missing or not callable(getattr(schedule, "next_increment", None)):
+        raise ValueError(
+            f"{where}: a Schedule must provide next_increment and the attributes "
+            f"n_steps and beta_target; {schedule!r} is missing "
+            f"{', '.join(missing) or 'next_increment'}. Either attribute may be "
+            f"None, but the driver reads both to decide exhaustion."
+        )
 
 
 def _ladder_finished(schedule, step: int, beta) -> bool:
@@ -911,14 +929,14 @@ def _check_on_failure(on_failure) -> None:
         )
 
 
-def _check_max_steps(max_steps) -> None:
+def _check_max_steps(where: str, max_steps) -> None:
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError(
-            f"run: max_steps must be a positive int, got {max_steps!r}"
+            f"{where}: max_steps must be a positive int, got {max_steps!r}"
         )
 
 
-def _check_budget_against_bound(schedule, stop, max_steps: int) -> None:
+def _check_budget_against_bound(schedule, max_steps: int) -> None:
     """Refuse a bound too small for the schedule's own floor-bound worst case.
 
     A schedule exposing ``beta_target`` and a floor implies a worst case of

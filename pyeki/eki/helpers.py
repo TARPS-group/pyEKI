@@ -203,7 +203,9 @@ def repair_failed_members(*, ensemble, predictions, valid):
     ValueError
         If the shapes disagree or are not rank 2 and rank 1 respectively, if
         ``valid`` is not boolean, or if fewer than two members are valid —
-        the valid-member mean is ``nan`` at one.
+        a single member has no anomalies. The last check reads a concrete
+        value, so it is skipped on a traced ``valid``, as the operator
+        layer's value checks are.
 
     Notes
     -----
@@ -261,7 +263,7 @@ def repair_failed_members(*, ensemble, predictions, valid):
     if n_valid is not None and n_valid < 2:
         raise ValueError(
             f"repair_failed_members: at least 2 valid members are required, got "
-            f"{n_valid}. The valid-member mean is nan at one."
+            f"{n_valid}. A single valid member has no anomalies."
         )
     return _repair(ensemble, predictions, valid)
 
@@ -352,7 +354,7 @@ def _anomalies(x: Array) -> Array:
     :mod:`pyeki.linalg`.
     """
     shifted = x - x[..., :1, :]
-    return shifted - jnp.mean(shifted, axis=-2)
+    return shifted - jnp.mean(shifted, axis=-2, keepdims=True)
 
 
 def _check_finite(where: str, name: str, x) -> None:

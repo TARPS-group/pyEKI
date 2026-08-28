@@ -86,6 +86,9 @@ INTERRUPTED = "interrupted"
 
 Status = Literal["schedule_exhausted", "stopping_rule", "interrupted"]
 
+#: How a run treats members whose predictions came back non-finite.
+OnFailure = Literal["repair", "raise"]
+
 _STATUSES = (SCHEDULE_EXHAUSTED, STOPPING_RULE, INTERRUPTED)
 
 
@@ -259,7 +262,13 @@ class EKIState:
         immediately with nothing raised — a step-bounded schedule exhausts on
         ``step`` and a budgeted one on ``beta``, which is why this resets
         both.
+
+        Raises
+        ------
+        ValueError
+            If this is a vmapped family.
         """
+        _check_not_vmap_family(self, "restart")
         return EKIState(self.ensemble, 0.0, 0, self.key)
 
     @property
@@ -723,7 +732,7 @@ class EKIResult:
         Not :math:`J\\,n_{\\text{steps}}`, which counts member evaluations
         and is the caller's own multiplication.
         """
-        return len(self.history)
+        return self.n_steps
 
     @property
     def min_n_valid(self) -> int | None:
@@ -795,8 +804,8 @@ class EKIResult:
 
 def _zero_record() -> HistoryRecord:
     """A valid record of zeros, the prototype an empty ``stacked`` maps over."""
-    zero_int = jnp.zeros((), dtype=jnp.int64 if jax.config.jax_enable_x64 else jnp.int32)
-    zero = jnp.zeros(())
+    zero_int = jnp.zeros((), dtype=jnp.result_type(int))
+    zero = jnp.zeros((), dtype=jnp.result_type(float))
     return HistoryRecord(
         step=zero_int,
         n_valid=zero_int,
@@ -814,6 +823,11 @@ def _zero_record() -> HistoryRecord:
 
 def _as_level(cls_name: str, field_name: str, value) -> Array:
     """Validate a tempering level and return it as a 0-d float array."""
+    if isinstance(value, bool):
+        raise TypeError(
+            f"{cls_name}.{field_name}: expected a scalar level, got the bool "
+            f"{value!r}, which would silently become {float(value)}"
+        )
     level = jnp.asarray(value)
     if level.ndim != 0:
         raise ValueError(

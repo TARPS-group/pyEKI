@@ -62,6 +62,7 @@ prediction anomalies — belongs to that layer.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from functools import partial
 from typing import Protocol, runtime_checkable
@@ -73,7 +74,12 @@ from jax import Array, lax
 from ..gauss import EnsembleJoint, Gaussian
 from ..linalg import PSDLinOp, PSDLowRank, static_field, value_check
 from ..linalg.base import _broadcast_batch, _pytree_dataclass
-from .helpers import _anomalies, _check_field_rank, _ess_from_misfits
+from .helpers import (
+    _anomalies,
+    _check_field_rank,
+    _check_not_vmap_family,
+    _ess_from_misfits,
+)
 from .values import Evaluation
 
 __all__ = [
@@ -423,8 +429,8 @@ class FixedSchedule:
         correction on the last rung, and it is why the layer's exactness
         claim holds to round-off under this constructor.
         """
-        return cls((1.0 / _positive_int("FixedSchedule.uniform", "n_steps", n_steps),)
-                   * n_steps)
+        n_steps = _positive_int("FixedSchedule.uniform", "n_steps", n_steps)
+        return cls((1.0 / n_steps,) * n_steps)
 
     @classmethod
     def constant(cls, increment: float, n_steps: int) -> FixedSchedule:
@@ -815,6 +821,7 @@ class MultiplicativeInflation:
 
     def __call__(self, key, *, ensemble, step, beta, **_) -> Array:
         """Return the inflated ensemble; ``key``, ``step`` and ``beta`` unused."""
+        _check_not_vmap_family(self, "__call__")
         return _multiplicative_inflate(ensemble, self.anomaly_factor)
 
     @property
@@ -943,8 +950,14 @@ class AdditiveInflation:
             )
         return cls(PSDLowRank(cov.factor().to_dense()))
 
+    @property
+    def batch_shape(self) -> tuple[int, ...]:
+        """The family's batch shape, ``()`` for a directly constructed object."""
+        return self.cov.batch_shape
+
     def __call__(self, key, *, ensemble, step, beta, **_) -> Array:
         """Return the inflated ensemble; ``step`` and ``beta`` unused."""
+        _check_not_vmap_family(self, "__call__")
         ensemble = jnp.asarray(ensemble)
         n_members, u_dim = ensemble.shape[-2], ensemble.shape[-1]
         if self.cov.shape[0] != u_dim:
@@ -1017,9 +1030,16 @@ def _bisect_ess(misfits: Array, delta_hi: Array, target, n_bisect: int) -> Array
     degenerate ensemble reaches the largest allowed step only to
     :math:`2^{-\\texttt{n\\_bisect}}`, and a budgeted ladder never consumes
     its budget exactly.
+
+    A ``nan`` effective sample size propagates rather than being absorbed.
+    Every comparison against ``nan`` is ``False``, so the bracket would
+    otherwise never leave zero and the floor would turn a poisoned ensemble
+    into an ordinary-looking smallest step. Sending ``nan`` on instead makes
+    it reach the driver's increment validation, which raises — the same
+    failure mode :func:`_guarded_ratio` gives the other adaptive schedule.
     """
-    meets = _ess_from_misfits(misfits, delta_hi) >= target
-    lo = jnp.where(meets, delta_hi, jnp.zeros_like(delta_hi))
+    ess_hi = _ess_from_misfits(misfits, delta_hi)
+    lo = jnp.where(ess_hi >= target, delta_hi, jnp.zeros_like(delta_hi))
 
     def body(_, bracket):
         low, high = bracket
@@ -1028,7 +1048,7 @@ def _bisect_ess(misfits: Array, delta_hi: Array, target, n_bisect: int) -> Array
         return jnp.where(ok, mid, low), jnp.where(ok, high, mid)
 
     low, _ = lax.fori_loop(0, n_bisect, body, (lo, delta_hi))
-    return low
+    return jnp.where(jnp.isnan(ess_hi), jnp.nan, low)
 
 
 @jax.jit
@@ -1083,6 +1103,9 @@ def _check_adaptive_fields(schedule) -> None:
             raise ValueError(
                 f"{name}.{field_name}: must be a real number, got {value!r}"
             )
+        object.__setattr__(schedule, field_name, float(value))
+    if schedule.beta_target is not None:
+        object.__setattr__(schedule, "beta_target", float(schedule.beta_target))
     if not math.isfinite(schedule.max_increment):
         raise ValueError(
             f"{name}.max_increment: must be finite, got {schedule.max_increment}. "
@@ -1116,8 +1139,6 @@ def _positive_int(where: str, name: str, value) -> int:
 
 def _policy_repr(policy) -> str:
     """Type name and static fields, in declaration order; never raises."""
-    import dataclasses
-
     try:
         shown = ", ".join(
             f"{f.name}={getattr(policy, f.name)!r}"

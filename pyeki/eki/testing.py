@@ -155,7 +155,7 @@ def check_schedule(schedule, evaluation: Evaluation | None = None) -> None:
     assert n_steps is None or (
         type(n_steps) is int and n_steps >= 1
     ), f"{name}.n_steps: must be None or a positive int, got {n_steps!r}"
-    assert n_steps is schedule.n_steps or n_steps == schedule.n_steps, (
+    assert n_steps == schedule.n_steps, (
         f"{name}.n_steps: changed between reads; it is static metadata on a "
         f"frozen policy, not state"
     )
@@ -166,9 +166,10 @@ def check_schedule(schedule, evaluation: Evaluation | None = None) -> None:
         and not isinstance(beta_target, bool)
         and beta_target > 0.0
     ), f"{name}.beta_target: must be None or a positive real, got {beta_target!r}"
-    assert beta_target == schedule.beta_target or (
-        beta_target is None and schedule.beta_target is None
-    ), f"{name}.beta_target: changed between reads"
+    assert beta_target == schedule.beta_target, (
+        f"{name}.beta_target: changed between reads; it is static metadata on "
+        f"a frozen policy, not state"
+    )
 
     first = schedule.next_increment(evaluation)
     second = schedule.next_increment(evaluation)
