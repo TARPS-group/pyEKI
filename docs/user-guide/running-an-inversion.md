@@ -31,9 +31,15 @@ result.beta           # 1.0 — the ladder finished
 ```
 
 `forward` is any callable taking a `(J, P)` array of members and returning a
-`(J, N)` array of predictions. That is the whole forward-model interface: pyEKI
-ships no models and defines no base class, and the callable may be `jit`-ed,
-may fan out over processes, or may block on a job scheduler.
+`(J, N)` array of predictions: pyEKI ships no models and defines no base class,
+and the callable may be `jit`-ed, may fan out over processes, or may block on a
+job scheduler. It is called **once per rung with the whole ensemble**, never
+one member at a time.
+
+Shapes are not quite the whole interface — a model that can fail also owes the
+run a failure signal, described under [Failed members](#failed-members) below.
+{doc}`writing-a-forward-model` states the complete obligation in one place, and
+is the page to read before wrapping an external code.
 
 ## Three choices, and the same driver
 
@@ -254,6 +260,8 @@ case: it produces an enormous misfit, which an adaptive schedule reads as
 genuine ensemble disagreement and answers by shrinking the increment, so the
 run stalls on a broken member instead of flagging it. Map those to non-finite
 rows in your own wrapper, where the information exists.
+{doc}`writing-a-forward-model` works through a wrapper that does this for an
+external executable.
 
 ## Inflation
 

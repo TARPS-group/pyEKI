@@ -1405,6 +1405,128 @@ ships no forward models and defines no forward-model base class. The callable
 may be `jit`-ed by the caller, may fan out over processes, may block on a job
 scheduler; the driver never traces it and never inspects it.
 
+The rest of this section states that interface completely: what the callable
+receives, what it may return, and what it must be. {doc}`user-guide/writing-a-forward-model`
+is the same obligation written for the person implementing one.
+
+### What the callable receives
+
+**Exactly one positional argument, the ensemble.** It is:
+
+- **exactly two-dimensional**, `(J, P)` — the leading axis indexes ensemble
+  members, the trailing axis parameters. There are never further axes in
+  front: a run binds one ensemble, and a vmapped `EKIState` is rejected at the
+  call ({ref}`eki-validation`), so a family of runs is a Python loop over
+  `run` rather than a `jax.vmap`.
+- **inherently batched over members.** The forward model is called **once per
+  rung with the whole ensemble**, never once per member. A per-member function
+  is wrapped with `jax.vmap`, or with a loop, by the caller.
+- **a `jax.Array`, and concrete** — never a tracer. This is the guarantee that
+  makes an untraceable model legal, and it follows from the loop being
+  ordinary Python ({ref}`eki-notation`): a run cannot itself be traced, so the
+  callable can branch on values, write files, spawn processes, and block. It
+  is also why a wrapper around a non-JAX library must convert. `np.asarray` on
+  it returns a **read-only zero-copy view**; a wrapper that needs to write into
+  its input must copy with `np.array`.
+- **of dtype `state.ensemble.dtype`** — `float64` under the package's default,
+  which `pyeki/__init__.py` establishes at import.
+- **the members that will be recorded.** When an inflation is configured, the
+  argument is the *inflated* ensemble, not `state.ensemble`, and it is the
+  ensemble carried on the resulting `Evaluation` ({ref}`eki-inflation`).
+
+The layer promises nothing about device placement, and a caller must not
+depend on any.
+
+### What the callable may return
+
+**Any array-like of shape `(J, N)`.** The return is passed through
+`jnp.asarray`, so a `jax.Array`, a NumPy array, and a nested Python sequence
+are all accepted and all equivalent — this is a **promise**, not a tolerance,
+and the conformance suite pins it as a bit-exactness rather than as an absence
+of errors ({ref}`eki-conformance`). A wrapper that assembles its rows in
+Python, or that reads them from a file with NumPy, need not convert.
+
+**The dtype must be a real floating one**, and one narrower than the run's is
+**promoted to `state.ensemble.dtype` and warned about, once per run.** The
+promotion only ever widens: a model returning a dtype wider than the run's is
+left exactly as it is. An integer or complex return is a `ValueError`
+({ref}`eki-validation`), never a silent conversion.
+
+So `Evaluation.predictions` is always in the run's working dtype, whatever the
+model returned, and a policy reading one never sees a dtype that depends on
+the caller's model.
+
+:::{admonition} Why a narrow return is promoted and warned rather than rejected
+:class: note
+
+Rejecting it would be the wrong rule twice over. The precision the package
+configures is not `float64` as such but the run's, and under
+`JAX_ENABLE_X64=0` — the configuration a fan-out model's worker processes get
+unless told otherwise — an ensemble is `float32` and a `float64`-only rule
+would reject every model. And single precision is a real constraint rather
+than a mistake: a GPU solver, a legacy code, an output file written as
+`REAL*4`. The layer below preserves `float32` end to end deliberately
+({doc}`gaussian-contract`), and rejecting it here would make that
+unreachable from a run.
+
+Promotion is not, however, a fix, and the warning is the substantive part of
+this rule. Most of the loss happens before the array arrives: a model whose
+predictions are single precision has already lost the digits, and no dtype the
+driver chooses afterwards recovers them. On an eight-rung ladder with $J = 64$
+and predictions whose mean exceeds their spread by $10^4$ — the cancellation
+regime `float64` is enabled for — a `float32` return costs about $7 \times
+10^{-5}$ relative error in the posterior mean, and promoting on receipt
+roughly halves it to $3 \times 10^{-5}$. Half a silent error is still a
+silent error, which is why the caller is told.
+
+The asymmetry with an update rule's output is deliberate. A narrow update is
+a `ValueError` ({ref}`eki-step`), because its return *becomes the state* and
+demotes every subsequent rung; a narrow prediction is consumed within one
+step. Widening the prediction is enough to keep the run's precision the
+caller's decision rather than the model's accident.
+:::
+
+### What the callable must be
+
+**Row $j$ of the return must depend only on row $j$ of the argument.** The
+layer fits a Gaussian to the pairs $(u_j, v_j)$ and conditions with the
+resulting cross-covariance; a model that couples members — normalizing across
+the ensemble, or sharing a mutable accumulator between rows — returns
+something that is not a sample of the joint law of $(u, G(u))$ at all. Nothing
+detects this. It is also what `repair_failed_members` presumes when it moves a
+member's pair as a unit, and what {ref}`eki-diagnostics` means by a pair being
+forward-model-consistent.
+
+**Determinism across calls is *not* required, and side effects are
+permitted.** A stochastic simulator is a legitimate forward model and one of
+the cases EKI is most often applied to; a wrapper that writes scratch files,
+submits jobs, or holds a process pool is the ordinary way to reach an external
+code. The requirement above is on the mathematical mapping within a call, not
+on the absence of effects.
+
+What a stochastic model costs is worth naming, since none of it raises:
+
+- **The exactness claim assumes a fixed $G$.** With $G$ stochastic the run is
+  EKI applied to $\tilde G(u) = G(u) + \eta$, and the telescoping identity of
+  {ref}`eki-iteration` — the layer's central correctness property — is a
+  statement about $\tilde G$, not about $G$.
+- **The gain is damped.** The evaluation noise inflates $\widehat C_{vv}$ but
+  not $\widehat C_{uv}$, being uncorrelated with $u$, so
+  $\widehat C_{uv}(\widehat C_{vv} + R/\delta)^{-1}$ shrinks: the run takes
+  shorter effective steps and under-fits. The same direction as the
+  failed-member damping above, and for the same structural reason.
+- **Both adaptive schedules read a noisier $\Phi$**, see the extra spread as
+  ensemble disagreement, and shorten their increments — so a stochastic model
+  costs *more* evaluations, not fewer.
+- **A backtracking loop compares different draws.** The recipe of
+  {ref}`eki-step` evaluates a trial state and an accepted one separately, so
+  its accept/reject decision includes evaluation noise.
+
+What is *not* affected is re-reading an `Evaluation`. It holds the arrays as
+they were returned, so a schedule or stopping rule shown one twice sees the
+same numbers however stochastic the model is; the layer never re-calls the
+model to answer a question it has already asked.
+
 **Failure is signalled by non-finite predictions.** A member whose prediction
 row contains any `nan` or `inf` is invalid. Deriving validity this way rather
 than adding a mask to the return type keeps the interface at one array, and
@@ -2055,6 +2177,14 @@ two unrelated and misdiagnosing errors — a full-budget run of `nan` updates
 under `AdaptiveMisfitSchedule`, or "increment not finite" under
 `AdaptiveESSSchedule` — neither of which names `y`.
 
+**A prediction dtype narrower than the run's is promoted, not rejected**, and
+the caller is warned once per run — or once per call of the `evaluate` phase,
+which has no run to be once per. The rule and its reasoning are
+{ref}`eki-failures`; what belongs here is that this is the layer's one place
+where an out-of-contract input is repaired rather than raised on, and that it
+repairs in the widening direction only. An integer, complex or non-floating
+return is a `ValueError` as before.
+
 **String arguments are validated, never silently defaulted.** `on_failure` is
 checked against its two permitted values at the call, and an unrecognized one
 raises rather than falling back to `"repair"` — a typo such as `"Raise"` must
@@ -2654,6 +2784,34 @@ written independently of the code under test. The suite must verify at least:
     on the appended-block whitening identity, and its documented
     double-counting hazard is asserted as an over-concentration so that a later
     change cannot quietly "fix" it.
+
+    One recipe from outside this page is covered here too: the
+    external-executable wrapper of {doc}`user-guide/writing-a-forward-model`,
+    run against real subprocesses. The wrapper obligation above is the one
+    thing this layer needs from a forward model beyond its shape, and nothing
+    else in the suite exercises it against a process that can actually exit
+    non-zero.
+27. **The forward model's argument is what this section says it is.** A
+    recording model asserts, from inside the call, that it received a concrete
+    `jax.Array` — `isinstance(u, jax.Array)` and *not* a `jax.core.Tracer` —
+    of shape exactly `(J, P)` and dtype `state.ensemble.dtype`, and that with
+    an inflation configured it received the **inflated** members rather than
+    `state.ensemble`. The tracer assertion is the one that would otherwise
+    fail silently and late: it is what makes a subprocess model legal, and a
+    change to `lax.scan` would break it without breaking any other test.
+28. **The accepted containers are a promise, tested as an exactness.** The
+    same predictions returned as a `jax.Array`, as a NumPy array, and as a
+    nested Python list produce **bit-identical** runs — asserted as equality,
+    not as the absence of an exception, since the claim is that the container
+    does not matter rather than that three containers happen to work.
+29. **The dtype policy holds in both directions.** A `float32` model runs,
+    warns exactly once per run — and once per call of the `evaluate` phase —
+    and leaves `Evaluation.predictions.dtype == state.ensemble.dtype` and the
+    returned ensemble in the run's dtype; a `float64` model on a `float64` run
+    warns not at all; an integer model raises. The "exactly once" is the
+    substantive half: a per-step warning left to the caller's filter is a
+    different behaviour that passes any test asserting only that a warning
+    was seen.
 
 Alongside conformance, targeted regression tests guard this layer's
 silent-failure classes under the same do-not-delete rule as the layers below.

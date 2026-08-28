@@ -61,7 +61,9 @@ pyEKI does not implement forward models, priors, or Gaussian process kernels.
 The forward model is any callable from parameters to predicted observations,
 and a prior is any operator meeting the covariance interface. Building those
 belongs to the caller, which keeps pyEKI independent of the domain being
-calibrated.
+calibrated. {doc}`user-guide/writing-a-forward-model` states everything a
+forward model must satisfy, and works through wrapping an external
+executable.
 
 ## Quick example
 
@@ -152,6 +154,7 @@ user-guide/quickstart
 user-guide/operators
 user-guide/conditioning
 user-guide/running-an-inversion
+user-guide/writing-a-forward-model
 user-guide/writing-an-operator
 ```
 

@@ -1,7 +1,8 @@
 # Handoff
 
 Written 2026-08-24, updated 2026-08-25 after the operator layer was reworked
-against the normative contract, and 2026-08-27 after `pyeki.eki` shipped. Read
+against the normative contract, 2026-08-27 after `pyeki.eki` shipped, and
+2026-08-28 after the forward-model contract was specified. Read
 `CLAUDE.md` first for conventions, then this for state and next steps.
 
 ## Where things stand
@@ -30,8 +31,18 @@ phases of a rung, `run` and `iterate`, the three array-level helpers, and the
 `pyeki.eki.testing` conformance harness for user-written policies. Its
 user-guide page is `docs/user-guide/running-an-inversion.md`.
 
+The **forward-model contract** is specified in one place as of 2026-08-28, in
+the contract's *Forward models and failed members* and in the user-guide page
+`docs/user-guide/writing-a-forward-model.md`. Three properties the driver had
+been deciding on its own are now stated and tested (obligations 27-29): what
+the callable receives, what it may return, and what it must be. It landed on
+its own branch, deliberately ahead of the toy forward models and the first
+tutorial, both of which consume it — a session writing the contract *and* the
+models satisfying it is under pressure to bend the first toward the second.
+
 **Not started.** `pyeki.localize`, and the Kronecker family of operators. The
-design background for both is in `docs/design.md`.
+design background for both is in `docs/design.md`. The toy forward-model module
+and the tutorial series are also unwritten; both are now unblocked.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -146,6 +157,9 @@ layer; this is the index.
 | `cov.factor()` is free, because operators factorize at construction | "hoisting" it by storing a densified factor turns an $O(P)$ diagonal into a $P \times P$ array |
 | Every comparison against `nan` is `False` | a bisection on such a comparison silently returns its lower bracket, and a floor then makes that look like an ordinary step |
 | `jnp.mean(x, axis=-2)` without `keepdims` | the subtraction right-aligns against the batch axis, so an operand whose leading axis equals $J$ broadcasts and returns wrong anomalies without raising |
+| `np.asarray` on the forward model's argument returns a **read-only view**, not a copy | writing into it raises `assignment destination is read-only` from wherever you wrote, not at the conversion; copy with `np.array` |
+| A `float32` forward model is promoted and warned about, not rejected | it still costs ~$7\times10^{-5}$ relative in the posterior mean where the prediction mean exceeds the spread by $10^4$; promotion recovers only about half, since the digits are gone before the array arrives |
+| `ensemble @ G` instead of `ensemble @ G.T` is silent when $G$ is square | the transposed model's predictions, right shape, no error; `G @ ensemble` raises, so it is the harmless mistake |
 
 ## Working agreements
 

@@ -31,9 +31,13 @@ Conventions shared by everything in the module:
   and the number of compilations is bounded independently of the number of
   steps.
 - **The forward model is any callable** ``(J, P) -> (J, N)``, never traced
-  and never inspected. Failure is signalled by non-finite predictions: a
-  wrapper around a model that may crash, time out or lose a worker must
-  catch that itself and return a non-finite row.
+  and never inspected. It is called once per rung with the whole ensemble,
+  and receives a concrete ``jax.Array`` — never a tracer — so it may do
+  anything Python can do. It may return any array-like; a real floating
+  dtype is required, and one narrower than the run's is promoted with a
+  warning. Failure is signalled by non-finite predictions: a wrapper around
+  a model that may crash, time out or lose a worker must catch that itself
+  and return a non-finite row.
 - **Progress is reported through the standard library's** :mod:`logging`, on
   the logger named ``pyeki.eki``: one record per step at ``INFO`` and one at
   ``WARNING`` when any member fails. No handler is installed and no
@@ -143,7 +147,9 @@ def evaluate(
     -------
     Evaluation
         Carrying the members that were evaluated — after inflation and after
-        repair — their predictions, and the whitened residuals.
+        repair — their predictions, and the whitened residuals. The
+        predictions are in ``state.ensemble.dtype``, whatever dtype the
+        forward model returned.
 
     Raises
     ------
@@ -161,6 +167,14 @@ def evaluate(
         not a :class:`~pyeki.linalg.PSDLinOp`.
     UnsupportedOpError
         If ``noise_cov`` does not support ``whiten``.
+
+    Warns
+    -----
+    UserWarning
+        On every call whose predictions had to be promoted to
+        ``state.ensemble.dtype``. Per call rather than once, because this
+        phase has no run to be once per; how often an unchanging message is
+        displayed is the caller's warning filter, not this layer.
 
     Notes
     -----
@@ -182,15 +196,21 @@ def evaluate(
     _check_state(state, "evaluate")
     y, n_obs = _check_problem("evaluate", y, noise_cov)
     _check_on_failure(on_failure)
-    return _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs)[0]
+    evaluation, _, promoted_from = _evaluate(
+        state, forward, y, noise_cov, inflation, on_failure, n_obs
+    )
+    if promoted_from is not None:
+        _warn_promoted(promoted_from, state.ensemble.dtype, stacklevel=3)
+    return evaluation
 
 
 def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
     """Steps 1-5 of a rung, with the problem already validated.
 
-    Returns the evaluation and the valid-member count as a Python ``int``,
-    which the driver needs for its warning and which would otherwise have to
-    be read back off the device.
+    Returns the evaluation, the valid-member count as a Python ``int`` — which
+    the driver needs for its warning and which would otherwise have to be read
+    back off the device — and the dtype the predictions arrived in when that
+    required a promotion, or ``None`` when it did not.
     """
     _, key_inflate, _ = _split_key(state.key)
 
@@ -208,7 +228,9 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
                 f"preserving."
             )
 
-    predictions = _check_predictions(forward(members), state.n_members, n_obs)
+    predictions, promoted_from = _check_predictions(
+        forward(members), state.n_members, n_obs, state.ensemble.dtype
+    )
     members, predictions, n_valid = _handle_failures(
         state, members, predictions, on_failure=on_failure
     )
@@ -222,7 +244,7 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
         rms_parameter_spread=spread,
         n_valid=n_valid,
     )
-    return evaluation, n_valid
+    return evaluation, n_valid, promoted_from
 
 
 def apply(
@@ -493,6 +515,14 @@ def iterate(
         If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
         not a :class:`~pyeki.linalg.PSDLinOp`.
 
+    Warns
+    -----
+    UserWarning
+        Once per loop whose forward model returned predictions narrower than
+        ``state.ensemble.dtype``, which are promoted to it. Unlike the
+        failed-member warning, which :func:`run` issues and this does not,
+        nothing in the yielded records would reveal a promotion.
+
     Notes
     -----
     The evaluation is yielded because every recipe this layer recommends
@@ -592,6 +622,9 @@ def run(
         ``on_failure="repair"`` a run can otherwise complete, return a
         normal-looking result, and have been conditioning on a covariance
         damped at every rung.
+    UserWarning
+        Once per run whose forward model returned predictions narrower than
+        ``state.ensemble.dtype``, which are promoted to it.
 
     Notes
     -----
@@ -678,6 +711,7 @@ def _drive(
 
     records: list[HistoryRecord] = []
     completed = 0
+    warned_promotion = False
     while True:
         if _ladder_finished(schedule, state.step, state.beta):
             status = SCHEDULE_EXHAUSTED
@@ -692,12 +726,15 @@ def _drive(
                 history=records,
             )
         try:
-            evaluation, n_valid = _evaluate(
+            evaluation, n_valid, promoted_from = _evaluate(
                 state, forward, y, noise_cov, inflation, on_failure, n_obs
             )
         except EKIError as failure:
             failure.history = tuple(records)
             raise
+        if promoted_from is not None and not warned_promotion:
+            warned_promotion = True
+            _warn_promoted(promoted_from, state.ensemble.dtype, stacklevel=4)
         if n_valid < state.n_members:
             logger.warning(
                 "step %d: %d of %d members' predictions were finite; the rest "
@@ -937,8 +974,14 @@ def _check_problem(where: str, y, noise_cov):
     return y, n_obs
 
 
-def _check_predictions(predictions, n_members: int, n_obs: int) -> Array:
-    """Validate the forward model's output: the one check that runs every step."""
+def _check_predictions(predictions, n_members: int, n_obs: int, working_dtype):
+    """Validate the forward model's output: the one check that runs every step.
+
+    Accepts anything ``jnp.asarray`` accepts, and returns the predictions in
+    ``working_dtype`` together with the dtype they arrived in when reaching it
+    required a promotion, or ``None`` when it did not. Promotion only ever
+    widens: a model returning a dtype wider than the run's is left alone.
+    """
     predictions = jnp.asarray(predictions)
     if predictions.shape != (n_members, n_obs):
         raise ValueError(
@@ -950,7 +993,28 @@ def _check_predictions(predictions, n_members: int, n_obs: int) -> Array:
             f"evaluate: the forward model returned dtype {predictions.dtype}, "
             f"expected a real floating dtype"
         )
-    return predictions
+    promoted = jnp.promote_types(predictions.dtype, working_dtype)
+    if promoted == predictions.dtype:
+        return predictions, None
+    return predictions.astype(promoted), predictions.dtype
+
+
+def _warn_promoted(arrived, working, stacklevel: int) -> None:
+    """Report a forward model narrower than the run it is driving.
+
+    ``stacklevel`` counts out to the caller's own call: three from
+    :func:`evaluate`, four from the driver, whose generator frame and the
+    ``run`` or ``iterate`` that resumes it both sit in between.
+    """
+    warnings.warn(
+        f"pyeki.eki: the forward model returned {arrived} predictions, promoted "
+        f"to the run's working dtype {working}. Ensemble anomalies are formed "
+        f"by subtraction and lose digits to cancellation, so a model narrower "
+        f"than the run costs precision it cannot get back — the promotion only "
+        f"prevents a second loss in the conditioning arithmetic. Return "
+        f"{working} from the model where you can.",
+        stacklevel=stacklevel,
+    )
 
 
 def _check_increment(where: str, increment) -> Array:

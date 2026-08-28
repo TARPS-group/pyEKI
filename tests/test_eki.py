@@ -1,6 +1,6 @@
 """Conformance and regression tests for the Ensemble Kalman Inversion layer.
 
-The file has two sections. The first works through the twenty-six numbered
+The file has two sections. The first works through the twenty-nine numbered
 conformance obligations of the "Ensemble Kalman Inversion contract"; the
 second holds one targeted regression test per class of silent failure that
 contract names, under the same do-not-delete rule as the two layers below —
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import subprocess
+import sys
 import warnings
 
 import jax
@@ -55,6 +57,7 @@ from pyeki.eki import (
     repair_failed_members,
     run,
 )
+from pyeki.eki.driver import _check_predictions
 from pyeki.gauss import EnsembleJoint, Gaussian
 from pyeki.linalg import (
     DensePSD,
@@ -2172,6 +2175,205 @@ def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
     assert np.trace(got_cov) < np.trace(honest)
 
 
+def test_26_the_external_executable_wrapper_of_the_guide_runs(tmp_path):
+    """The one runnable recipe outside the contract page that earns a test.
+
+    The wrapper obligation -- catch your own failures and return a non-finite
+    row -- is the single thing the layer needs from a forward model beyond its
+    shape, and nothing else here exercises it against a real process. The
+    solver exits non-zero on a negative decay rate, which the prior puts mass
+    on, so the failure path is reached without being contrived.
+    """
+    solver = tmp_path / "solver.py"
+    solver.write_text(
+        "import sys, numpy as np\n"
+        "u = np.loadtxt(sys.argv[1])\n"
+        "if u[1] < 0.0:\n"
+        "    sys.exit('solver diverged: negative decay rate')\n"
+        "np.savetxt(sys.argv[2], u[0] * np.exp(-u[1] * np.array([0.5, 1.0, 2.0])))\n"
+    )
+    n_obs = 3
+
+    def forward(ensemble):
+        members = np.asarray(ensemble)
+        predictions = np.full((members.shape[0], n_obs), np.nan)
+        for j, member in enumerate(members):
+            member_in, member_out = tmp_path / f"in_{j}.txt", tmp_path / f"out_{j}.txt"
+            member_out.unlink(missing_ok=True)
+            np.savetxt(member_in, member)
+            try:
+                subprocess.run(
+                    [sys.executable, str(solver), str(member_in), str(member_out)],
+                    check=True, capture_output=True, timeout=60,
+                )
+                row = np.loadtxt(member_out)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                    OSError, ValueError):
+                continue
+            if row.shape == (n_obs,):
+                predictions[j] = row
+        return predictions
+
+    times = jnp.array([0.5, 1.0, 2.0])
+    truth = jnp.array([2.0, 0.7])
+    y = truth[0] * jnp.exp(-truth[1] * times) + jnp.array([0.02, -0.01, 0.015])
+    noise = PSDDiagonal(jnp.full(n_obs, 0.01))
+    prior = Gaussian(
+        mean=jnp.array([1.0, 1.0]), cov=PSDDiagonal(jnp.array([1.0, 0.5]))
+    )
+    state = EKIState.from_prior(jax.random.key(0), prior, n_members=32)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, forward, y, noise, schedule=AdaptiveESSSchedule())
+
+    # The failure path was genuinely taken, and reported: the prior puts mass
+    # on negative decay rates, on which the solver exits non-zero.
+    assert result.min_n_valid < state.n_members
+    assert [w for w in caught if "evaluations failed" in str(w.message)]
+    # The numbers the guide prints, so its output cannot rot unnoticed.
+    assert result.min_n_valid == 29
+    assert np.allclose(np.asarray(result.mean), [2.0798, 0.7406], atol=5e-5)
+    # A run driven entirely by subprocesses, returning a numpy array read
+    # back off disk, still lands in the run's dtype.
+    assert result.last_evaluation.predictions.dtype == jnp.float64
+    assert np.abs(np.asarray(result.mean) - np.asarray(truth)).max() < 0.2
+
+
+def test_27_the_forward_model_receives_what_the_contract_promises():
+    """Concrete, two-dimensional, in the run's dtype, and post-inflation.
+
+    The tracer assertion is the one that fails silently and late: a concrete
+    argument is what makes a subprocess model legal, and a driver rewritten
+    over ``lax.scan`` would break it without breaking any other test here.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    state = problem.state()
+    seen = []
+
+    def recording(u):
+        assert isinstance(u, jax.Array)
+        assert not isinstance(u, jax.core.Tracer)
+        assert u.shape == (problem.J, problem.P)
+        assert u.dtype == state.ensemble.dtype
+        seen.append(np.asarray(u))
+        return u @ jnp.asarray(problem.G).T
+
+    run(state, recording, y, noise, schedule=FixedSchedule.uniform(2))
+    assert len(seen) == 2
+    # The first call is on the state's own members, untouched.
+    assert np.array_equal(seen[0], np.asarray(state.ensemble))
+
+    # With an inflation, it is the inflated members -- not state.ensemble.
+    seen.clear()
+    factor = 3.0
+    run(
+        state, recording, y, noise, schedule=FixedSchedule.uniform(1),
+        inflation=MultiplicativeInflation(factor),
+    )
+    members = np.asarray(state.ensemble)
+    centre = members.mean(axis=0, keepdims=True)
+    expected = centre + factor * (members - centre)
+    assert np.abs(seen[0] - expected).max() < 64 * EPS * np.abs(expected).max()
+    assert np.abs(seen[0] - members).max() > 0.0
+
+    # np.asarray on the argument is a read-only view, which the guide's
+    # wrapper depends on being safe to hold and unsafe to write.
+    view = np.asarray(state.ensemble)
+    assert not view.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        view[0, 0] = 1.0
+
+
+def test_28_the_accepted_containers_are_a_promise_not_a_tolerance():
+    """A jax array, a numpy array and a nested list give bit-identical runs."""
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    G = np.asarray(problem.G)
+
+    def as_jax(u):
+        return jnp.asarray(u) @ jnp.asarray(G).T
+
+    def as_numpy(u):
+        return np.asarray(u) @ G.T
+
+    def as_list(u):
+        return (np.asarray(u) @ G.T).tolist()
+
+    runs = [
+        run(problem.state(), f, y, noise, schedule=FixedSchedule.uniform(3))
+        for f in (as_jax, as_numpy, as_list)
+    ]
+    reference = np.asarray(runs[0].ensemble)
+    for other in runs[1:]:
+        # Bit-identical: the claim is that the container cannot matter.
+        assert np.array_equal(np.asarray(other.ensemble), reference)
+        assert other.last_evaluation.predictions.dtype == jnp.float64
+
+
+def test_29_a_narrow_forward_model_is_promoted_and_warned_about_once():
+    """Promotion widens only, warns once per run, and never demotes the state.
+
+    "Exactly once" is the substantive half. A per-step warning left to the
+    caller's filter displays once under the default filter too, and would
+    pass any test asserting only that a warning was seen.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    state = problem.state()
+
+    def coarse(u):
+        return (jnp.asarray(u) @ jnp.asarray(problem.G).T).astype(jnp.float32)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, coarse, y, noise, schedule=FixedSchedule.uniform(4))
+    promotions = [w for w in caught if "promoted" in str(w.message)]
+    assert len(promotions) == 1
+    assert "float32" in str(promotions[0].message)
+    assert result.n_steps == 4
+    # Promoted on receipt: nothing downstream sees the narrow dtype.
+    assert result.last_evaluation.predictions.dtype == jnp.float64
+    assert result.ensemble.dtype == jnp.float64
+
+    # A float64 model on a float64 run is silent.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(state, problem.forward, y, noise, schedule=FixedSchedule.uniform(4))
+    assert not [w for w in caught if "promoted" in str(w.message)]
+
+    # The evaluate phase has no run to be once per, so it warns per call.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = evaluate(state, coarse, y, noise)
+        evaluate(state, coarse, y, noise)
+    assert len([w for w in caught if "promoted" in str(w.message)]) == 2
+    assert first.predictions.dtype == jnp.float64
+
+    # A non-floating return is still a ValueError, never a conversion.
+    with pytest.raises(ValueError, match="real floating dtype"):
+        run(state, lambda u: np.asarray(np.asarray(u) @ problem.G.T, np.int64),
+            y, noise, schedule=FixedSchedule.uniform(2))
+
+
+def test_29_promotion_only_ever_widens():
+    """A model wider than the run is left exactly as it is."""
+    problem = _AffineProblem(J=8)
+    state = problem.state()
+    working = state.ensemble.dtype
+    narrow = jnp.zeros((problem.J, problem.N), jnp.float32)
+    wide = jnp.zeros((problem.J, problem.N), working)
+
+    got, arrived = _check_predictions(narrow, problem.J, problem.N, working)
+    assert got.dtype == working and arrived == jnp.float32
+    got, arrived = _check_predictions(wide, problem.J, problem.N, working)
+    assert got.dtype == working and arrived is None
+    # Against a float32 run, a float64 model is not demoted and not warned on.
+    got, arrived = _check_predictions(wide, problem.J, problem.N, jnp.float32)
+    assert got.dtype == working and arrived is None
+
+
 # ===========================================================================
 # Section 2 -- one targeted regression test per silent-failure class
 #
@@ -2410,12 +2612,17 @@ def test_regression_a_float32_update_cannot_quietly_demote_a_run():
         run(problem.state(), problem.forward, y, noise,
             schedule=FixedSchedule.uniform(2), update=demoting)
 
-    # A float32 forward model is the caller's own precision choice, but it
-    # must not demote the run: the state stays float64 throughout.
+    # The asymmetry with a float32 forward model is deliberate: an update's
+    # return becomes the state and demotes every later rung, while a
+    # prediction is consumed within one step and is promoted on receipt
+    # (test 29). Either way the run stays float64.
     def coarse(u):
         return (jnp.asarray(u) @ jnp.asarray(problem.G).T).astype(jnp.float32)
 
-    result = run(problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2))
+    with pytest.warns(UserWarning, match="promoted"):
+        result = run(
+            problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2)
+        )
     assert result.ensemble.dtype == jnp.float64
 
 
