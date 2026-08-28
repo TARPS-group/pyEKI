@@ -6,7 +6,8 @@ Ensemble Kalman Inversion for derivative-free Bayesian calibration.
 :class: warning
 
 The linear operator, Gaussian conditioning and EKI layers are implemented and
-tested. The localization layer is in progress.
+tested — you can run an inversion today. The localization layer, needed when
+the parameter dimension far exceeds the ensemble size, is not yet built.
 :::
 
 ## What problem does this solve?
@@ -64,20 +65,67 @@ calibrated.
 
 ## Quick example
 
+Calibrating a two-parameter decay model against three noisy observations:
+
 ```python
-import pyeki  # enables float64; import before creating arrays
-import jax.numpy as jnp
-from pyeki.linalg import PSDDiagonal, DensePSD, block_diag
+import pyeki                      # enables float64; import before creating arrays
+import jax, jax.numpy as jnp
+from pyeki.linalg import PSDDiagonal
+from pyeki.gauss import Gaussian
+from pyeki.eki import EKIState, AdaptiveESSSchedule, run
 
-noise = block_diag(
-    PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),      # independent errors
-    DensePSD.from_matrix(jnp.eye(2) + 0.3),    # correlated block
-)
+# The forward model: any callable from a (J, P) ensemble to (J, N) predictions.
+times = jnp.array([0.5, 1.0, 2.0])
+def forward(u):
+    return u[:, :1] * jnp.exp(-u[:, 1:2] * times)
 
-noise.shape          # (5, 5)
-noise.logdet()       # summed over blocks, never forms a 5x5 matrix
-noise.whiten(y)      # applied block by block
+y = jnp.array([1.75, 1.38, 0.82])                             # observations
+noise = PSDDiagonal(jnp.full(3, 0.01))                        # error covariance
+prior = Gaussian(mean=jnp.zeros(2), cov=PSDDiagonal(jnp.array([4.0, 1.0])))
+
+state = EKIState.from_prior(jax.random.key(0), prior, n_members=64)
+result = run(state, forward, y, noise, schedule=AdaptiveESSSchedule())
+
+result.mean            # posterior mean estimate
+result.stacked.ess     # effective sample size at each rung of the ladder
 ```
+
+{doc}`tutorials/index` builds this up from the beginning and explains every
+choice in it.
+
+## How this documentation is organized
+
+::::{grid} 2
+:gutter: 3
+
+:::{grid-item-card} Tutorials
+Read in order, each building on the last. Start here if you are new — the
+first one runs an inversion in twenty lines and assumes nothing.
++++
+{doc}`tutorials/index`
+:::
+
+:::{grid-item-card} User guide
+Answers "when and why" for a specific choice, once you know the shape of the
+problem. Read out of order, as needed.
++++
+{doc}`user-guide/running-an-inversion`
+:::
+
+:::{grid-item-card} Examples
+Runnable notebooks working through a problem end to end, with plots and
+diagnostics.
++++
+{doc}`examples/index`
+:::
+
+:::{grid-item-card} Reference
+The normative contracts specifying each layer's behaviour exactly, the design
+notes, and the API.
++++
+{doc}`api/index`
+:::
+::::
 
 ```{toctree}
 :maxdepth: 2
@@ -85,7 +133,14 @@ noise.whiten(y)      # applied block by block
 :hidden:
 
 installation
-user-guide/quickstart
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Tutorials
+:hidden:
+
+tutorials/index
 ```
 
 ```{toctree}
@@ -93,10 +148,19 @@ user-guide/quickstart
 :caption: User guide
 :hidden:
 
+user-guide/quickstart
 user-guide/operators
 user-guide/conditioning
 user-guide/running-an-inversion
 user-guide/writing-an-operator
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Examples
+:hidden:
+
+examples/index
 ```
 
 ```{toctree}
