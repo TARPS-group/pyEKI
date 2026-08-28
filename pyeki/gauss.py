@@ -1145,7 +1145,7 @@ def _centered(x: Array) -> Array:
       ensemble, late in a tempering run.
     """
     shifted = x - x[..., :1, :]
-    return shifted - jnp.mean(shifted, axis=-2)
+    return shifted - jnp.mean(shifted, axis=-2, keepdims=True)
 
 
 def _thin_svd(s: Array) -> tuple[Array, Array, Array]:

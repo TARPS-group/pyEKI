@@ -5,8 +5,8 @@ Ensemble Kalman Inversion for derivative-free Bayesian calibration.
 :::{admonition} Pre-alpha
 :class: warning
 
-The linear operator and Gaussian conditioning layers are implemented and
-tested. The localization and EKI layers are in progress.
+The linear operator, Gaussian conditioning and EKI layers are implemented and
+tested. The localization layer is in progress.
 :::
 
 ## What problem does this solve?
@@ -51,7 +51,6 @@ the ensemble size. *(planned)*
 :::{grid-item-card} The EKI algorithms
 `pyeki.eki` provides tempering schedules, ensemble updates, inflation, and the
 driver loop, in both the approximate-sampling and the optimization form.
-*(contract complete; implementation planned)*
 :::
 ::::
 
@@ -96,6 +95,7 @@ user-guide/quickstart
 
 user-guide/operators
 user-guide/conditioning
+user-guide/running-an-inversion
 user-guide/writing-an-operator
 ```
 
