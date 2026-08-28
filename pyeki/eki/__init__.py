@@ -9,7 +9,7 @@ For a prior :math:`\\pi_0` and the misfit
 
 .. math::
 
-    \\pi_\\beta(u) \;\\propto\; \\pi_0(u)\\, e^{-\\beta\\Phi(G(u))},
+    \\pi_\\beta(u) \\;\\propto\\; \\pi_0(u)\\, e^{-\\beta\\Phi(G(u))},
     \\qquad \\beta \\ge 0 ,
 
 the prior at :math:`\\beta = 0`, the Bayesian posterior at :math:`\\beta = 1`,
@@ -87,23 +87,16 @@ The behaviour of this layer is specified by the "Ensemble Kalman Inversion
 contract" page of the documentation, which is normative; the user guide's
 "Running an inversion" page explains when to reach for each piece.
 
-**What the layer promises, and what it does not.** Exactness is claimed for
-the affine-Gaussian case only: with an affine forward model, a Gaussian prior,
-an ensemble whose empirical moments equal the prior's, :class:`TransformUpdate`,
-no inflation, no failed members, and a ladder whose increments sum exactly to
-1, a run reproduces the exact posterior mean and covariance to floating point.
-Every clause there is load-bearing. For a nonlinear forward model the output
-is an approximation with no consistency guarantee, members are not independent
-posterior draws, and the optimization form deliberately collapses the ensemble
-— so its terminal spread is a measure of numerical convergence, not of
-posterior uncertainty.
-
-Three departures from the ladder are opt-in and each is named where it
-happens: inflation widens the ensemble on purpose and breaks the telescoping
-identity, the stochastic update makes that identity hold in expectation rather
-than per realization, and repairing failed members conditions on a damped
-covariance. The default configuration — :class:`TransformUpdate`, no inflation
-— keeps every claim above.
+**What the layer promises.** Exactness is claimed for the affine-Gaussian
+case only: with an affine forward model, a Gaussian prior, an ensemble whose
+empirical moments equal the prior's, :class:`TransformUpdate`, no inflation,
+no failed members, and a ladder whose increments sum exactly to 1, a run
+reproduces the exact posterior mean and covariance to floating point. Every
+clause there is load-bearing. For a nonlinear forward model the output is an
+approximation with no consistency guarantee. Three departures from the ladder
+are opt-in and each is named where it happens: inflation, the stochastic
+update, and repairing failed members. The user guide's "Running an inversion"
+page works through what each one costs.
 
 Every iterate of a run lies in the affine subspace spanned by the initial
 ensemble, whose dimension is at most :math:`J - 1`, however many steps are run

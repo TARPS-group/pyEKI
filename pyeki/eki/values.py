@@ -516,7 +516,7 @@ class Evaluation:
 
 @_pytree_dataclass
 class HistoryRecord:
-    """One row of a run's history: scalars only, so a long run stays cheap.
+    """One row of a run's history: eleven 0-d arrays.
 
     Built by the driver from an :class:`Evaluation` and the increment that
     was chosen, so the evaluation is the single source of truth for
@@ -552,12 +552,6 @@ class HistoryRecord:
 
     Notes
     -----
-    Every field is a 0-d array, ``step`` and ``n_valid`` included, and that
-    is a requirement rather than an oversight: static fields live in a
-    pytree's treedef, so two records with different ``step`` values would
-    have different treedefs and :func:`jax.tree.map` across a history would
-    raise instead of stacking.
-
     The per-member misfit vector is deliberately absent, as is anything else
     of size :math:`J` or larger. A caller who wants per-member or
     per-observation quantities uses :func:`~pyeki.eki.iterate` and keeps them
@@ -625,10 +619,7 @@ _RECORD_FIELDS = (
 class EKIResult:
     """What a run produced, and why it ended.
 
-    A plain frozen dataclass rather than a pytree: it is a report, never an
-    argument to traced code. All four fields are keyword-only, since the type
-    is user-constructible and ``state`` and ``history`` are as swappable as
-    any other same-arity pair.
+    All four fields are keyword-only.
 
     Parameters
     ----------
@@ -653,6 +644,9 @@ class EKIResult:
 
     Notes
     -----
+    The fields are keyword-only because the type is user-constructible and
+    ``state`` and ``history`` are as swappable as any other same-arity pair.
+
     **The returned ensemble has never been evaluated**, which is why
     ``last_evaluation`` exists. On a :data:`SCHEDULE_EXHAUSTED` run the last
     update produces ``state.ensemble`` and the loop then ends, so
@@ -770,7 +764,10 @@ class EKIResult:
     def stop_fired(self) -> bool:
         """Whether the run ended because its stopping rule fired.
 
-        The optimization form's one-word answer to *did it fit?*
+        ``status == STOPPING_RULE``. With
+        :class:`~pyeki.eki.DiscrepancyStop` this is the optimization form's
+        answer to *did it fit?*; with any other rule it reports only that
+        that rule fired.
         """
         return self.status == STOPPING_RULE
 

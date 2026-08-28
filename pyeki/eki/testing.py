@@ -1,9 +1,7 @@
 """Conformance checks for schedules, updates, inflations and stopping rules.
 
-:mod:`pyeki.eki` is the one place where pyEKI is deliberately open to
-extension at the algorithm level, so — unlike :mod:`pyeki.gauss`, which is
-closed — it ships a conformance harness, as :mod:`pyeki.linalg` does for
-operators. Call the check matching your policy's axis on an instance of it.
+Call the check matching your policy's axis on an instance of it, to verify
+the policy against the requirements :mod:`pyeki.eki` places on that axis.
 
 ============================= ==============================================
 function                      checks
@@ -18,13 +16,6 @@ function                      checks
 :func:`synthetic_evaluation`  a small :class:`~pyeki.eki.Evaluation` to run
                               the checks against
 ============================= ==============================================
-
-**Purity is the reason the harness exists.** A policy holding iteration state
-silently breaks resumption, and that is a failure the package's own test suite
-can catch in the package's own policies and cannot catch in a user's. Calling
-a policy twice on one evaluation and comparing is two lines, and it catches
-the schedule-that-counts-its-own-calls bug in a user's code rather than only
-in ours.
 
 Two checks are conditional on a declaration, since a rule may legitimately
 break the property:
@@ -43,8 +34,13 @@ declares nothing.
 
 Notes
 -----
-The obligations these checks encode are specified by the "Ensemble Kalman
-Inversion contract" page of the documentation, which is normative.
+The behaviour these checks verify is specified by the "Ensemble Kalman
+Inversion contract" page of the documentation.
+
+Purity is the reason the harness exists. A policy holding iteration state
+silently breaks resumption, and that is a failure a test suite can catch in
+its own package's policies and cannot catch in a user's. Calling a policy
+twice on one evaluation and comparing is two lines.
 """
 from __future__ import annotations
 
@@ -91,9 +87,11 @@ def synthetic_evaluation(
     """A small :class:`~pyeki.eki.Evaluation` to run the checks against.
 
     A user testing their own schedule should not have to run a forward model
-    to get one. The arrays are pseudo-random and mutually consistent — the
-    whitened residuals have the spread that makes the misfits non-degenerate,
-    so a schedule's criterion has something to measure.
+    to get one. The arrays are pseudo-random and independent of one another —
+    there is no observation to make the residuals agree with the predictions —
+    so this is a shape-and-purity fixture, not a physically consistent step.
+    The residuals do have spread, so a schedule's criterion has something to
+    measure.
 
     Parameters
     ----------

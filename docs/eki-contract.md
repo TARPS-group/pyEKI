@@ -662,7 +662,7 @@ termination, validation and adaptive increments to be ordinary Python.
 
 ### What the driver adds
 
-`iterate` wraps `step` with the decisions `step` refuses to make, in this
+`iterate` wraps the two phases with the decisions they refuse to make, in this
 order, before each call:
 
 1. **Ladder exhaustion.** If the schedule's attributes say the ladder is
@@ -691,14 +691,14 @@ order, before each call:
    `max_steps == T`**, which is the value a caller naturally passes. Checking
    the bound first would turn every such run into an `EKIError` on its final
    re-entry, blaming the schedule for a completed ladder.
-3. **Evaluate and summarize** — steps 1–5 of `step` above, which `iterate`
+3. **Evaluate and summarize** — steps 1–5 above, which `iterate`
    needs before it can consult the stopping rule or the schedule.
 
    This forces the internal factoring, so the contract states it rather than
    leaving it to be rediscovered. The layer has two private phases: *evaluate*
    (steps 1–5: split, inflate, call the model, repair, summarize) and *apply*
    (steps 6–9: validate the increment, update, check finiteness, advance).
-   Public `step` is evaluate-then-apply with the increment given; `iterate` is
+   Public `advance` is evaluate-then-apply with the increment given; `iterate` is
    evaluate, then its own decisions, then apply with the increment chosen. The
    forward model is therefore called **exactly once per rung** in both, which
    an implementation that had `iterate` call `step` naively would violate by
@@ -850,9 +850,10 @@ wrong with it, and all four are fixed by the attributes:
   method with a constant body.
 - *"Is this a budgeted ladder?" was unanswerable without calling something.*
   The driver can now check the schedule against `max_steps` at entry
-  ({ref}`eki-driver`), and warn on the `DiscrepancyStop`-on-a-budget trap
-  ({ref}`eki-axes`), neither of which is possible when the answer is hidden
-  behind a method.
+  ({ref}`eki-driver`), which is not possible when the answer is hidden behind
+  a method. It also lets a caller ask the question themselves, which is what
+  makes the `DiscrepancyStop`-on-a-budget trap of {ref}`eki-axes` detectable
+  from outside — the driver itself does not warn about it.
 - *`budget_tol` was duplicated into every schedule* that wanted a budget, and
   silently omitted by any that forgot it.
 - *The two shipped families already carry the attributes as fields*, so the
@@ -1468,7 +1469,7 @@ run can otherwise complete, return a normal-looking result, and have been
 conditioning on a covariance damped at every rung
 ({ref}`eki-failures`).
 
-### `repair_failed_members(ensemble, predictions, valid)`
+### `repair_failed_members(*, ensemble, predictions, valid)`
 
 The repair keeps the ensemble size static — a requirement, since a
 data-dependent $J$ would make every downstream shape dynamic. With
@@ -1782,12 +1783,13 @@ does with a run. `stacked` returns `(0,)`-shaped fields there instead, which is
 the answer that needs no branch. Records are homogeneous pytrees precisely so
 that this works ({ref}`eki-diagnostics`).
 
-The one case to guard is the **empty history**: a run whose ladder is already
-exhausted on entry performs no evaluation, so `history == ()` and
-`jax.tree.map` with no trees raises. Callers stacking a history must check
-`result.n_steps` first. A stopping rule that fires at step 0 is *not* this case
-— it emits a terminal record, so `n_steps == 1`. The layer ships no
-tabular or plotting machinery.
+The case that makes `stacked` a property rather than a one-liner is the
+**empty history**: a run whose ladder is already exhausted on entry performs
+no evaluation, so `history == ()` and `jax.tree.map` with no trees raises.
+`stacked` returns `(0,)`-shaped fields there, so callers need no guard — but
+a caller writing the one-liner by hand does. A stopping rule that fires at
+step 0 is *not* this case: it emits a terminal record, so `n_steps == 1`. The
+layer ships no tabular or plotting machinery.
 
 (eki-driver)=
 ## The driver
@@ -2296,7 +2298,7 @@ Type name and static sizes, never array contents, matching
 `EKIState(n_members=64, u_dim=12, step=3)`,
 `Evaluation(step=3, n_members=64)`, `HistoryRecord(step=3)`. Policy objects
 print their static fields, which are small and informative:
-`AdaptiveESSSchedule(ess_fraction=0.5, beta_target=1.0)`,
+`AdaptiveESSSchedule(beta_target=1.0, min_increment=0.001, max_increment=1.0, ess_fraction=0.5, n_bisect=50)`,
 `MultiplicativeInflation(anomaly_factor=1.02)` — with the one exception that a
 policy holding a *large* static field summarizes it instead
 (`FixedSchedule(n_steps=200, total=200.0)`, {ref}`eki-schedules`), since the
@@ -2363,13 +2365,13 @@ asymmetry that gives `pyeki.linalg` a `check_operator` applies here.
 | `check_schedule(schedule, evaluation)` | `n_steps` and `beta_target` are present, of the right types, and unchanged by reads; `next_increment` returns `None` or a scalar, finite, strictly positive value; **purity**, by calling twice on the same evaluation and comparing bit-exactly |
 | `check_update(update, key, **operands)` | the result is `(J, P)` with the incoming dtype; determinism given the key; the subspace property of {ref}`eki-subspace`, unless the rule declares it leaves the span; `jit`-safety with static shapes |
 | `check_inflation(inflation, key, ensemble)` | shape preservation; purity; that the mean is preserved, unless the rule declares otherwise |
+| `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
 
 The two conditional checks read a declaration off the policy: an update
 setting `leaves_span = True` is exempt from the subspace check, and an
 inflation setting `changes_mean = True` from the mean-preservation check. Both
 default to `False` when absent, so a rule that satisfies the property declares
 nothing.
-| `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
 
 Each takes a policy and a small synthetic `Evaluation`, which the module also
 provides a constructor for, since a user testing their own schedule should not
@@ -2726,7 +2728,7 @@ Python decisions — adaptive increments, termination, failure branching — tha
 this contract is largely about; no consumer has asked for the trade.
 
 **A `Problem` container** bundling `(forward, y, noise_cov)`. The triple is
-passed to `run`, `iterate`, `step` and the helpers, and a container would
+passed to `run`, `iterate`, `advance` and the helpers, and a container would
 document its shape agreement once.
 
 Not excluded because it could not be a pytree — `EKIResult` is already a plain
@@ -2843,7 +2845,7 @@ around an `iterate` loop.
 **Checkpointing to disk.** `EKIState` is a pytree of arrays and a small
 static; serializing it is the caller's choice of format. The layer's
 obligation is that resumption from a deserialized state is exact, which is
-{ref}`eki-conformance`'s test 11.
+{ref}`eki-conformance`'s test 12.
 
 **The validity mask as an `Evaluation` field.** Only `n_valid` is carried.
 {ref}`eki-diagnostics` gives the argument and names the consumer that would

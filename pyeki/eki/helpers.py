@@ -1,10 +1,8 @@
 """The array-level pieces of an EKI run, usable outside one.
 
-Three functions, each public for its own reason: :func:`misfits` applies the
-package's misfit convention to any predictions, :func:`effective_sample_size`
-is the criterion a custom schedule is most likely to want, and
-:func:`repair_failed_members` is the failed-member repair the driver applies
-and whose moment identities are worth testing directly.
+The three quantities a run computes for itself, exposed so that a custom
+schedule, a validation set, or a hand-driven loop can compute them the same
+way.
 
 ============================== =============================================
 function                       computes
@@ -44,8 +42,8 @@ def misfits(y, predictions, noise_cov) -> Array:
 
     .. math::
 
-        \\Phi(v) \;=\; \\tfrac12 \\bigl\\lVert W(y - v) \\bigr\\rVert^2
-        \;=\; \\tfrac12 (y - v)^\\top R^{-1} (y - v) ,
+        \\Phi(v) \\;=\\; \\tfrac12 \\bigl\\lVert W(y - v) \\bigr\\rVert^2
+        \\;=\\; \\tfrac12 (y - v)^\\top R^{-1} (y - v) ,
 
     with :math:`W` any whitener of ``noise_cov``. The value does not depend on
     which whitener the operator chose, by the operator layer's ``whiten``
@@ -118,14 +116,16 @@ def effective_sample_size(misfits, increment) -> Array:
 
         \\mathrm{ESS}(\\delta)
         = \\frac{\\bigl(\\sum_j w_j\\bigr)^2}{\\sum_j w_j^2}
-        \;=\; \\exp\\bigl(2\\,\\mathrm{lse}(-\\delta\\Phi)
+        \\;=\\; \\exp\\bigl(2\\,\\mathrm{lse}(-\\delta\\Phi)
                             - \\mathrm{lse}(-2\\delta\\Phi)\\bigr)
-        \;\\in\; [1, J] ,
+        \\;\\in\\; [1, J] ,
 
     computed by the second, log-space form with ``lse`` a max-shifted
-    log-sum-exp. It is :math:`J` at :math:`\\delta = 0` — to floating point,
-    as ``exp(log J)`` rather than exactly — and monotone non-increasing in
-    :math:`\\delta`, strictly so unless every misfit is equal.
+    log-sum-exp. The bracketing interval holds up to round-off rather than
+    exactly: the value at :math:`\\delta = 0` is ``exp(log J)``, which for
+    most :math:`J` sits an ulp either side of :math:`J`. It is monotone
+    non-increasing in :math:`\\delta`, strictly so unless every misfit is
+    equal.
 
     Parameters
     ----------
@@ -169,7 +169,9 @@ def effective_sample_size(misfits, increment) -> Array:
 
 
 def repair_failed_members(*, ensemble, predictions, valid):
-    """Move failed members to the valid centre: ``(J, P), (J, N)``.
+    """Move failed members to the valid centre.
+
+    ``(J, P), (J, N), (J,) bool -> (J, P), (J, N)``.
 
     With :math:`m_j \\in \\{0, 1\\}` the validity indicator and
     :math:`\\hat u, \\hat v` the means over the valid members alone,
@@ -201,11 +203,11 @@ def repair_failed_members(*, ensemble, predictions, valid):
     Raises
     ------
     ValueError
-        If the shapes disagree or are not rank 2 and rank 1 respectively, if
-        ``valid`` is not boolean, or if fewer than two members are valid —
-        a single member has no anomalies. The last check reads a concrete
-        value, so it is skipped on a traced ``valid``, as the operator
-        layer's value checks are.
+        If ``ensemble`` or ``predictions`` is not rank 2, if ``valid`` is not
+        a rank-1 boolean array, if the three disagree on :math:`J`, or if
+        fewer than two members are valid — a single member has no anomalies.
+        That last check reads a concrete value, so it is skipped on a traced
+        ``valid``, as the operator layer's value checks are.
 
     Notes
     -----

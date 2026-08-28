@@ -156,6 +156,9 @@ def evaluate(
         not ``(J, N)`` of a real floating dtype, if an inflation's output is
         not ``(J, P)``, or if ``on_failure`` is not one of the two permitted
         strings.
+    TypeError
+        If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
+        not a :class:`~pyeki.linalg.PSDLinOp`.
     UnsupportedOpError
         If ``noise_cov`` does not support ``whiten``.
 
@@ -262,6 +265,10 @@ def apply(
         If ``increment`` is not a finite, strictly positive scalar, if
         ``evaluation`` does not belong to ``state``, or if the update's
         output is not ``(J, P)`` of the incoming dtype.
+    TypeError
+        If ``state`` is not an :class:`~pyeki.eki.EKIState`, ``evaluation``
+        not an :class:`~pyeki.eki.Evaluation`, or ``noise_cov`` not a
+        :class:`~pyeki.linalg.PSDLinOp`.
     EKIError
         If the updated ensemble contains a non-finite entry. Carries
         ``state`` and an empty ``history``.
@@ -353,11 +360,32 @@ def advance(
     noise_cov=noise_cov, update=...)``, provided because one rung at a known
     increment is the common case.
 
+    Parameters
+    ----------
+    state
+        The state to move.
+    forward, y, noise_cov
+        The problem, as :func:`evaluate` takes them.
+    increment
+        The tempering increment, a finite, strictly positive scalar.
+        Keyword-only.
+    update
+        An :class:`~pyeki.eki.EnsembleUpdate`. Keyword-only.
+    inflation
+        An :class:`~pyeki.eki.Inflation`, or ``None`` for none. Keyword-only.
+    on_failure
+        ``"repair"`` or ``"raise"``. Keyword-only.
+
     Returns
     -------
     tuple
         The new :class:`~pyeki.eki.EKIState` and the step's
         :class:`~pyeki.eki.HistoryRecord`.
+
+    Raises
+    ------
+    EKIError, ValueError, TypeError
+        As :func:`evaluate` and :func:`apply` do.
 
     Notes
     -----
@@ -445,7 +473,12 @@ def iterate(
         ``state`` and ``history``.
     ValueError
         On any invalid argument, including a ``max_steps`` too small to
-        accommodate the schedule's own floor-bound worst case.
+        accommodate the schedule's own floor-bound worst case. Raised on the
+        first iteration rather than at the call, since a generator's body
+        does not run until it is first advanced.
+    TypeError
+        If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
+        not a :class:`~pyeki.linalg.PSDLinOp`.
 
     Notes
     -----
@@ -498,8 +531,27 @@ def run(
 ) -> EKIResult:
     """The driver as a function: run the ladder and report what happened.
 
-    The same arguments as :func:`iterate`, returning an
-    :class:`~pyeki.eki.EKIResult`.
+    Parameters
+    ----------
+    state
+        The state to start or resume from.
+    forward, y, noise_cov
+        The problem, as :func:`evaluate` takes them. Bound once for the whole
+        run.
+    schedule
+        A :class:`~pyeki.eki.Schedule`. Keyword-only.
+    update
+        An :class:`~pyeki.eki.EnsembleUpdate`. Keyword-only.
+    inflation
+        An :class:`~pyeki.eki.Inflation`, or ``None`` for none — the default.
+        Keyword-only.
+    stop
+        A :class:`~pyeki.eki.StoppingRule`, or ``None``. Keyword-only.
+    on_failure
+        ``"repair"`` or ``"raise"``. Keyword-only.
+    max_steps
+        A safety bound on the iterations of this call, a positive ``int``,
+        default ``1000``. Keyword-only.
 
     Returns
     -------
@@ -514,7 +566,11 @@ def run(
         As :func:`iterate` does, carrying ``state`` and ``history`` so that a
         caught failure is a resumable checkpoint rather than discarded work.
     ValueError
-        On any invalid argument.
+        On any invalid argument, including a ``max_steps`` too small to
+        accommodate the schedule's own floor-bound worst case.
+    TypeError
+        If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
+        not a :class:`~pyeki.linalg.PSDLinOp`.
 
     Warns
     -----

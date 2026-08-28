@@ -65,7 +65,7 @@ sampled = run(state, forward, y, noise_cov, schedule=AdaptiveESSSchedule())
 fit = run(state, forward, y, noise_cov,
           schedule=FixedSchedule.constant(1.0, n_steps=200),
           stop=DiscrepancyStop(tau=1.0))
-assert fit.stop_fired            # False means the ladder ran out first
+fit.stop_fired                   # False means the ladder ran out first
 ```
 
 `sampled.ensemble` is an approximate posterior ensemble, under the caveats in
@@ -156,14 +156,18 @@ of a run is available.
 ## Reading the result
 
 ```python
-result.status              # "schedule_exhausted" or "stopping_rule"
+result.status              # "schedule_exhausted" or "stopping_rule" from run
 result.budget_complete     # did the ladder finish?
 result.stop_fired          # did the stopping rule fire?
-result.n_steps             # rungs; result.n_evaluations is the forward calls
+result.n_steps             # records; n_evaluations is the same number
 result.min_n_valid         # the worst step's valid-member count
 result.stacked             # the history, every field (T,)-shaped
 result.last_evaluation     # the final forward evaluation
 ```
+
+`n_steps` and `n_evaluations` are the same number — one record per forward
+evaluation. On a stopping-rule exit the last record is the terminal one,
+whose update was discarded, so neither counts *rungs* there.
 
 `stacked` is the whole history as one record, which is what you plot:
 

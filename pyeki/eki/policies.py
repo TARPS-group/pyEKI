@@ -424,10 +424,14 @@ class FixedSchedule:
         """``T`` equal rungs of ``1 / T``: the sampling form's ladder.
 
         Reaches :math:`\\beta = 1` to round-off, not exactly:
-        :math:`T \\cdot (1/T)` is not exactly 1 in floating point. That is a
-        documented consequence rather than a defect to paper over with a
-        correction on the last rung, and it is why the layer's exactness
-        claim holds to round-off under this constructor.
+        :math:`T \\cdot (1/T)` is not exactly 1 in floating point.
+
+        Notes
+        -----
+        The layer's exactness claim therefore holds to round-off under this
+        constructor rather than exactly. No correction is applied to the last
+        rung; a caller who needs the sum to be exact passes increments that
+        are exact in binary, such as powers of two.
         """
         n_steps = _positive_int("FixedSchedule.uniform", "n_steps", n_steps)
         return cls((1.0 / n_steps,) * n_steps)
@@ -498,8 +502,9 @@ class AdaptiveESSSchedule:
         ``0.5``; must lie in :math:`(0,\\ 1 - 10^{-6}]`.
     n_bisect
         How many bisection iterations to run. Default ``50``; must be at
-        least 1. Any value at or above 30 attains the target to float64
-        resolution.
+        least 1. Each iteration halves the bracket, so the returned
+        increment sits within :math:`2^{-n}` of the criterion — about
+        :math:`10^{-9}` at 30, and float64 round-off at the default.
 
     Raises
     ------
@@ -580,10 +585,9 @@ class AdaptiveESSSchedule:
 class AdaptiveMisfitSchedule:
     """Adaptive tempering measured against the noise level, in closed form.
 
-    The data misfit controller of Iglesias and Yang. Where
-    :class:`AdaptiveESSSchedule` asks whether the ensemble can still describe
-    the next target, this asks how much data the noise at this rung can
-    explain, and solves for the increment directly instead of bisecting.
+    Where :class:`AdaptiveESSSchedule` asks whether the ensemble can still
+    describe the next target, this asks how much data the noise at this rung
+    can explain, and solves for the increment directly instead of bisecting.
 
     Parameters
     ----------
@@ -705,7 +709,7 @@ class DiscrepancyStop:
 
     .. math::
 
-        2\\,\\Phi(\\bar v) \;\\le\; \\tau^2 N ,
+        2\\,\\Phi(\\bar v) \\;\\le\\; \\tau^2 N ,
 
     where :math:`\\bar v` is the **mean prediction** and :math:`\\Phi(\\bar
     v)` is the evaluation's ``centre_misfit``.
@@ -850,15 +854,10 @@ class AdditiveInflation:
         pert = Gaussian(jnp.zeros(P), cov).sample(key, J)
         ensemble + (pert - pert.mean(axis=0))
 
-    defined by delegation to :meth:`~pyeki.gauss.Gaussian.sample` rather than
-    by restating its factor-and-normal recipe, so the draw is pinned in
-    exactly one place in the package.
-
-    The perturbations are **centred**, which preserves the ensemble mean
-    exactly; the empirical covariance is inflated by ``cov`` in expectation
-    under the :math:`J-1` divisor, exactly and independently of the centring.
-    This is the only shipped mechanism that moves the ensemble out of its
-    initial affine subspace, which is its main reason for existing.
+    The perturbations are centred, so the ensemble mean is preserved exactly
+    and the empirical covariance is inflated by ``cov`` in expectation under
+    the :math:`J-1` divisor. It is the only shipped mechanism that moves the
+    ensemble out of the affine subspace its initial members span.
 
     Parameters
     ----------
@@ -1000,7 +999,7 @@ def _bracket_top(schedule, beta: Array) -> Array:
 
 
 def _clamp(schedule, unclamped: Array, beta: Array) -> Array:
-    """Floor, then ceiling, then budget: the normative precedence.
+    """Floor, then ceiling, then budget, in that order.
 
     The floor beats the criterion, so a step is always taken even where the
     criterion would demand an arbitrarily small one. The **budget cap beats
@@ -1062,7 +1061,7 @@ def _misfit_criterion(misfits: Array, theta) -> Array:
 
 
 def _guarded_ratio(theta, denominator: Array) -> Array:
-    """``theta / denominator``, as ``inf`` at zero and ``nan`` at ``nan``.
+    """``theta / denominator``: ``inf`` at zero, ``nan`` at ``nan`` or below zero.
 
     The inner ``where`` is what keeps ``theta / 0`` from being formed at all;
     the single-``where`` form still forms it and yields a ``nan`` derivative.
