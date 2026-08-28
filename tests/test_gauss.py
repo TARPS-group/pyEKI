@@ -1979,3 +1979,26 @@ def test_ensemble_joint_fields_are_keyword_only():
     # Gaussian stays positional: its two fields cannot be swapped, being an
     # array and an operator
     Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.eye(3)))
+
+
+def test_regression_anomalies_are_formed_over_the_member_axis_when_batched():
+    """The centring subtracts per-member means, not per-batch ones.
+
+    ``jnp.mean(..., axis=-2)`` without ``keepdims`` drops the member axis, so
+    the subtraction right-aligns against the *batch* axis. For an operand
+    whose leading axis happens to equal ``J`` that broadcasts happily and
+    returns finite, plausible, wrong anomalies rather than raising.
+    """
+    from pyeki.gauss import _centered
+
+    for shape in [(3, 3, 4), (2, 5, 5), (4, 6, 2)]:
+        x = jnp.asarray(RNG.normal(size=shape))
+        got = np.asarray(_centered(x))
+        want = np.asarray(x) - np.asarray(x).mean(axis=-2, keepdims=True)
+        assert got.shape == want.shape
+        assert np.abs(got - want).max() < 64 * EPS * np.abs(want).max()
+
+    # The unbatched path is unchanged, and identical members still give
+    # exactly zero rather than round-off.
+    collapsed = jnp.full((7, 3), 6e23)
+    assert np.array_equal(np.asarray(_centered(collapsed)), np.zeros((7, 3)))

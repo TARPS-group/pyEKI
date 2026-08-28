@@ -188,7 +188,7 @@ and {doc}`../eki-contract` for the full behavioural contract.
 .. autoclass:: pyeki.eki.MultiplicativeInflation
    :members: __call__, batch_shape
 .. autoclass:: pyeki.eki.AdditiveInflation
-   :members: from_cov, __call__
+   :members: __call__
 ```
 
 ### The driver, and one rung

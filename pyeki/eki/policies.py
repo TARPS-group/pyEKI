@@ -65,14 +65,14 @@ from __future__ import annotations
 import dataclasses
 import math
 from functools import partial
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
 from ..gauss import EnsembleJoint, Gaussian
-from ..linalg import PSDLinOp, PSDLowRank, static_field, value_check
+from ..linalg import PSDLinOp, static_field, value_check
 from ..linalg.base import _broadcast_batch, _pytree_dataclass
 from .helpers import (
     _anomalies,
@@ -103,7 +103,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-@runtime_checkable
 class EnsembleUpdate(Protocol):
     """One rung of the ladder: the move that an increment produces.
 
@@ -155,7 +154,6 @@ class EnsembleUpdate(Protocol):
         ...
 
 
-@runtime_checkable
 class Schedule(Protocol):
     """One method and two declarative attributes: how far each rung moves.
 
@@ -196,7 +194,6 @@ class Schedule(Protocol):
         ...
 
 
-@runtime_checkable
 class StoppingRule(Protocol):
     """Whether to stop, given the current evaluation.
 
@@ -218,7 +215,6 @@ class StoppingRule(Protocol):
         ...
 
 
-@runtime_checkable
 class Inflation(Protocol):
     """A shape-preserving transformation applied before each forward evaluation.
 
@@ -879,12 +875,11 @@ class AdditiveInflation:
 
     Notes
     -----
-    The constructor stores ``cov`` as given, so every call re-runs
-    ``cov.factor()`` — an :math:`O(P^3)` Cholesky per rung for a dense
-    covariance. Use :meth:`from_cov` to pay that cost once at construction
-    instead; it is what the package's factorize-at-construction rule asks
-    for, and the only reason the plain constructor remains is that it is what
-    the operator layer's own arithmetic composes with.
+    Nothing is precomputed here, and nothing needs to be. Every call reaches
+    ``cov.factor()`` through :meth:`~pyeki.gauss.Gaussian.sample`, and the
+    operator layer factorizes at construction, so ``factor()`` returns a
+    stored factor rather than computing one — for every covariance this layer
+    can be given.
     """
 
     cov: PSDLinOp
@@ -900,54 +895,6 @@ class AdditiveInflation:
                 f"AdditiveInflation.cov: {self.cov!r} is a vmapped family; build "
                 f"a family of inflations with jax.vmap over the constructor."
             )
-
-    @classmethod
-    def from_cov(cls, cov: PSDLinOp) -> AdditiveInflation:
-        """Factorize now, so that applying the inflation does not re-factorize.
-
-        Returns an equivalent inflation holding
-        :class:`~pyeki.linalg.PSDLowRank` over the dense form of
-        ``cov.factor()``, whose own ``factor()`` is free. Prefer this
-        wherever the covariance has a non-trivial factorization: the plain
-        constructor re-runs ``cov.factor()`` on every rung, which for a dense
-        covariance is an :math:`O(P^3)` Cholesky per step on a knob a user
-        turns on to *delay* collapse.
-
-        Parameters
-        ----------
-        cov
-            A :class:`~pyeki.linalg.PSDLinOp` of side :math:`P` supporting
-            ``factor``.
-
-        Returns
-        -------
-        AdditiveInflation
-            Holding a covariance with the same dense form and a free factor.
-
-        Raises
-        ------
-        UnsupportedOpError
-            If ``cov`` does not support ``factor``. Raised here rather than
-            at the first rung.
-
-        Notes
-        -----
-        The perturbations this draws are equal *in distribution* to the plain
-        constructor's, not elementwise: two operators representing the same
-        matrix may return different factors, hence different samples from the
-        same key. That is the same caveat
-        :meth:`~pyeki.gauss.Gaussian.sample` already records, and it is the
-        price of the precomputation.
-
-        The stored factor is a :math:`P \\times k` array, so this trades an
-        :math:`O(P^3)` cost per rung for :math:`O(Pk)` of storage.
-        """
-        if not isinstance(cov, PSDLinOp):
-            raise TypeError(
-                f"AdditiveInflation.from_cov: cov must be a pyeki.linalg.PSDLinOp, "
-                f"got {type(cov).__name__}"
-            )
-        return cls(PSDLowRank(cov.factor().to_dense()))
 
     @property
     def batch_shape(self) -> tuple[int, ...]:

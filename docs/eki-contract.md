@@ -537,11 +537,21 @@ Moves `state` forward by the given increment, using an `Evaluation` already
 obtained from it. Chooses nothing: no schedule, no stopping rule, no
 `max_steps`. Those are the driver's, and everything they decide is passed in.
 
-**`evaluation` must belong to `state`.** `apply` checks
-`evaluation.step == state.step` and `evaluation.beta == state.beta` and raises
-`ValueError` otherwise. Without the check, pairing an evaluation with a
-different state would take the key split from one and the members from the
-other and return finite, plausible nonsense.
+**`apply` checks the evaluation's position against the state's** —
+`evaluation.step == state.step` and `evaluation.beta == state.beta`, raising
+`ValueError` otherwise. That catches the mistake the two-phase split makes
+easy: re-applying an evaluation the state has already moved past.
+
+**It does not establish that the two came from the same run, and the contract
+does not claim it does.** The update reads its members from the evaluation and
+only its key from the state, so an evaluation taken from an unrelated problem
+at the same position — and every fresh run sits at `step = 0, beta = 0` — is
+accepted and returns that other problem's answer. Making the check exact would
+mean carrying the state's key on the `Evaluation`, which this contract
+declines for the reason {ref}`eki-step` gives: it would put key material on an
+object every `Schedule` and `StoppingRule` receives. Keeping two runs'
+evaluations apart is therefore the caller's, which is why `run` and `iterate`
+bind the problem for a whole run and never expose the pairing.
 
 `y` and `noise_cov` are passed again rather than carried on the `Evaluation`,
 which holds no problem data — it is a record of an evaluation, not a bound
@@ -653,10 +663,16 @@ public.
    step's `HistoryRecord`.
 
 Steps 4, 6 and 8 read concrete values, so one rung **synchronizes with the
-device a small fixed number of times** — at most three across the two phases,
-and at most four in `iterate`, which also reads the exhaustion check and the
-stopping rule. The reads cannot be coalesced: step 6 decides whether to
-dispatch the update, and step 8 reads a value the update produces. This is a deliberate cost: $O(1)$ scalars and one
+device a small fixed number of times, bounded independently of every size in
+the problem**. Three of those reads are the two phases' own — the validity
+count, the increment, and the updated ensemble's finiteness. A run through
+`iterate` or `run` adds the exhaustion check's read of `beta` for a budgeted
+schedule, a stopping rule's own read if one is supplied, and one read per
+record when `run` reports the worst valid-member count, for six in the fullest
+configuration. Driving the two phases by hand adds `apply`'s re-validation of
+`y`, which `run` performs once for the whole run. The reads cannot be
+coalesced: step 6 decides whether to dispatch the update, and step 8 reads a
+value the update produces. This is a deliberate cost: $O(1)$ scalars and one
 reduction against $J$ forward-model evaluations, and it is what allows
 termination, validation and adaptive increments to be ordinary Python.
 
@@ -1369,24 +1385,13 @@ prior.cov)` — rather than carried as a second field. This is the only shipped
 mechanism that moves the ensemble out of its initial affine subspace, which is
 its main reason for existing.
 
-**`AdditiveInflation.from_cov(cov)` factorizes once**, and callers **should**
-prefer it. The definition above calls `Gaussian.sample`, which calls
-`cov.factor()`, so the plain constructor re-factorizes on **every rung** — an
-$O(P^3)$ Cholesky per step for a dense covariance, on a knob a user turns on
-to *delay* collapse. That violates {ref}`contract-jax`'s
-constructors-store-classmethods-compute rule, which exists for exactly this
-failure. The classmethod stores
-`PSDLowRank(cov.factor().to_dense())` instead: an operator with the same dense
-form whose own `factor()` is free, so the delegation above is unchanged and
-the recipe stays pinned in one place. Two consequences, both already
-contractual in the layer below. The stored factor is a $P \times k$ array, so
-this trades $O(P^3)$ per rung for $O(Pk)$ of storage. And the draw is equal to
-the plain constructor's *in distribution* but not elementwise, since two
-operators for the same matrix may return different factors — which is the
-caveat {meth}`~pyeki.gauss.Gaussian.sample` already records. The plain
-constructor remains, because it is what the operator layer's own arithmetic
-composes with and because a covariance whose `factor` is already free gains
-nothing from the precomputation.
+Nothing here is precomputed, and nothing needs to be. The recipe reaches
+`cov.factor()` on every rung, but the operator layer factorizes **at
+construction** ({ref}`contract-jax`), so `factor()` returns a stored factor
+rather than computing one — for every operator this layer can be given. There
+is no per-rung decomposition to hoist, and an `AdditiveInflation` that stored
+its own densified factor would replace an $O(P)$ diagonal factor with a
+$P \times P$ array, which is a pessimization rather than an optimization.
 
 Composing two inflations is a three-line callable and is not packaged
 ({ref}`eki-excluded`).
@@ -1594,7 +1599,7 @@ its `last_evaluation`. Returned by {func}`evaluate` ({ref}`eki-step`).
 | `predictions` | `(J, N)` | their predictions, after repair |
 | `whitened_residuals` | `(J, N)` | row $j$ is $W(y - v_j)$, after repair |
 | `rms_parameter_spread` | 0-d | $\lVert A_u \rVert_F / \sqrt{(J-1)P}$, the root-mean-square per-coordinate ensemble standard deviation |
-| `n_valid` | static `int` | how many members' predictions were finite |
+| `n_valid` | 0-d | how many members' predictions were finite |
 
 **`ensemble` is not the ensemble the caller supplied.** It is post-inflation
 and post-repair: the members that were actually run through the forward model
@@ -2146,7 +2151,7 @@ classes, in its gauss instantiation ({ref}`gauss-jax`):
   beyond its core rank — `EKIState.ensemble` 2,
   `Evaluation.whitened_residuals` 2, `Evaluation.ensemble` 2,
   `Evaluation.predictions` 2, `key` 0, and `beta`,
-  `rms_parameter_spread` and every
+  `rms_parameter_spread`, `Evaluation.n_valid` and every
   `HistoryRecord` field 0 — combined by broadcasting with `ValueError` on
   mismatch. Derived properties such as `Evaluation.misfits` are not fields and
   do not enter the computation. Directly constructed objects always report `()`.

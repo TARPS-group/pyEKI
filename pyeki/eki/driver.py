@@ -182,11 +182,16 @@ def evaluate(
     _check_state(state, "evaluate")
     y, n_obs = _check_problem("evaluate", y, noise_cov)
     _check_on_failure(on_failure)
-    return _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs)
+    return _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs)[0]
 
 
 def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
-    """Steps 1-5 of a rung, with the problem already validated."""
+    """Steps 1-5 of a rung, with the problem already validated.
+
+    Returns the evaluation and the valid-member count as a Python ``int``,
+    which the driver needs for its warning and which would otherwise have to
+    be read back off the device.
+    """
     _, key_inflate, _ = _split_key(state.key)
 
     members = state.ensemble
@@ -208,7 +213,7 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
         state, members, predictions, on_failure=on_failure
     )
     whitened_residuals, spread = _summarize(y, members, predictions, noise_cov)
-    return Evaluation(
+    evaluation = Evaluation(
         step=state.step,
         beta=state.beta,
         ensemble=members,
@@ -217,6 +222,7 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
         rms_parameter_spread=spread,
         n_valid=n_valid,
     )
+    return evaluation, n_valid
 
 
 def apply(
@@ -281,10 +287,17 @@ def apply(
     point for anything varying the *data* between rungs, which the driver
     deliberately fixes for a whole run.
 
-    **The evaluation must belong to the state**, checked on ``step`` and
-    ``beta``. Without the check, pairing an evaluation with a different state
-    would take the key split from one and the members from the other and
-    return finite, plausible nonsense.
+    **The evaluation is checked against the state's position** — its ``step``
+    and its ``beta`` — which is what catches the mistake this two-phase split
+    makes easy: re-applying an evaluation the state has already moved past.
+
+    That check does *not* establish that the two came from the same run. The
+    update reads its members from the evaluation and only its key from the
+    state, so an evaluation taken from an unrelated problem at the same
+    position — and every fresh run sits at ``step=0, beta=0.0`` — is accepted
+    and returns that other problem's answer. Keeping two runs' evaluations
+    apart is the caller's, which is why :func:`run` and :func:`iterate` bind
+    the problem for a whole run and never expose the pairing at all.
 
     A zero increment is rejected even though it raises nothing downstream:
     :math:`R/0` whitens to zero, so the gain vanishes and the ensemble is
@@ -661,7 +674,7 @@ def _drive(
     _check_on_failure(on_failure)
     _check_max_steps(where, max_steps)
     _check_schedule(where, schedule)
-    _check_budget_against_bound(schedule, max_steps)
+    _check_budget_against_bound(where, schedule, state.beta, max_steps)
 
     records: list[HistoryRecord] = []
     completed = 0
@@ -679,18 +692,18 @@ def _drive(
                 history=records,
             )
         try:
-            evaluation = _evaluate(
+            evaluation, n_valid = _evaluate(
                 state, forward, y, noise_cov, inflation, on_failure, n_obs
             )
         except EKIError as failure:
             failure.history = tuple(records)
             raise
-        if evaluation.n_valid < state.n_members:
+        if n_valid < state.n_members:
             logger.warning(
                 "step %d: %d of %d members' predictions were finite; the rest "
                 "were repaired to the valid centre",
                 evaluation.step,
-                evaluation.n_valid,
+                n_valid,
                 state.n_members,
             )
 
@@ -831,7 +844,7 @@ def _record(evaluation: Evaluation, increment: Array) -> HistoryRecord:
     misfits = evaluation.misfits
     return HistoryRecord(
         step=jnp.asarray(evaluation.step),
-        n_valid=jnp.asarray(evaluation.n_valid),
+        n_valid=evaluation.n_valid,
         beta=evaluation.beta,
         increment=increment,
         beta_next=evaluation.beta + increment,
@@ -992,28 +1005,51 @@ def _check_max_steps(where: str, max_steps) -> None:
         )
 
 
-def _check_budget_against_bound(schedule, max_steps: int) -> None:
+def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> None:
     """Refuse a bound too small for the schedule's own floor-bound worst case.
 
-    A schedule exposing ``beta_target`` and a floor implies a worst case of
-    ``ceil(beta_target / min_increment)`` rungs, and this raises before the
-    first forward evaluation when ``max_steps`` is below it. A schedule that
-    does not expose a floor is not checked.
+    A schedule exposing ``beta_target`` and a floor needs at most
+    ``ceil((beta_target - beta) / min_increment)`` further rungs, and this
+    raises before the first forward evaluation when ``max_steps`` is below
+    that. A schedule that does not expose a floor is not checked.
+
+    The bound is measured against the **remaining** budget rather than the
+    whole of it, which is exact rather than merely conservative: bounding a
+    resumed run by the full budget would reject calls that cannot reach the
+    bound, and would silently shrink the allowance a caller asked for.
     """
     beta_target = getattr(schedule, "beta_target", None)
     floor = getattr(schedule, "min_increment", None)
     if beta_target is None or floor is None:
         return
     try:
-        worst_case = math.ceil(float(beta_target) / float(floor))
+        remaining = float(beta_target) - float(beta)
+        worst_case = _rungs_needed(remaining, float(floor))
     except (TypeError, ValueError, ZeroDivisionError):
         return
     if worst_case > max_steps:
         raise ValueError(
-            f"run: max_steps={max_steps} cannot accommodate {schedule!r}, whose "
-            f"floor of {floor} against a budget of {beta_target} needs up to "
-            f"{worst_case} rungs. Raise max_steps to at least {worst_case}, or "
-            f"raise min_increment. Checked here so that a run cannot spend its "
-            f"whole evaluation budget and then report an EKIError on precisely "
-            f"the badly-conditioned problems the floor exists to rescue."
+            f"{where}: max_steps={max_steps} cannot accommodate {schedule!r}, "
+            f"whose floor of {floor} against a remaining budget of {remaining:g} "
+            f"needs up to {worst_case} rungs. Raise max_steps to at least "
+            f"{worst_case}, or raise min_increment. Checked here so that a run "
+            f"cannot spend its whole evaluation budget and then report an "
+            f"EKIError on precisely the badly-conditioned problems the floor "
+            f"exists to rescue."
         )
+
+
+def _rungs_needed(remaining: float, floor: float) -> int:
+    """``ceil(remaining / floor)``, robust to the division's own round-off.
+
+    Computing it naively makes ``1e-9 / 1e-12`` report 1001 rungs rather than
+    1000, because the quotient lands just above the integer. A quotient within
+    a relative whisker of an integer is taken to be that integer.
+    """
+    if remaining <= 0.0:
+        return 0
+    quotient = remaining / floor
+    nearest = round(quotient)
+    if abs(quotient - nearest) <= 1e-9 * max(1.0, abs(quotient)):
+        return int(nearest)
+    return math.ceil(quotient)

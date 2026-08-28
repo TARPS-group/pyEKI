@@ -113,9 +113,9 @@ what shape it wants. Revisit when localization lands. The EKI contract's
 and whitening versus triangularity went to the operator contract: `supports()`
 is defined by hook presence with derived-dependency resolution, and
 `cholesky()` was removed in favour of `factor()` plus a primitive `whiten()`.
-`AdditiveInflation`'s per-rung refactorization was settled by adding
-`AdditiveInflation.from_cov`, which factorizes at construction; the contract
-was amended in the same PR.)
+`AdditiveInflation`'s supposed per-rung refactorization turned out not to
+exist: every shipped PSD operator factorizes at construction, so `factor()`
+returns a stored factor and the update path contains no Cholesky at all.)
 
 ## Things not to rediscover
 
@@ -143,6 +143,9 @@ layer; this is the index.
 | The repair formula is not bit-exactly the identity when nothing failed | it must be `jnp.where(valid, ensemble, centre)` *and* skipped in Python on the synchronized `n_valid` |
 | A static field on a `HistoryRecord` makes every record a different pytree | `jax.tree.map` across a history raises instead of stacking |
 | `step` is cumulative across runs | chaining a fresh ladder onto a finished state returns unchanged, with nothing raised — use `restart()` |
+| `cov.factor()` is free, because operators factorize at construction | "hoisting" it by storing a densified factor turns an $O(P)$ diagonal into a $P \times P$ array |
+| Every comparison against `nan` is `False` | a bisection on such a comparison silently returns its lower bracket, and a floor then makes that look like an ordinary step |
+| `jnp.mean(x, axis=-2)` without `keepdims` | the subtraction right-aligns against the batch axis, so an operand whose leading axis equals $J$ broadcasts and returns wrong anomalies without raising |
 
 ## Working agreements
 

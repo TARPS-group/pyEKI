@@ -172,7 +172,6 @@ def test_update_conformance(update):
         MultiplicativeInflation(1.02),
         MultiplicativeInflation(2.0),
         AdditiveInflation(DensePSD.from_matrix(jnp.eye(3) * 0.05)),
-        AdditiveInflation.from_cov(DensePSD.from_matrix(jnp.eye(3) * 0.05)),
         AdditiveInflation(PSDDiagonal(jnp.full((3,), 0.02))),
     ],
     ids=repr,

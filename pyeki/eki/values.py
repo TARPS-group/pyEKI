@@ -342,17 +342,20 @@ class Evaluation:
         A 0-d array, :math:`\\lVert A_u\\rVert_F / \\sqrt{(J-1)P}`: the
         root-mean-square per-coordinate ensemble standard deviation.
     n_valid
-        How many members' predictions were finite, a Python ``int`` of at
-        least 2.
+        How many members' predictions were finite, a 0-d integer array of at
+        least 2. Data rather than static metadata: nothing indexes a Python
+        object with it, and a static field would give two evaluations with
+        different counts different treedefs, retracing any ``jit``-ed policy
+        once per rung.
 
     Raises
     ------
     ValueError
         If any field has the wrong rank, if the arrays disagree on :math:`J`
-        or :math:`N`, if :math:`J < 2`, or if ``n_valid`` is outside
-        :math:`[2, J]`.
+        or :math:`N`, or if :math:`J < 2`. In debug mode, also if ``n_valid``
+        is outside :math:`[2, J]`.
     TypeError
-        If ``step`` or ``n_valid`` is not a Python ``int``.
+        If ``step`` is not a Python ``int``, or ``n_valid`` not an integer.
 
     Notes
     -----
@@ -391,7 +394,7 @@ class Evaluation:
     predictions: Array
     whitened_residuals: Array
     rms_parameter_spread: Array
-    n_valid: int = static_field()
+    n_valid: Array
 
     def __post_init__(self) -> None:
         if type(self.step) is not int:
@@ -429,16 +432,18 @@ class Evaluation:
                 f"predictions, got {self.whitened_residuals.shape} and "
                 f"{self.predictions.shape}"
             )
-        if type(self.n_valid) is not int:
+        object.__setattr__(self, "n_valid", jnp.asarray(self.n_valid))
+        _check_field_rank("Evaluation", "n_valid", self.n_valid, 0)
+        if not jnp.issubdtype(self.n_valid.dtype, jnp.integer):
             raise TypeError(
-                f"Evaluation.n_valid: must be a Python int, got "
-                f"{type(self.n_valid).__name__}"
+                f"Evaluation.n_valid: must be an integer, got dtype "
+                f"{self.n_valid.dtype}"
             )
-        if not 2 <= self.n_valid <= n_members:
-            raise ValueError(
-                f"Evaluation.n_valid: must lie in [2, {n_members}], got "
-                f"{self.n_valid}"
-            )
+        value_check(
+            self.n_valid,
+            lambda n: bool(2 <= n <= n_members),
+            f"Evaluation.n_valid: must lie in [2, {n_members}].",
+        )
 
     @property
     def misfits(self) -> Array:
@@ -497,6 +502,7 @@ class Evaluation:
             tuple(self.predictions.shape[:-2]),
             tuple(self.whitened_residuals.shape[:-2]),
             tuple(self.rms_parameter_spread.shape),
+            tuple(self.n_valid.shape),
         )
 
     def __repr__(self) -> str:

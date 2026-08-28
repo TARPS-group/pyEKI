@@ -19,6 +19,7 @@ Two rules govern the reference throughout:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import warnings
 
@@ -1005,26 +1006,6 @@ def test_10_additive_inflation_matches_its_pinned_elementwise_definition():
     assert np.abs(after - before).max() < 16 * EPS * max(1.0, np.abs(before).max())
 
 
-def test_10_additive_inflation_from_cov_factorizes_once():
-    """``from_cov`` holds a covariance whose ``factor`` is free, and agrees in law."""
-    P, J = 4, 500
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(P, seed=37)))
-    precomputed = AdditiveInflation.from_cov(cov)
-    assert isinstance(precomputed.cov, PSDLowRank)
-    assert np.abs(
-        np.asarray(precomputed.cov.to_dense()) - np.asarray(cov.to_dense())
-    ).max() < 1e-9
-
-    ensemble = jnp.zeros((J, P))
-    drawn = precomputed(
-        jax.random.key(0), ensemble=ensemble, step=0, beta=jnp.asarray(0.0)
-    )
-    _, empirical = _moments(drawn)
-    want = np.asarray(cov.to_dense())
-    # Monte Carlo, at J = 500: a few relative standard errors of the estimate.
-    assert np.abs(empirical - want).max() < 0.5 * np.abs(want).max()
-
-
 def _span_basis(members) -> np.ndarray:
     """An orthonormal basis for the span of an ensemble's anomalies."""
     anomalies = np.asarray(members) - np.asarray(members).mean(axis=0)
@@ -1988,7 +1969,7 @@ def test_25_the_three_axes_compose(schedule, update, inflation_kind, with_stop):
     inflation = {
         "none": None,
         "multiplicative": MultiplicativeInflation(1.01),
-        "additive": AdditiveInflation.from_cov(
+        "additive": AdditiveInflation(
             DensePSD.from_matrix(jnp.eye(problem.P) * 0.01)
         ),
     }[inflation_kind]
@@ -2643,3 +2624,110 @@ def test_regression_a_nan_misfit_does_not_become_the_floor_step():
         run(problem.state(), lambda u: jnp.full((problem.J, problem.N), jnp.inf),
             jnp.asarray(problem.y), problem.noise_cov,
             schedule=AdaptiveESSSchedule())
+
+
+def test_16_the_provenance_check_catches_a_stale_evaluation_not_a_foreign_run():
+    """What the check establishes, and what it deliberately does not.
+
+    It compares the evaluation's *position* — its step and its level — which
+    catches re-applying an evaluation the state has moved past, the mistake
+    the two-phase split makes easy. It does not establish that the two came
+    from the same run, and cannot: the update reads its members from the
+    evaluation and only its key from the state, so an evaluation from an
+    unrelated problem at the same position is accepted. Both halves are
+    asserted, so that the docstring's scope is the tested one.
+    """
+    first = _AffineProblem(seed=7)
+    second = _AffineProblem(seed=77)
+    y, noise = jnp.asarray(first.y), first.noise_cov
+    assert (first.P, first.N, first.J) == (second.P, second.N, second.J)
+
+    state = first.state()
+    evaluation = evaluate(state, first.forward, y, noise)
+
+    # Caught: the state has moved on, so the positions disagree.
+    moved, _ = apply(state, evaluation, increment=0.25, y=y, noise_cov=noise)
+    with pytest.raises(ValueError, match="different state"):
+        apply(moved, evaluation, increment=0.25, y=y, noise_cov=noise)
+
+    # Not caught: a foreign evaluation at the same position is accepted, and
+    # the result is the foreign problem's answer rather than this one's.
+    foreign = evaluate(
+        second.state(), second.forward, jnp.asarray(second.y), second.noise_cov
+    )
+    assert foreign.step == state.step and float(foreign.beta) == float(state.beta)
+    mixed, _ = apply(state, foreign, increment=0.25, y=y, noise_cov=noise)
+    expected, _ = apply(
+        second.state(), foreign, increment=0.25, y=y, noise_cov=noise
+    )
+    assert np.array_equal(np.asarray(mixed.ensemble), np.asarray(expected.ensemble))
+    assert not np.array_equal(np.asarray(mixed.ensemble), np.asarray(moved.ensemble))
+
+
+def test_14_n_valid_is_data_so_a_jitted_policy_does_not_retrace_per_rung():
+    """A static ``n_valid`` would give each rung its own treedef.
+
+    ``next_increment`` is the layer's documented extension point, and jitting
+    one is the obvious thing to do with it; a static field on the object it
+    receives would retrace it once per distinct valid-member count.
+    """
+    from pyeki.eki.testing import synthetic_evaluation
+
+    counts = {"traces": 0}
+
+    @jax.jit
+    def criterion(evaluation):
+        counts["traces"] += 1
+        return jnp.mean(evaluation.misfits) + evaluation.n_valid
+
+    for n_valid in (6, 5, 4, 3, 2):
+        evaluation = dataclasses.replace(
+            synthetic_evaluation(n_members=6), n_valid=jnp.asarray(n_valid)
+        )
+        criterion(evaluation)
+    assert counts["traces"] == 1, "n_valid must not enter the treedef"
+
+    # It is still an integer, still validated, and still stacks in a history.
+    evaluation = synthetic_evaluation(n_members=6)
+    assert evaluation.n_valid.shape == ()
+    assert int(evaluation.n_valid) == 6
+    with debug_checks():
+        with pytest.raises(ValueError, match="n_valid"):
+            dataclasses.replace(evaluation, n_valid=jnp.asarray(1))
+
+
+def test_4_the_entry_budget_check_measures_the_remaining_budget():
+    """A resumed run gets the bound the caller asked for.
+
+    Bounding a resumption by the *whole* budget rejects calls that cannot
+    reach the bound, and silently shrinks the allowance. The worst case is
+    over what is left.
+    """
+    problem = _AffineProblem()
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    schedule = AdaptiveESSSchedule(beta_target=1.0, min_increment=1e-3)
+
+    # 0.01 of budget remains, so at most 10 further rungs are possible.
+    part_way = EKIState(
+        jnp.asarray(problem.members), 0.99, 0, jax.random.key(0)
+    )
+    resumed = run(part_way, problem.forward, y, noise, schedule=schedule,
+                  max_steps=10)
+    assert resumed.budget_complete
+    with pytest.raises(ValueError, match="cannot accommodate"):
+        run(part_way, problem.forward, y, noise, schedule=schedule, max_steps=9)
+
+    # A fresh run is still held to the whole budget: the check is a worst-case
+    # guarantee, not a prediction of how many rungs this problem will take.
+    with pytest.raises(ValueError, match="cannot accommodate"):
+        run(problem.state(), problem.forward, y, noise, schedule=schedule,
+            max_steps=999)
+
+    # And the quotient is robust to its own round-off: 1e-9 / 1e-12 is 1000
+    # rungs, not the 1001 a naive ceil of the float division reports.
+    from pyeki.eki.driver import _rungs_needed
+
+    assert _rungs_needed(1e-9, 1e-12) == 1000
+    assert _rungs_needed(1.0, 1e-3) == 1000
+    assert _rungs_needed(0.55, 0.1) == 6
+    assert _rungs_needed(-0.5, 1e-3) == 0

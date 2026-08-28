@@ -261,7 +261,7 @@ rows in your own wrapper, where the information exists.
 from pyeki.eki import AdditiveInflation, MultiplicativeInflation
 
 run(..., inflation=MultiplicativeInflation(anomaly_factor=1.02))
-run(..., inflation=AdditiveInflation.from_cov(0.01 * prior.cov))
+run(..., inflation=AdditiveInflation(0.01 * prior.cov))
 ```
 
 Inflation maintains ensemble spread, and it runs at the *top* of each step, on
@@ -274,11 +274,6 @@ The field is `anomaly_factor`, not `factor`, because it multiplies the
 anomalies and therefore scales the covariance by its **square**. The literature
 uses both conventions with the same symbols, and a caller passing an intended
 variance inflation of 1.2 would silently get 1.44.
-
-Prefer `AdditiveInflation.from_cov(cov)` to `AdditiveInflation(cov)`: it
-factorizes once at construction, where the plain constructor re-runs
-`cov.factor()` on every rung — an $O(P^3)$ Cholesky per step for a dense
-covariance, on a knob you turned on to *delay* collapse.
 
 :::{warning}
 **Inflation breaks the ladder, by design.** A run with inflation on is not a
