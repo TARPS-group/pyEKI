@@ -170,7 +170,7 @@ _EXACT_LADDERS = [
 
 
 # ===========================================================================
-# Section 1 -- the twenty-six conformance obligations
+# Section 1 -- the thirty conformance obligations
 # ===========================================================================
 
 
@@ -410,6 +410,7 @@ def test_4_both_adaptive_schedules_reach_their_budget_without_exceeding_it(
         schedule=schedule,
     )
     assert again.n_evaluations == 0
+    assert again.n_updates == 0
 
 
 @pytest.mark.parametrize(
@@ -1882,6 +1883,7 @@ def test_23_a_finished_ladder_is_a_no_op_and_restart_gives_the_full_one():
         again = run(finished.state, problem.forward, y, noise, schedule=schedule)
         assert again.status == SCHEDULE_EXHAUSTED
         assert again.n_evaluations == 0
+        assert again.n_updates == 0
         assert again.history == ()
         assert again.last_evaluation is None
         assert np.array_equal(
@@ -2177,79 +2179,6 @@ def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
     assert np.trace(got_cov) < np.trace(honest)
 
 
-def test_30_the_evaluation_and_update_counts_hold_on_every_exit():
-    """One evaluation per step, plus one when stopping needed a look.
-
-    Asserted as equalities in both directions on all four termination paths.
-    "At most one apart" would pass an implementation that spent a needless
-    evaluation on the declarative paths, which is the regression this guards:
-    the exhaustion check reads only ``step`` and ``beta``, so it must exit
-    before evaluating.
-    """
-    problem = _AffineProblem(J=8)
-    y, noise = jnp.asarray(problem.y), problem.noise_cov
-
-    class _Counted:
-        def __init__(self):
-            self.calls = 0
-
-        def __call__(self, u):
-            self.calls += 1
-            return jnp.asarray(u) @ jnp.asarray(problem.G).T
-
-    class _StopAt:
-        def __init__(self, k):
-            self.k = k
-
-        def __call__(self, evaluation):
-            return int(evaluation.step) >= self.k
-
-    class _NoneAt:
-        n_steps, beta_target = None, None
-
-        def __init__(self, k):
-            self.k = k
-
-        def next_increment(self, evaluation):
-            return None if int(evaluation.step) >= self.k else 0.1
-
-    cases = [
-        ("fixed ladder", dict(schedule=FixedSchedule.uniform(5)), 0),
-        ("budgeted adaptive", dict(schedule=AdaptiveESSSchedule()), 0),
-        ("stopping rule", dict(schedule=FixedSchedule.constant(0.1, n_steps=50),
-                               stop=_StopAt(3)), 1),
-        ("increment None", dict(schedule=_NoneAt(3)), 1),
-    ]
-    for label, kwargs, terminal in cases:
-        state = problem.state()
-        model = _Counted()
-        result = run(state, model, y, noise, **kwargs)
-        assert result.n_evaluations == model.calls, label
-        assert result.n_updates == int(result.state.step) - int(state.step), label
-        # The exact relationship, in both directions.
-        assert result.n_evaluations - result.n_updates == terminal, label
-        # A terminal record is the zero-increment one, at most one, always last.
-        zeros = [i for i, r in enumerate(result.history)
-                 if float(r.increment) == 0.0]
-        assert zeros == ([len(result.history) - 1] if terminal else []), label
-
-    # max_steps is an exact cap on forward calls, hence on member evaluations.
-    class _Unbounded:
-        n_steps, beta_target = None, None
-
-        def next_increment(self, evaluation):
-            return 0.1
-
-    for bound in (1, 3, 7):
-        model = _Counted()
-        with pytest.raises(EKIError, match="max_steps"):
-            run(problem.state(), model, y, noise,
-                schedule=_Unbounded(), max_steps=bound)
-        # Exactly `bound` ensemble evaluations, so exactly J * bound member
-        # evaluations: the hard budget a caller with an expensive model needs.
-        assert model.calls == bound
-
-
 def test_26_the_external_executable_wrapper_of_the_guide_runs(tmp_path):
     """The one runnable recipe outside the contract page that earns a test.
 
@@ -2332,6 +2261,9 @@ def test_27_the_forward_model_receives_what_the_contract_promises():
         assert not isinstance(u, jax.core.Tracer)
         assert u.shape == (problem.J, problem.P)
         assert u.dtype == state.ensemble.dtype
+        # np.asarray on the argument is a read-only view, which the guide's
+        # wrapper depends on being safe to hold and unsafe to write.
+        assert not np.asarray(u).flags.writeable
         seen.append(np.asarray(u))
         return u @ jnp.asarray(problem.G).T
 
@@ -2353,12 +2285,10 @@ def test_27_the_forward_model_receives_what_the_contract_promises():
     assert np.abs(seen[0] - expected).max() < 64 * EPS * np.abs(expected).max()
     assert np.abs(seen[0] - members).max() > 0.0
 
-    # np.asarray on the argument is a read-only view, which the guide's
-    # wrapper depends on being safe to hold and unsafe to write.
-    view = np.asarray(state.ensemble)
-    assert not view.flags.writeable
+    # Writing into that view raises, rather than silently corrupting the
+    # ensemble: the failure a wrapper hits is loud.
     with pytest.raises(ValueError, match="read-only"):
-        view[0, 0] = 1.0
+        np.asarray(state.ensemble)[0, 0] = 1.0
 
 
 def test_28_the_accepted_containers_are_a_promise_not_a_tolerance():
@@ -2367,8 +2297,10 @@ def test_28_the_accepted_containers_are_a_promise_not_a_tolerance():
     y, noise = jnp.asarray(problem.y), problem.noise_cov
     G = np.asarray(problem.G)
 
+    # The same numbers in three containers: computed once, so this tests the
+    # container and not whether numpy's BLAS and XLA agree bit for bit.
     def as_jax(u):
-        return jnp.asarray(u) @ jnp.asarray(G).T
+        return jnp.asarray(np.asarray(u) @ G.T)
 
     def as_numpy(u):
         return np.asarray(u) @ G.T
@@ -2418,6 +2350,35 @@ def test_29_a_narrow_forward_model_is_promoted_and_warned_about_once():
         run(state, problem.forward, y, noise, schedule=FixedSchedule.uniform(4))
     assert not [w for w in caught if "promoted" in str(w.message)]
 
+    # Once per *run*, not once if the first step happened to promote. A model
+    # that degrades only in some parameter regimes is the realistic case, and
+    # a flag keyed off `state.step` would warn here not at all -- and never at
+    # all on a resumed run, since `step` is cumulative.
+    class _DegradesLater:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, u):
+            self.calls += 1
+            v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+            return v if self.calls == 1 else v.astype(jnp.float32)
+
+    late = _DegradesLater()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, late, y, noise, schedule=FixedSchedule.uniform(4))
+    promotions = [w for w in caught if "promoted" in str(w.message)]
+    assert late.calls == 4
+    assert len(promotions) == 1, "the warning is once per run, not once at step 0"
+    assert "float32" in str(promotions[0].message)
+
+    # And once on a run resumed from a nonzero step.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(result.state.restart(), coarse, y, noise,
+            schedule=FixedSchedule.uniform(2))
+    assert len([w for w in caught if "promoted" in str(w.message)]) == 1
+
     # The evaluate phase has no run to be once per, so it warns per call.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -2447,6 +2408,79 @@ def test_29_promotion_only_ever_widens():
     # Against a float32 run, a float64 model is not demoted and not warned on.
     got, arrived = _check_predictions(wide, problem.J, problem.N, jnp.float32)
     assert got.dtype == working and arrived is None
+
+
+def test_30_the_evaluation_and_update_counts_hold_on_every_exit():
+    """One evaluation per step, plus one when stopping needed a look.
+
+    Asserted as equalities in both directions on all four termination paths.
+    "At most one apart" would pass an implementation that spent a needless
+    evaluation on the declarative paths, which is the regression this guards:
+    the exhaustion check reads only ``step`` and ``beta``, so it must exit
+    before evaluating.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    class _Counted:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, u):
+            self.calls += 1
+            return jnp.asarray(u) @ jnp.asarray(problem.G).T
+
+    class _StopAt:
+        def __init__(self, k):
+            self.k = k
+
+        def __call__(self, evaluation):
+            return int(evaluation.step) >= self.k
+
+    class _NoneAt:
+        n_steps, beta_target = None, None
+
+        def __init__(self, k):
+            self.k = k
+
+        def next_increment(self, evaluation):
+            return None if int(evaluation.step) >= self.k else 0.1
+
+    cases = [
+        ("fixed ladder", dict(schedule=FixedSchedule.uniform(5)), 0),
+        ("budgeted adaptive", dict(schedule=AdaptiveESSSchedule()), 0),
+        ("stopping rule", dict(schedule=FixedSchedule.constant(0.1, n_steps=50),
+                               stop=_StopAt(3)), 1),
+        ("increment None", dict(schedule=_NoneAt(3)), 1),
+    ]
+    for label, kwargs, terminal in cases:
+        state = problem.state()
+        model = _Counted()
+        result = run(state, model, y, noise, **kwargs)
+        assert result.n_evaluations == model.calls, label
+        assert result.n_updates == int(result.state.step) - int(state.step), label
+        # The exact relationship, in both directions.
+        assert result.n_evaluations - result.n_updates == terminal, label
+        # A terminal record is the zero-increment one, at most one, always last.
+        zeros = [i for i, r in enumerate(result.history)
+                 if float(r.increment) == 0.0]
+        assert zeros == ([len(result.history) - 1] if terminal else []), label
+
+    # max_steps is an exact cap on forward calls, hence on member evaluations.
+    class _Unbounded:
+        n_steps, beta_target = None, None
+
+        def next_increment(self, evaluation):
+            return 0.1
+
+    for bound in (1, 3, 7):
+        model = _Counted()
+        with pytest.raises(EKIError, match="max_steps"):
+            run(problem.state(), model, y, noise,
+                schedule=_Unbounded(), max_steps=bound)
+        # Exactly `bound` ensemble evaluations, so exactly J * bound member
+        # evaluations: the hard budget a caller with an expensive model needs.
+        assert model.calls == bound
 
 
 # ===========================================================================
