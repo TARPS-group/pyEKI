@@ -27,8 +27,8 @@ through the whitened-SVD kernel. `PSDLowRank`, the operator it needed, is in
 
 `pyeki.eki` is implemented to `docs/eki-contract.md`: the four value classes,
 the three policy protocols with eight shipped implementations, the two public
-phases of a rung, `run` and `iterate`, the three array-level helpers, and the
-`pyeki.eki.testing` conformance harness for user-written policies. Its
+phases of an iteration, `run` and `iterate`, the three array-level helpers, and
+the `pyeki.eki.testing` conformance harness for user-written policies. Its
 user-guide page is `docs/user-guide/running-an-inversion.md`.
 
 The **forward-model contract** is specified in one place as of 2026-08-28, in
@@ -124,7 +124,7 @@ what shape it wants. Revisit when localization lands. The EKI contract's
 and whitening versus triangularity went to the operator contract: `supports()`
 is defined by hook presence with derived-dependency resolution, and
 `cholesky()` was removed in favour of `factor()` plus a primitive `whiten()`.
-`AdditiveInflation`'s supposed per-rung refactorization turned out not to
+`AdditiveInflation`'s supposed per-iteration refactorization turned out not to
 exist: every shipped PSD operator factorizes at construction, so `factor()`
 returns a stored factor and the update path contains no Cholesky at all.)
 
@@ -147,7 +147,7 @@ layer; this is the index.
 | Lazy factorization caches are discarded inside traces | silent ~10x slowdown |
 | Undeclared non-array dataclass fields become tracers | fails later, far from the declaration |
 | JAX has no generalized `eigh` | reformulate via Cholesky whitening |
-| Per-step noise is $\Sigma/\Delta\beta_t$, never $\Sigma/\beta_t$ | a plausible posterior, wrong by $(T+1)/2$ times the data precision on a uniform $T$-rung ladder, growing with ladder length |
+| Per-step noise is $\Sigma/\Delta\beta_t$, never $\Sigma/\beta_t$ | a plausible posterior, wrong by $(T+1)/2$ times the data precision on a uniform $T$-iteration ladder, growing with ladder length |
 | A single-`where` guard sends a `nan` misfit to the `inf` branch | `nan > 0` is `False`, so the schedule silently returns the *largest* allowed step |
 | A Python float passed as a `jit` **argument** does not retrace | the retrace-per-step bug is a *static field* on an object crossing the boundary, so never pass an `EKIState` or `Evaluation` whole |
 | `Evaluation.centre_misfit` is not the mean of `Evaluation.misfits` | they differ by exactly $\tfrac{J-1}{2J}\operatorname{tr}(W \widehat C_{vv} W^\top)$ |

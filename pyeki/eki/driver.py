@@ -1,4 +1,4 @@
-"""One rung, as its two phases, and the two loops over them.
+"""One iteration, as its two phases, and the two loops over them.
 
 =================== =========================================================
 function            does
@@ -6,7 +6,7 @@ function            does
 :func:`evaluate`    inflate, call the forward model, repair, summarize
 :func:`apply`       validate the increment, update, check finiteness, advance
 :func:`advance`     :func:`evaluate` then :func:`apply`, at a given increment
-:func:`iterate`     the driver as a generator, yielding after every rung
+:func:`iterate`     the driver as a generator, yielding after every iteration
 :func:`run`         the driver as a function, returning an
                     :class:`~pyeki.eki.EKIResult`
 =================== =========================================================
@@ -15,7 +15,7 @@ The two phases are public because the forward evaluation is the resource a
 run is organized around, and separating them is what lets a caller spend it
 deliberately: one :class:`~pyeki.eki.Evaluation` serves any number of trial
 increments, so a backtracking or damped loop costs one forward evaluation per
-rung plus one per rejection rather than two per trial.
+iteration plus one per rejection rather than two per trial.
 
 :func:`run` and :func:`iterate` are two wrappers around one private driver.
 Neither is implemented over the other: all three end-paths look alike from
@@ -31,7 +31,7 @@ Conventions shared by everything in the module:
   and the number of compilations is bounded independently of the number of
   steps.
 - **The forward model is any callable** ``(J, P) -> (J, N)``, never traced
-  and never inspected. It is called once per rung with the whole ensemble,
+  and never inspected. It is called once per iteration with the whole ensemble,
   and receives a concrete ``jax.Array`` — never a tracer — so it may do
   anything Python can do. It may return any array-like; a real floating
   dtype is required, and one narrower than the run's is promoted with a
@@ -48,8 +48,8 @@ Notes
 The behaviour of this module is specified by the "Ensemble Kalman Inversion
 contract" page of the documentation, which is normative.
 
-One rung synchronizes with the device a small fixed number of times — the
-validity count, the increment, and the updated ensemble's finiteness — and
+One iteration synchronizes with the device a small fixed number of times —
+the validity count, the increment, and the updated ensemble's finiteness — and
 those reads cannot be coalesced, since the increment decides whether to
 dispatch the update and the finiteness check reads a value the update
 produces. It is a deliberate cost: :math:`O(1)` scalars and one reduction
@@ -205,7 +205,7 @@ def evaluate(
 
 
 def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
-    """Steps 1-5 of a rung, with the problem already validated.
+    """Steps 1-5 of an iteration, with the problem already validated.
 
     Returns the evaluation, the valid-member count as a Python ``int`` — which
     the driver needs for its warning and which would otherwise have to be read
@@ -306,7 +306,7 @@ def apply(
     ``y`` and ``noise_cov`` are passed again rather than carried on the
     evaluation, which holds no problem data — it is a record of an
     evaluation, not a bound problem. That is also what makes this the entry
-    point for anything varying the *data* between rungs, which the driver
+    point for anything varying the *data* between iterations, which the driver
     deliberately fixes for a whole run.
 
     **The evaluation is checked against the state's position** — its ``step``
@@ -339,7 +339,7 @@ def apply(
 
 
 def _apply(state, evaluation, dbeta, y, noise_cov, update):
-    """Steps 6-9 of a rung, with the increment already validated."""
+    """Steps 6-9 of an iteration, with the increment already validated."""
     key_next, _, key_update = _split_key(state.key)
     updated = jnp.asarray(
         update(
@@ -388,12 +388,12 @@ def advance(
     inflation=None,
     on_failure: OnFailure = "repair",
 ):
-    """One rung at a known increment: :func:`evaluate` then :func:`apply`.
+    """One iteration at a known increment: :func:`evaluate` then :func:`apply`.
 
     Exactly ``apply(state, evaluate(state, forward, y, noise_cov,
     inflation=..., on_failure=...), increment=increment, y=y,
-    noise_cov=noise_cov, update=...)``, provided because one rung at a known
-    increment is the common case.
+    noise_cov=noise_cov, update=...)``, provided because one iteration at a
+    known increment is the common case.
 
     Parameters
     ----------
@@ -459,7 +459,7 @@ def iterate(
     on_failure: OnFailure = "repair",
     max_steps: int = 1000,
 ):
-    """The driver as a generator: yields after every rung.
+    """The driver as a generator: yields after every iteration.
 
     Yields ``(EKIState, HistoryRecord, Evaluation)`` after each iteration,
     including the terminal evaluation-only iteration, and **returns** the
@@ -469,7 +469,7 @@ def iterate(
     *interrupt* a run: per-step checkpointing, custom logging, a wall-clock
     budget, stopping on parameter stagnation, an early ``break``. Exceptions
     propagate; abandoning the generator is safe. Anything that needs to
-    *revisit* a rung — backtracking, damping, trial increments — uses
+    *revisit* an iteration — backtracking, damping, trial increments — uses
     :func:`evaluate` and :func:`apply` directly instead.
 
     Parameters
@@ -621,7 +621,7 @@ def run(
         Once per run in which any member ever failed. Under
         ``on_failure="repair"`` a run can otherwise complete, return a
         normal-looking result, and have been conditioning on a covariance
-        damped at every rung.
+        damped at every iteration.
     UserWarning
         Once per run whose forward model returned predictions narrower than
         ``state.ensemble.dtype``, which are promoted to it.
@@ -639,7 +639,7 @@ def run(
     There is no ``"max_steps"`` status, because exceeding ``max_steps``
     raises. The bound is a safety net against a schedule that can never be
     exhausted and a run with no stopping rule; a genuinely step-limited run
-    is a :class:`~pyeki.eki.FixedSchedule` with that many rungs, or a
+    is a :class:`~pyeki.eki.FixedSchedule` with that many iterations, or a
     ``break`` in an :func:`iterate` loop.
     """
     driver = _drive(
@@ -815,7 +815,7 @@ def _ladder_finished(schedule, step: int, beta) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# private: the array work of one rung
+# private: the array work of one iteration
 # ---------------------------------------------------------------------------
 
 
@@ -1073,7 +1073,7 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
     """Refuse a bound too small for the schedule's own floor-bound worst case.
 
     A schedule exposing ``beta_target`` and a floor needs at most
-    ``ceil((beta_target - beta) / min_increment)`` further rungs, and this
+    ``ceil((beta_target - beta) / min_increment)`` further iterations, and this
     raises before the first forward evaluation when ``max_steps`` is below
     that. A schedule that does not expose a floor is not checked.
 
@@ -1088,14 +1088,14 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
         return
     try:
         remaining = float(beta_target) - float(beta)
-        worst_case = _rungs_needed(remaining, float(floor))
+        worst_case = _iterations_needed(remaining, float(floor))
     except (TypeError, ValueError, ZeroDivisionError):
         return
     if worst_case > max_steps:
         raise ValueError(
             f"{where}: max_steps={max_steps} cannot accommodate {schedule!r}, "
             f"whose floor of {floor} against a remaining budget of {remaining:g} "
-            f"needs up to {worst_case} rungs. Raise max_steps to at least "
+            f"needs up to {worst_case} iterations. Raise max_steps to at least "
             f"{worst_case}, or raise min_increment. Checked here so that a run "
             f"cannot spend its whole evaluation budget and then report an "
             f"EKIError on precisely the badly-conditioned problems the floor "
@@ -1103,12 +1103,12 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
         )
 
 
-def _rungs_needed(remaining: float, floor: float) -> int:
+def _iterations_needed(remaining: float, floor: float) -> int:
     """``ceil(remaining / floor)``, robust to the division's own round-off.
 
-    Computing it naively makes ``1e-9 / 1e-12`` report 1001 rungs rather than
-    1000, because the quotient lands just above the integer. A quotient within
-    a relative whisker of an integer is taken to be that integer.
+    Computing it naively makes ``1e-9 / 1e-12`` report 1001 iterations rather
+    than 1000, because the quotient lands just above the integer. A quotient
+    within a relative whisker of an integer is taken to be that integer.
     """
     if remaining <= 0.0:
         return 0

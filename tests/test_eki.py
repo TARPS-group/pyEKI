@@ -179,7 +179,7 @@ def test_1_the_ladder_telescopes_to_one_shot_conditioning(increments):
     """A ladder summing to 1 reproduces the exact posterior, to floating point.
 
     The layer's central correctness property. Per-step precisions add: with an
-    affine forward model, conditioning with ``R / increment`` at each rung
+    affine forward model, conditioning with ``R / increment`` at each iteration
     contributes ``increment * G^T R^-1 G`` to the posterior precision, so a
     ladder summing to 1 composes to one-shot conditioning at beta = 1.
 
@@ -211,7 +211,7 @@ def test_2_the_level_mis_scaling_is_caught_by_that_tolerance():
 
     The layer's signature silent failure: it raises nothing and produces a
     plausible-looking posterior, wrong by an amount that *grows with ladder
-    length*. On a uniform T-rung ladder the level form accumulates
+    length*. On a uniform T-iteration ladder the level form accumulates
     ``sum_t t/T = (T + 1)/2`` times the data precision instead of one.
 
     The mis-scaling is written out locally, against ``EnsembleJoint``
@@ -252,7 +252,7 @@ def test_3_the_stochastic_update_composes_to_the_same_posterior():
     """``PathwiseUpdate`` reproduces a dense reference, and telescopes in mean.
 
     Two halves. Elementwise, for a fixed key, a ladder reproduces a
-    hand-written dense perturbed-observation reference applied rung by rung.
+    hand-written dense perturbed-observation reference applied iteration by iteration.
     And its posterior moments match the one-shot posterior *in expectation*,
     tested as a mean over many keys with a tolerance derived from the
     ``K R K^T / J`` scale rather than tuned.
@@ -309,7 +309,7 @@ def test_3_the_stochastic_update_composes_to_the_same_posterior():
 
 
 def _dense_pathwise_step(members, predictions, problem, *, y, increment, key):
-    """One perturbed-observation rung, in plain dense linear algebra."""
+    """One perturbed-observation iteration, in plain dense linear algebra."""
     J = members.shape[0]
     Au = members - members.mean(axis=0)
     Av = predictions - predictions.mean(axis=0)
@@ -485,11 +485,11 @@ def test_4_an_unbounded_ladder_runs_without_raising(schedule_type):
     assert result.status == STOPPING_RULE
 
 
-def test_4_rung_counts_are_exact_under_a_capped_criterion():
-    """A budget of 1 under a ceiling of 0.3 takes exactly four rungs.
+def test_4_iteration_counts_are_exact_under_a_capped_criterion():
+    """A budget of 1 under a ceiling of 0.3 takes exactly four iterations.
 
     One test pins the ``>=`` in the exhaustion check, ``budget_tol``,
-    cap-beats-floor, and the absence of a trailing dribble rung. The
+    cap-beats-floor, and the absence of a trailing dribble iteration. The
     criterion is ``inf`` because every misfit is identical, so the ceiling is
     the only thing choosing the increment.
     """
@@ -1113,7 +1113,7 @@ def test_12_runs_are_reproducible_resumable_and_agree_with_iterate():
     second = run(problem.state(), problem.forward, y, noise, **common)
     assert np.array_equal(np.asarray(first.ensemble), np.asarray(second.ensemble))
 
-    # Stop after four rungs and resume: the tail is bit-exact.
+    # Stop after four iterations and resume: the tail is bit-exact.
     partial_state = problem.state()
     taken = 0
     for yielded in iterate(problem.state(), problem.forward, y, noise, **common):
@@ -1209,8 +1209,8 @@ def test_14_a_run_compiles_a_bounded_number_of_times_whatever_its_length():
     force a retrace per step, so nothing whole — no ``EKIState``, no
     ``Evaluation`` — is passed into a jitted function; the arrays are.
     Asserted against the compilation caches of the layer's own jitted
-    functions rather than inspected by eye: a thirty-rung run must add no
-    compilations that a three-rung run of the same problem has not already
+    functions rather than inspected by eye: a thirty-iteration run must add no
+    compilations that a three-iteration run of the same problem has not already
     paid for.
 
     An increment baked in as a Python constant is deliberately *not* what
@@ -1237,7 +1237,7 @@ def test_14_a_run_compiles_a_bounded_number_of_times_whatever_its_length():
 
     assert after_long == after_short, (
         f"compilations grew with the number of steps: {after_short} -> "
-        f"{after_long} over ten times as many rungs"
+        f"{after_long} over ten times as many iterations"
     )
     assert after_short - before <= 12
 
@@ -2051,7 +2051,7 @@ def test_26_the_pinned_prior_draw_and_restart_blocks_run():
 
 
 def test_26_the_backtracking_loop_runs_and_costs_what_the_contract_says():
-    """One forward evaluation per rung plus one per rejection."""
+    """One forward evaluation per iteration plus one per rejection."""
     problem = _AffineProblem()
     forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
     accepted = 0
@@ -2386,7 +2386,7 @@ def test_29_promotion_only_ever_widens():
 # field declared static (test 15), the safety bound checked before ladder
 # exhaustion (test 4), the min/max inversion and the two clamp-precedence
 # inversions (test 4), the bisection returning `hi` (test 4), a record field
-# disagreeing with its evaluation (test 21), two forward evaluations per rung
+# disagreeing with its evaluation (test 21), two forward evaluations per iteration
 # (tests 4, 16 and 19), chaining a fresh ladder onto a finished state
 # (test 23), DiscrepancyStop on a budgeted ladder (test 19), and the Tikhonov
 # augmentation at beta = 1 (test 26).
@@ -2493,7 +2493,7 @@ def test_regression_the_key_split_is_three_way_in_a_pinned_order():
     """No numeric test can catch this in the default configuration.
 
     The default consumes no randomness at all, so the guard is a
-    ``jax.random.key_data`` snapshot of a multi-rung ``PathwiseUpdate`` run,
+    ``jax.random.key_data`` snapshot of a multi-iteration ``PathwiseUpdate`` run,
     together with the property the fixed arity exists for: turning inflation
     on must not shift the update's stream.
     """
@@ -2531,7 +2531,7 @@ def test_regression_a_fill_value_model_stalls_an_adaptive_ladder_silently():
     A solver returning a sentinel such as -9999 produces an enormous misfit
     for one member, which an adaptive schedule reads as genuine ensemble
     disagreement and answers by shrinking the increment — here all the way to
-    the floor, so a one-rung ladder becomes a fifty-rung one. Nothing raises
+    the floor, so a one-iteration ladder becomes a fifty-iteration one. Nothing raises
     and nothing warns; ``n_valid`` reports every member valid. Documented as
     a behaviour rather than fixed, because the layer cannot see it.
 
@@ -2613,7 +2613,7 @@ def test_regression_a_float32_update_cannot_quietly_demote_a_run():
             schedule=FixedSchedule.uniform(2), update=demoting)
 
     # The asymmetry with a float32 forward model is deliberate: an update's
-    # return becomes the state and demotes every later rung, while a
+    # return becomes the state and demotes every later iteration, while a
     # prediction is consumed within one step and is promoted on receipt
     # (test 29). Either way the run stays float64.
     def coarse(u):
@@ -2690,21 +2690,21 @@ def test_8_every_eki_error_path_carries_the_history_accumulated_so_far():
 
         return forward
 
-    # (a) fewer than two valid members, on the fourth rung
+    # (a) fewer than two valid members, on the fourth iteration
     with pytest.raises(EKIError, match="At least 2 are required") as caught:
         run(problem.state(), fails_at(3, list(range(1, problem.J))), y, noise,
             schedule=ladder)
     assert len(caught.value.history) == 3
     assert caught.value.state.step == 3
 
-    # (b) on_failure="raise", on the second rung
+    # (b) on_failure="raise", on the second iteration
     with pytest.raises(EKIError, match="on_failure='raise'") as caught:
         run(problem.state(), fails_at(1, [2]), y, noise, schedule=ladder,
             on_failure="raise")
     assert len(caught.value.history) == 1
     assert caught.value.state.step == 1
 
-    # (c) a non-finite update, on the third rung
+    # (c) a non-finite update, on the third iteration
     poison = {"n": 0}
 
     def sometimes_poisons(key, *, ensemble, predictions, y, noise_cov, increment,
@@ -2735,7 +2735,7 @@ def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
 
     Ten increments of 0.1 accumulate to 0.9999999999999999, strictly below
     1.0, so an exhaustion check written as `beta >= beta_target` would demand
-    an eleventh rung. The four-rung `(0.3, 0.3, 0.3, 0.1)` ladder does not
+    an eleventh iteration. The four-iteration `(0.3, 0.3, 0.3, 0.1)` ladder does not
     catch this: those increments happen to sum to exactly 1.0.
     """
     problem = _AffineProblem()
@@ -2751,7 +2751,7 @@ def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
         problem.state(), problem.forward, jnp.asarray(problem.y),
         problem.noise_cov, schedule=schedule, max_steps=12,
     )
-    assert result.n_steps == 10, "a bare `>=` would take an eleventh rung"
+    assert result.n_steps == 10, "a bare `>=` would take an eleventh iteration"
     assert float(result.beta) == pytest.approx(accumulated, abs=8 * EPS)
     assert float(result.beta) < 1.0
 
@@ -2871,8 +2871,8 @@ def test_16_the_provenance_check_catches_a_stale_evaluation_not_a_foreign_run():
     assert not np.array_equal(np.asarray(mixed.ensemble), np.asarray(moved.ensemble))
 
 
-def test_14_n_valid_is_data_so_a_jitted_policy_does_not_retrace_per_rung():
-    """A static ``n_valid`` would give each rung its own treedef.
+def test_14_n_valid_is_data_so_a_jitted_policy_does_not_retrace_per_iteration():
+    """A static ``n_valid`` would give each iteration its own treedef.
 
     ``next_increment`` is the layer's documented extension point, and jitting
     one is the obvious thing to do with it; a static field on the object it
@@ -2914,7 +2914,7 @@ def test_4_the_entry_budget_check_measures_the_remaining_budget():
     y, noise = jnp.asarray(problem.y), problem.noise_cov
     schedule = AdaptiveESSSchedule(beta_target=1.0, min_increment=1e-3)
 
-    # 0.01 of budget remains, so at most 10 further rungs are possible.
+    # 0.01 of budget remains, so at most 10 further iterations are possible.
     part_way = EKIState(
         jnp.asarray(problem.members), 0.99, 0, jax.random.key(0)
     )
@@ -2925,16 +2925,16 @@ def test_4_the_entry_budget_check_measures_the_remaining_budget():
         run(part_way, problem.forward, y, noise, schedule=schedule, max_steps=9)
 
     # A fresh run is still held to the whole budget: the check is a worst-case
-    # guarantee, not a prediction of how many rungs this problem will take.
+    # guarantee, not a prediction of how many iterations this problem will take.
     with pytest.raises(ValueError, match="cannot accommodate"):
         run(problem.state(), problem.forward, y, noise, schedule=schedule,
             max_steps=999)
 
     # And the quotient is robust to its own round-off: 1e-9 / 1e-12 is 1000
-    # rungs, not the 1001 a naive ceil of the float division reports.
-    from pyeki.eki.driver import _rungs_needed
+    # iterations, not the 1001 a naive ceil of the float division reports.
+    from pyeki.eki.driver import _iterations_needed
 
-    assert _rungs_needed(1e-9, 1e-12) == 1000
-    assert _rungs_needed(1.0, 1e-3) == 1000
-    assert _rungs_needed(0.55, 0.1) == 6
-    assert _rungs_needed(-0.5, 1e-3) == 0
+    assert _iterations_needed(1e-9, 1e-12) == 1000
+    assert _iterations_needed(1.0, 1e-3) == 1000
+    assert _iterations_needed(0.55, 0.1) == 6
+    assert _iterations_needed(-0.5, 1e-3) == 0

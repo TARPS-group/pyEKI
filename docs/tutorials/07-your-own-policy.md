@@ -21,7 +21,7 @@ Tutorials 1 to 6.
   is extended by writing a policy. One paragraph.
 - The three protocols — `Schedule`, `EnsembleUpdate`, `Inflation` — plus
   `StoppingRule`, and what the driver calls on each and when.
-- The two phases of a rung, `evaluate` and `apply`, and `advance` as their
+- The two phases of an iteration, `evaluate` and `apply`, and `advance` as their
   composition. A policy author needs this to know what is available when.
 - A worked schedule: something small and genuinely useful, for example a
   schedule that caps the increment by a target misfit reduction. Write it,

@@ -2,7 +2,7 @@
 
 `pyeki.eki` is the layer that turns Gaussian conditioning into a *run*: an
 initial ensemble, a ladder of intermediate targets, one ensemble update per
-rung, and a record of what happened.
+iteration, and a record of what happened.
 
 This page is about *when and why* to reach for each piece. The
 {doc}`../eki-contract` reference page specifies exactly *what* each one does,
@@ -33,8 +33,8 @@ result.beta           # 1.0 — the ladder finished
 `forward` is any callable taking a `(J, P)` array of members and returning a
 `(J, N)` array of predictions: pyEKI ships no models and defines no base class,
 and the callable may be `jit`-ed, may fan out over processes, or may block on a
-job scheduler. It is called **once per rung with the whole ensemble**, never
-one member at a time.
+job scheduler. It is called **once per iteration with the whole ensemble**,
+never one member at a time.
 
 Shapes are not quite the whole interface — a model that can fail also owes the
 run a failure signal, described under [Failed members](#failed-members) below.
@@ -108,8 +108,8 @@ factor growing with the ladder's length.
 
 | schedule | ladder | reach for it when |
 | --- | --- | --- |
-| `FixedSchedule.uniform(T)` | `T` rungs of `1/T`, to $\beta = 1$ | you must know the evaluation budget in advance |
-| `FixedSchedule.constant(c, T)` | `T` rungs of `c` | the optimization form, or `constant(1.0, 1)` for a single Kalman update |
+| `FixedSchedule.uniform(T)` | `T` iterations of `1/T`, to $\beta = 1$ | you must know the evaluation budget in advance |
+| `FixedSchedule.constant(c, T)` | `T` iterations of `c` | the optimization form, or `constant(1.0, 1)` for a single Kalman update |
 | `AdaptiveESSSchedule()` | adaptive, budget 1 | the posterior ensemble is the deliverable |
 | `AdaptiveMisfitSchedule()` | adaptive, budget 1 | the *fit* is the deliverable, or evaluations are scarce |
 
@@ -118,8 +118,8 @@ move before this ensemble stops describing it? — and measure it differently.
 `AdaptiveESSSchedule` keeps the effective sample size of the tempering weights
 above a fraction of $J$, so each intermediate target stays representable by the
 ensemble that must describe it. `AdaptiveMisfitSchedule` instead absorbs as
-much data per rung as the noise at that rung can explain, calibrated to the
-observation dimension rather than to the ensemble size.
+much data per iteration as the noise at that iteration can explain, calibrated
+to the observation dimension rather than to the ensemble size.
 
 They do not agree, and they are not variants of one idea: the misfit schedule
 takes **far longer steps**, driving the effective sample size to within a
@@ -135,10 +135,10 @@ adaptivity is free in the resource that matters.
 A budgeted adaptive schedule cannot overshoot its budget: the increment is
 clamped by the remaining budget last, after the floor and the ceiling. At the
 shipped defaults — `beta_target=1.0`, `min_increment=1e-3` — the worst case is
-1000 rungs, which is exactly `run`'s default `max_steps`. Lowering the floor or
-*raising* the budget breaks that relation, and the driver checks the arithmetic
-at entry and raises `ValueError` before spending an evaluation rather than
-letting you discover it a thousand model calls later.
+1000 iterations, which is exactly `run`'s default `max_steps`. Lowering the
+floor or *raising* the budget breaks that relation, and the driver checks the
+arithmetic at entry and raises `ValueError` before spending an evaluation
+rather than letting you discover it a thousand model calls later.
 :::
 
 ## Choosing an update
@@ -173,7 +173,7 @@ result.last_evaluation     # the final forward evaluation
 
 `n_steps` and `n_evaluations` are the same number — one record per forward
 evaluation. On a stopping-rule exit the last record is the terminal one,
-whose update was discarded, so neither counts *rungs* there.
+whose update was discarded, so neither counts *iterations* there.
 
 `stacked` is the whole history as one record, which is what you plot:
 
@@ -298,10 +298,10 @@ external formula's definition before transcribing it.
 
 ## Driving the loop yourself
 
-`iterate` is the same run as a generator, yielding
-`(state, record, evaluation)` after every rung. It is the extension point for
-anything that needs to *observe* or *interrupt*: per-step checkpointing,
-custom logging, a wall-clock budget, an early `break`.
+`iterate` is the same run as a generator, yielding `(state, record,
+evaluation)` after every iteration. It is the extension point for anything that
+needs to *observe* or *interrupt*: per-step checkpointing, custom logging, a
+wall-clock budget, an early `break`.
 
 ```python
 from pyeki.eki import INTERRUPTED, EKIResult, iterate
@@ -317,7 +317,7 @@ result = EKIResult(state=state, history=tuple(records),
                    status=INTERRUPTED, last_evaluation=evaluation)
 ```
 
-Anything that needs to *revisit* a rung — backtracking, damping, trial
+Anything that needs to *revisit* an iteration — backtracking, damping, trial
 increments — uses the two phases directly instead. `evaluate` costs the forward
 evaluation and moves nothing; `apply` moves the state by a given increment,
 using an evaluation you already have. One evaluation therefore serves any
@@ -337,12 +337,12 @@ while not done(current):
         delta = delta / 2                               # reject, reuse `current`
 ```
 
-The accepted branch reuses `probe` as the next rung's evaluation, so this costs
-one forward evaluation per rung plus one per rejection — which is what
-backtracking costs in any implementation. A loop written against `advance`
+The accepted branch reuses `probe` as the next iteration's evaluation, so this
+costs one forward evaluation per iteration plus one per rejection — which is
+what backtracking costs in any implementation. A loop written against `advance`
 alone would re-evaluate the current state on every trial, doubling that.
 
-The same pair is how you vary the *data* between rungs — a subsampled or
+The same pair is how you vary the *data* between iterations — a subsampled or
 randomized observation vector — which `run` and `iterate` deliberately fix for
 a whole run.
 

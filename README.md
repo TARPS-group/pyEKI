@@ -73,7 +73,7 @@ state = EKIState.from_prior(jax.random.key(0), prior, n_members=64)
 result = run(state, forward, y, noise, schedule=AdaptiveESSSchedule())
 
 result.mean            # posterior mean estimate
-result.stacked.ess     # effective sample size at each rung of the ladder
+result.stacked.ess     # effective sample size at each iteration of the ladder
 ```
 
 The same driver runs the optimization form — it is a different schedule, not a

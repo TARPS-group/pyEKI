@@ -18,7 +18,8 @@ Tutorials 1 to 4.
 
 - **The subspace bound, stated plainly and early.** Every iterate of a run lies
   in the affine subspace spanned by the initial ensemble, of dimension at most
-  $J - 1$ — however many rungs are run and however the schedule is chosen. $J$
+  $J - 1$ — however many iterations are run and however the schedule is
+  chosen. $J$
   bounds what a run can *represent*, not merely how accurately it estimates
   moments.
 - A demonstration rather than an assertion. A linear model at $P = 2000$,

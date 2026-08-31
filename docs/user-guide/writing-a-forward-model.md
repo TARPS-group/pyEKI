@@ -25,11 +25,11 @@ def forward(ensemble):            # (J, 2) in
 ```
 
 That is a complete forward model. `run(state, forward, y, noise_cov, ...)`
-calls it once per rung.
+calls it once per iteration.
 
 :::{important}
 **`forward` receives the whole ensemble, not one member.** It is called once
-per rung with a `(J, P)` array and must return `(J, N)` — `J` predictions, one
+per iteration with a `(J, P)` array and must return `(J, N)` — `J` predictions, one
 per member, in the same order. A function written for a single parameter
 vector is the most common mistake on this page, and it does not fail cleanly:
 depending on the arithmetic it either raises from deep inside JAX with no
@@ -238,7 +238,7 @@ Four things in it are the point:
 - **The `except` names its own failures** rather than catching everything: a
   bug in the wrapper should still reach you.
 - **Stale outputs are deleted before the call**, so a solver that exits zero
-  without writing cannot yield a previous rung's answer.
+  without writing cannot yield a previous iteration's answer.
 
 Driving it is unremarkable:
 

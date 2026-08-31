@@ -269,17 +269,17 @@ revisit this before reusing the bisection.
 
 ### Why the misfit criterion takes a max of its two bounds
 
-Iglesias and Yang obtain the criterion by controlling the Jeffreys
-(symmetrized Kullback–Leibler) divergence between consecutive tempered
-measures, requiring it to stay below $\theta$. That divergence is exactly
-$\delta\,(E_\beta[\Phi] - E_{\beta+\delta}[\Phi])$ — the $\log Z$ terms
-cancel — and cannot be evaluated at step $t$, since it depends on the next
-measure. It is therefore approximated in two regimes: dropping the unknown
-non-negative term gives the upper bound $\delta\,\overline{\Phi}$, accurate
-when the mean misfit falls substantially across the rung; and a first-order
-expansion of $\overline{\Phi}$ in $\delta$ gives $\delta^2\sigma^2_\Phi$,
-accurate when it barely moves. Neither is valid throughout, so the divergence is
-approximated by the **smaller** of the two,
+Iglesias and Yang obtain the criterion by controlling the Jeffreys (symmetrized
+Kullback–Leibler) divergence between consecutive tempered measures, requiring
+it to stay below $\theta$. That divergence is exactly $\delta\,(E_\beta[\Phi] -
+E_{\beta+\delta}[\Phi])$ — the $\log Z$ terms cancel — and cannot be evaluated
+at step $t$, since it depends on the next measure. It is therefore approximated
+in two regimes: dropping the unknown non-negative term gives the upper bound
+$\delta\,\overline{\Phi}$, accurate when the mean misfit falls substantially
+across the iteration; and a first-order expansion of $\overline{\Phi}$ in
+$\delta$ gives $\delta^2\sigma^2_\Phi$, accurate when it barely moves. Neither
+is valid throughout, so the divergence is approximated by the **smaller** of
+the two,
 
 $$
 D_{\mathrm{J}} \;\approx\; \min\bigl\{\, \delta\,\overline{\Phi},\ \

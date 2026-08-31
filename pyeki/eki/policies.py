@@ -104,7 +104,7 @@ __all__ = [
 
 
 class EnsembleUpdate(Protocol):
-    """One rung of the ladder: the move that an increment produces.
+    """One iteration of the ladder: the move that an increment produces.
 
     An implementation maps an ensemble, its predictions, the observation, the
     **base** noise covariance and a 0-d increment to a new ensemble. The two
@@ -113,9 +113,9 @@ class EnsembleUpdate(Protocol):
     Requirements on any implementation:
 
     - It receives both the increment and the absolute level, and the two mean
-      different things: ``increment`` is how far this rung moves, ``beta`` is
-      where the rung starts, and ``step`` is which rung it is. The shipped
-      rules use only the increment.
+      different things: ``increment`` is how far this iteration moves,
+      ``beta`` is where the iteration starts, and ``step`` is which iteration
+      it is. The shipped rules use only the increment.
     - It consumes the key whole and is a deterministic function of its
       arguments including the key. A deterministic rule ignores the key.
     - It is ``jit``- and ``vmap``-safe with static shapes, and holds any
@@ -155,9 +155,9 @@ class EnsembleUpdate(Protocol):
 
 
 class Schedule(Protocol):
-    """One method and two declarative attributes: how far each rung moves.
+    """One method and two declarative attributes: how far each iteration moves.
 
-    ``n_steps`` is the ladder's length in rungs, or ``None`` if it is not
+    ``n_steps`` is the ladder's length in iterations, or ``None`` if it is not
     step-bounded; ``beta_target`` is the temperature budget, or ``None`` for
     an unbounded ladder. Both are read, never called, and must be constant
     for the life of the object — they are static metadata on a frozen policy,
@@ -231,7 +231,7 @@ class Inflation(Protocol):
     coincide in the interior of a run and differ at its two ends: the cost of
     this choice is that the **initial** ensemble is inflated before it is
     ever evaluated. A caller who needs the pristine initial ensemble
-    evaluated drives the first rung with ``inflation=None``.
+    evaluated drives the first iteration with ``inflation=None``.
 
     Applying inflation between the forward evaluation and the update would
     invalidate the predictions, and is forbidden.
@@ -382,7 +382,7 @@ class FixedSchedule:
     state as finished — see :meth:`EKIState.restart
     <pyeki.eki.EKIState.restart>` before chaining one run onto another.
 
-    Its ``repr`` summarizes rather than enumerates, since a 200-rung
+    Its ``repr`` summarizes rather than enumerates, since a 200-iteration
     optimization ladder would otherwise print 200 floats into every traceback
     and test id.
     """
@@ -417,7 +417,7 @@ class FixedSchedule:
 
     @classmethod
     def uniform(cls, n_steps: int) -> FixedSchedule:
-        """``T`` equal rungs of ``1 / T``: the sampling form's ladder.
+        """``T`` equal iterations of ``1 / T``: the sampling form's ladder.
 
         Reaches :math:`\\beta = 1` to round-off, not exactly:
         :math:`T \\cdot (1/T)` is not exactly 1 in floating point.
@@ -426,15 +426,15 @@ class FixedSchedule:
         -----
         The layer's exactness claim therefore holds to round-off under this
         constructor rather than exactly. No correction is applied to the last
-        rung; a caller who needs the sum to be exact passes increments that
-        are exact in binary, such as powers of two.
+        iteration; a caller who needs the sum to be exact passes increments
+        that are exact in binary, such as powers of two.
         """
         n_steps = _positive_int("FixedSchedule.uniform", "n_steps", n_steps)
         return cls((1.0 / n_steps,) * n_steps)
 
     @classmethod
     def constant(cls, increment: float, n_steps: int) -> FixedSchedule:
-        """``T`` equal rungs of ``increment``.
+        """``T`` equal iterations of ``increment``.
 
         The optimization form's ladder when ``increment * n_steps > 1``, and
         a single Kalman update at ``constant(1.0, 1)``.
@@ -444,7 +444,7 @@ class FixedSchedule:
 
     @property
     def n_steps(self) -> int:
-        """The ladder's length in rungs."""
+        """The ladder's length in iterations."""
         return len(self.increments)
 
     @property
@@ -458,7 +458,7 @@ class FixedSchedule:
         if not 0 <= step < len(self.increments):
             raise IndexError(
                 f"{self!r}.next_increment: step {step} is outside a ladder of "
-                f"{len(self.increments)} rungs. The driver checks exhaustion "
+                f"{len(self.increments)} iterations. The driver checks exhaustion "
                 f"before evaluating, so this is reachable only by calling the "
                 f"schedule directly."
             )
@@ -582,8 +582,9 @@ class AdaptiveMisfitSchedule:
     """Adaptive tempering measured against the noise level, in closed form.
 
     Where :class:`AdaptiveESSSchedule` asks whether the ensemble can still
-    describe the next target, this asks how much data the noise at this rung
-    can explain, and solves for the increment directly instead of bisecting.
+    describe the next target, this asks how much data the noise at this
+    iteration can explain, and solves for the increment directly instead of
+    bisecting.
 
     Parameters
     ----------

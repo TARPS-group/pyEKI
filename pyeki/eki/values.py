@@ -175,13 +175,13 @@ class EKIState:
     would make the state's ``batch_shape`` ambiguous.
 
     **``step`` is cumulative across runs.** Resuming a partially-completed
-    ladder is the case that is designed for: a ten-rung
-    :class:`~pyeki.eki.FixedSchedule` interrupted after four rungs resumes at
-    rung four. The same property makes *chaining* a second, different ladder
-    onto a finished state a silent no-op — the fresh schedule finds
+    ladder is the case that is designed for: a ten-iteration
+    :class:`~pyeki.eki.FixedSchedule` interrupted after four iterations resumes
+    at iteration four. The same property makes *chaining* a second, different
+    ladder onto a finished state a silent no-op — the fresh schedule finds
     ``step >= n_steps`` already true and the run returns immediately with an
-    empty history and the ensemble unchanged. A new ladder needs a new
-    counter, which is what :meth:`restart` is for.
+    empty history and the ensemble unchanged. A new ladder needs a new counter,
+    which is what :meth:`restart` is for.
     """
 
     ensemble: Array
@@ -346,7 +346,7 @@ class Evaluation:
         least 2. Data rather than static metadata: nothing indexes a Python
         object with it, and a static field would give two evaluations with
         different counts different treedefs, retracing any ``jit``-ed policy
-        once per rung.
+        once per iteration.
 
     Raises
     ------

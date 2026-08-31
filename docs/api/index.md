@@ -191,7 +191,7 @@ and {doc}`../eki-contract` for the full behavioural contract.
    :members: __call__
 ```
 
-### The driver, and one rung
+### The driver, and one iteration
 
 ```{eval-rst}
 .. autofunction:: pyeki.eki.run

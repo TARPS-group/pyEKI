@@ -2,7 +2,7 @@
 
 The algorithmic top of the package. It turns the Gaussian conditioning of
 :mod:`pyeki.gauss` into a *run* — an initial ensemble, a ladder of tempered
-targets, an ensemble update per rung, and a record of what happened.
+targets, an ensemble update per iteration, and a record of what happened.
 
 For a prior :math:`\\pi_0` and the misfit
 :math:`\\Phi(v) = \\tfrac12\\lVert W(y - v)\\rVert^2`, the family of targets is
@@ -50,8 +50,8 @@ object                                is
 :class:`Inflation`
 :func:`run`, :func:`iterate`          the driver, as a function and as a
                                       generator
-:func:`evaluate`, :func:`apply`,      one rung, as its two phases and their
-:func:`advance`                       composition
+:func:`evaluate`, :func:`apply`,      one iteration, as its two phases and
+:func:`advance`                       their composition
 :func:`misfits`,                      the array-level pieces schedules and
 :func:`effective_sample_size`,        custom drivers need
 :func:`repair_failed_members`
@@ -155,7 +155,7 @@ __all__ = [
     # inflation
     "MultiplicativeInflation",
     "AdditiveInflation",
-    # the driver, and one rung
+    # the driver, and one iteration
     "run",
     "iterate",
     "evaluate",

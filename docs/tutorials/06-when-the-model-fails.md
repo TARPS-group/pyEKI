@@ -48,7 +48,7 @@ Tutorials 1 to 3. Tutorial 4 is helpful but not required.
   returns unchanged with nothing raised. Use `EKIState.restart()`. This trap
   belongs on this page because resumption is where it bites.
 - `iterate` as the generator form, for progress reporting and for checkpointing
-  between rungs.
+  between iterations.
 
 ## Deliberately not covered
 
