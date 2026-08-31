@@ -104,7 +104,7 @@ Joint Gaussian distributions and conditioning. See
    :members: n, batch_shape, sample, log_density
 
 .. autoclass:: pyeki.gauss.EmpiricalJoint
-   :members: n_members, u_dim, v_dim, batch_shape, u_mean, v_mean,
+   :members: n_samples, u_dim, v_dim, batch_shape, u_mean, v_mean,
              u_anomalies, v_anomalies, pathwise_update, transform_update,
              condition
 ```
@@ -140,7 +140,7 @@ and {doc}`../eki-contract` for the full behavioural contract.
    :members: batch_shape
 
 .. autoclass:: pyeki.eki.EKIResult
-   :members: ensemble, beta, mean, n_steps, n_evaluations, min_n_valid,
+   :members: ensemble, beta, mean, n_evaluations, n_updates, min_n_valid,
              stacked, stop_fired, budget_complete
 ```
 

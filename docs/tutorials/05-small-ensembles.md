@@ -18,10 +18,9 @@ Tutorials 1 to 4.
 
 - **The subspace bound, stated plainly and early.** Every iterate of a run lies
   in the affine subspace spanned by the initial ensemble, of dimension at most
-  $J - 1$ — however many steps are run and however the schedule is
-  chosen. $J$
-  bounds what a run can *represent*, not merely how accurately it estimates
-  moments.
+  $J - 1$ — however many steps are run and however the schedule is chosen.
+  $J$ bounds what a run can *represent*, not merely how accurately it
+  estimates moments.
 - A demonstration rather than an assertion. A linear model at $P = 2000$,
   $N = 40$, $J = 40$, `AdaptiveESSSchedule` to $\beta = 1$: the run reports
   `schedule_exhausted` in 27 steps, average posterior standard deviation falls

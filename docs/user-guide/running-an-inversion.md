@@ -165,15 +165,18 @@ of a run is available.
 result.status              # "schedule_exhausted" or "stopping_rule" from run
 result.budget_complete     # did the ladder finish?
 result.stop_fired          # did the stopping rule fire?
-result.n_evaluations             # records; n_evaluations is the same number
+result.n_evaluations       # forward calls: one per record
+result.n_updates           # how many times the ensemble moved
 result.min_n_valid         # the worst step's valid-member count
 result.stacked             # the history, every field (T,)-shaped
 result.last_evaluation     # the final forward evaluation
 ```
 
-`n_steps` and `n_evaluations` are the same number — one record per forward
-evaluation. On a stopping-rule exit the last record is the terminal one,
-whose update was discarded, so neither counts *steps* there.
+`n_updates` equals `n_evaluations`, or one less: a run that stops because a
+stopping rule fired, or because a schedule returned `None`, needed an
+evaluation to reach that decision and then discarded the update. Your cost in
+model calls is `n_evaluations`, and in member evaluations
+`n_evaluations * n_members`.
 
 `stacked` is the whole history as one record, which is what you plot:
 
@@ -325,7 +328,7 @@ using an evaluation you already have. One evaluation therefore serves any
 number of trial increments:
 
 ```python
-from pyeki.eki import apply, evaluate
+from pyeki.eki import assimilate, evaluate
 
 s, delta = state, 1.0
 current = evaluate(s, forward, y, noise_cov)
@@ -351,7 +354,7 @@ a whole run.
 
 `run` on a state returned by a previous run **continues** it, and the tail is
 bit-identical to an uninterrupted run. That is the sole checkpointing
-mechanism, and it is why policies may not hold step state: a schedule that
+mechanism, and it is why policies may not hold state across steps: a schedule that
 counted its own calls would be unresumable. `EKIState` is a pytree of arrays
 and one small static, so serializing it is your choice of format.
 
@@ -397,7 +400,7 @@ deliberately open to extension at the algorithm level.
 Two rules bind every policy. Everything after the key is **keyword-only**,
 because an update's `ensemble` and `predictions` have the same shape whenever
 $P = N$ and a positional protocol would let them be transposed with no error at
-all. And a policy must be **pure**: no step state, no counters, which is
+all. And a policy must be **pure**: no state across steps, no counters, which is
 what keeps a run resumable.
 
 `pyeki.eki.testing` is the harness for one, and purity is the reason it exists:

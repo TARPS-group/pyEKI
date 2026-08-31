@@ -37,7 +37,7 @@ Notes
 The behaviour these checks verify is specified by the "Ensemble Kalman
 Inversion contract" page of the documentation.
 
-Purity is the reason the harness exists. A policy holding step state
+Purity is the reason the harness exists. A policy holding state across steps
 silently breaks resumption, and that is a failure a test suite can catch in
 its own package's policies and cannot catch in a user's. Calling a policy
 twice on one evaluation and comparing is two lines.

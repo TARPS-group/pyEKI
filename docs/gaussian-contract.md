@@ -224,7 +224,7 @@ which exhibits two contract-level properties:
   routing.
 - **Unconditional boundedness.** $\sigma/(1+\sigma^2) \le 1/2$ for all
   $\sigma \ge 0$, so the gain cannot blow up however collapsed or
-  ill-conditioned the fitted Gaussian becomes, with no regularization parameter to
+  ill-conditioned $s$ becomes, with no regularization parameter to
   tune.
 
 The SVD form is the normative implementation: it never forms
@@ -534,8 +534,8 @@ a singular noise operator that nonetheless
 types as whitening-capable yields `nan`, or the tier-4 result check of
 {ref}`gauss-validation` in debug mode. The two update methods
 return a `(J, P)` array of updated samples, row $j$ updating sample $j$ —
-they update $u$ only, leaving a caller that needs a matching $v$ to get the
-next step's $v$ — while `condition` returns the same posterior as a
+they update $u$ only, leaving $v$ to a caller that needs a matching one to
+recompute it — while `condition` returns the same posterior as a
 distribution. All are deterministic functions of their arguments
 (`pathwise_update` includes the key among them), safe under `jit`, and all
 degrade gracefully when the prediction anomalies are zero: the updates
@@ -689,7 +689,7 @@ at construction, because the stored field *is* the factorization.
   detected rather than silently absorbed. The pinning is over evaluation
   in one mode: `jit`-compiled and eager evaluation of the same call may
   differ in the last bits, as anywhere in JAX.
-- - Everything else is deterministic. There is exactly one source of randomness
+- Everything else is deterministic. There is exactly one source of randomness
   per stochastic call, which is what makes a caller's runs resumable from a
   stored key — a requirement the layer above inherits and this layer must not
   undermine.
@@ -735,10 +735,11 @@ the conditioning call rather than a constructor below it. Three points fix
 its scope:
 
 - **Why this layer checks outputs when the operator layer does not.** A
-  conditioning result becomes the *next* step's input: a `nan` sample block
-  is handed straight to an expensive forward-model evaluation, and a model
-  that returns finite nonsense for `nan` parameters launders it beyond
-  recovery. An operator's result goes back to the caller who asked for it.
+  conditioning result is fed back in as the next call's input: a `nan` block
+  is handed straight to whatever expensive computation produces the next
+  :math:`v`, and a computation that returns finite nonsense for `nan` inputs
+  launders it beyond recovery. An operator's result goes back to the caller
+  who asked for it.
   The asymmetry is deliberate, and is not an argument for adding output
   checks to `pyeki.linalg`.
 - **It is the only cheap detection of a singular `noise_cov`.** The three
@@ -859,7 +860,7 @@ per-class; here is its gauss instantiation:
 Not normative for `pyeki.gauss` itself, but the design was shaped against
 these call sites, and a change that breaks them is a change to reconsider.
 
-**The EKI driver** (`pyeki.eki`, planned) is a loop over tempering steps.
+**The EKI driver** (`pyeki.eki`) is a loop over tempering steps.
 Per step: build the joint from the current ensemble, update, re-evaluate
 the forward model.
 
@@ -1189,7 +1190,7 @@ the tests.
 
 **A reified gain object.** Computing the SVD once and reusing it across
 conditioning methods on the same `(joint, noise_cov)` pair would need a
-returned decomposition object. A caller calls exactly one method per step
+returned decomposition object. A caller calls exactly one method per joint
 once, so today it would be surface without a consumer; the conditioning
 primitives already serve anyone assembling custom flows. The one
 prospective consumer is an adaptive-step search, which could reuse a

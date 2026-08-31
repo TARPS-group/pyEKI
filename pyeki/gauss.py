@@ -10,8 +10,8 @@ object                       represents
 ============================ ==================================================
 :class:`Gaussian`            one Gaussian distribution: a mean vector and a
                              :class:`~pyeki.linalg.PSDLinOp` covariance
-:class:`EmpiricalJoint`      the joint Gaussian with a sample's empirical
-                             moments, held as :math:`J` paired samples
+:class:`EmpiricalJoint`      the joint Gaussian with paired samples'
+                             empirical moments, held as :math:`J` samples
 :func:`gain_weights`         the Kalman-gain weights for a whitened residual
 :func:`sqrt_transform`       the deterministic square-root update transform
 ============================ ==================================================
@@ -115,8 +115,8 @@ def gain_weights(s: Array, b: Array) -> Array:
     residual as a combination of the samples' own anomalies,
     :math:`K r = A_u^\\top w/\\sqrt{J-1}`. The multipliers are bounded by
     :math:`\\sigma/(1+\\sigma^2) \\le 1/2` for every :math:`\\sigma \\ge 0`,
-    so the gain cannot blow up however collapsed or ill-conditioned the
-    posterior becomes, and there is no regularization parameter to tune.
+    so the gain cannot blow up however collapsed or ill-conditioned
+    :math:`s` becomes, and there is no regularization parameter to tune.
 
     Parameters
     ----------
@@ -535,8 +535,8 @@ class EmpiricalJoint:
     All three conditioning methods condition on the same observation model,
     :math:`y = v + \\eta` with :math:`\\eta \\sim \\mathcal{N}(0, R)`, and
     share the trailing arguments ``y`` and ``noise_cov``. The two update
-    methods return an updated :math:`u` block only, leaving :math:`v` to a
-    caller that needs a matching one to recompute it; :meth:`condition`
+    methods return an updated :math:`u` block only; a caller needing a matching
+    :math:`v` recomputes it. :meth:`condition`
     returns the same posterior as a distribution.
 
     Parameters
@@ -1073,7 +1073,7 @@ def _check_not_vmap_family(obj, operation: str) -> None:
     if batch != ():
         raise ValueError(
             f"{obj!r}.{operation}: a vmapped family cannot be used directly; its "
-            f"batch shape is {batch}. Apply it under jax.vmap, row by row."
+            f"batch shape is {batch}. Apply it under jax.vmap, one at a time."
         )
 
 
@@ -1140,8 +1140,8 @@ def _centered(x: Array) -> Array:
     - **Cancellation is governed by the spread, not the magnitude.** The error
       is :math:`O(\\varepsilon \\max_j \\lvert x_j - x_0 \\rvert)` rather than
       :math:`O(\\varepsilon \\max_j \\lvert x_j \\rvert)`, which matters
-      whenever the mean is large relative to the anomalies, which is the
-      regime a nearly collapsed sample block sits in.
+      whenever the mean is large relative to the anomalies — the regime a
+      nearly collapsed sample block sits in.
     """
     shifted = x - x[..., :1, :]
     return shifted - jnp.mean(shifted, axis=-2, keepdims=True)

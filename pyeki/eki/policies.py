@@ -198,7 +198,7 @@ class StoppingRule(Protocol):
     """Whether to stop, given the current evaluation.
 
     Returns a Python ``bool``, is pure, and — like a schedule — must not hold
-    step state. It is consulted before the increment is chosen, so a run
+    state across steps. It is consulted before the increment is chosen, so a run
     that already fits the data takes no further update.
 
     Notes
@@ -497,8 +497,8 @@ class AdaptiveESSSchedule:
         The effective sample size sought, as a fraction of :math:`J`. Default
         ``0.5``; must lie in :math:`(0,\\ 1 - 10^{-6}]`.
     n_bisect
-        How many bisection steps to run. Default ``50``; must be at
-        least 1. Each step halves the bracket, so the returned
+        How many bisections to run. Default ``50``; must be at
+        least 1. Each halves the bracket, so the returned
         increment sits within :math:`2^{-n}` of the criterion — about
         :math:`10^{-9}` at 30, and float64 round-off at the default.
 

@@ -2390,7 +2390,7 @@ def test_28_the_accepted_containers_are_a_promise_not_a_tolerance():
 def test_29_a_narrow_forward_model_is_promoted_and_warned_about_once():
     """Promotion widens only, warns once per run, and never demotes the state.
 
-    "Exactly once" is the substantive half. A per-step warning left to the
+    "Exactly once" is what this pins. A per-step warning left to the
     caller's filter displays once under the default filter too, and would
     pass any test asserting only that a warning was seen.
     """

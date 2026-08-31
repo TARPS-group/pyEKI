@@ -935,8 +935,7 @@ right-hand side) and the batch convention. The reasoning:
   contract axis `-2`, treat leading axes as batches of *matrices*. So
   there is exactly one consistent array semantics available for `op @ X`,
   and it is `matmat`.
-- That semantics collides with this layer's canonical data layout. A
-  a batched caller supplies `(J, n)` row-batches, and
+- That semantics collides with this layer's canonical data layout. A batched caller supplies `(J, n)` row-batches, and
   applying an operator to one is a *batch-of-vectors* operation. Given
   `R` of side $n$, the natural-looking `R @ batch` is a confusing
   shape error when $J \ne n$ — and when $J = n$ it is shape-valid,
@@ -984,9 +983,8 @@ Requirements:
 
 - The scalar is held as a **0-d array field** (pytree data), never a
   Python float, so a traced value flows through it. This is the point:
-  a consumer may rescale a fixed covariance by a scalar that is
-  $\Sigma / \Delta\beta_t$ with an increment chosen adaptively — and
-  itself traced. Scaling must not rebuild or
+  a consumer may rescale a fixed operator by a scalar computed inside the
+  trace, so the scale is itself traced. Scaling must not rebuild or
   re-factorize the base operator.
 - `supports()` delegates to the base operator: the scaled composite
   supports exactly what its base supports.

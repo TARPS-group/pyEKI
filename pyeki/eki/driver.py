@@ -114,6 +114,7 @@ def evaluate(
     *,
     inflation=None,
     on_failure: OnFailure = "repair",
+    _warn_stacklevel: int = 3,
 ) -> Evaluation:
     """Run the forward model once and summarize what it produced.
 
@@ -148,8 +149,8 @@ def evaluate(
     Evaluation
         Carrying the members that were evaluated — after inflation and after
         repair — their predictions, and the whitened residuals. The
-        predictions are in ``state.ensemble.dtype``, whatever dtype the
-        forward model returned.
+        predictions are never narrower than ``state.ensemble.dtype``: a
+        narrower return is promoted, a wider one is left as it is.
 
     Raises
     ------
@@ -171,13 +172,15 @@ def evaluate(
     Warns
     -----
     UserWarning
-        On every call whose predictions had to be promoted to
-        ``state.ensemble.dtype``. Per call rather than once, because this
-        phase has no run to be once per; how often an unchanging message is
-        displayed is the caller's warning filter, not this layer.
+        On any call whose predictions were promoted to
+        ``state.ensemble.dtype``.
 
     Notes
     -----
+    This phase warns on every call that promotes, rather than once: a single
+    call has no run to be once per. How often an unchanging message is
+    displayed is then the caller's warning filter, not this layer's business.
+
     The key is split into exactly three, ``(key_next, key_inflate,
     key_update)``, whatever the policies are. Fixed arity means turning
     inflation on or off does not shift the update's random stream. Both
@@ -200,7 +203,7 @@ def evaluate(
         state, forward, y, noise_cov, inflation, on_failure, v_dim
     )
     if promoted_from is not None:
-        _warn_promoted(promoted_from, state.ensemble.dtype, stacklevel=3)
+        _warn_promoted(promoted_from, state.ensemble.dtype, stacklevel=_warn_stacklevel)
     return evaluation
 
 
@@ -422,6 +425,12 @@ def advance(
     EKIError, ValueError, TypeError
         As :func:`evaluate` and :func:`assimilate` do.
 
+    Warns
+    -----
+    UserWarning
+        On any call whose predictions were promoted to
+        ``state.ensemble.dtype``.
+
     Notes
     -----
     Named ``advance`` rather than ``step`` because ``step`` is an index on
@@ -429,7 +438,8 @@ def advance(
     shadowing mistake waiting to happen.
     """
     evaluation = evaluate(
-        state, forward, y, noise_cov, inflation=inflation, on_failure=on_failure
+        state, forward, y, noise_cov, inflation=inflation, on_failure=on_failure,
+        _warn_stacklevel=4,
     )
     return assimilate(
         state,
@@ -462,7 +472,7 @@ def iterate(
     """The driver as a generator: yields after every step.
 
     Yields ``(EKIState, HistoryRecord, Evaluation)`` after each step,
-    including the terminal evaluation-only step, and **returns** the
+    including a terminal evaluation that produced no step, and **returns** the
     terminating status as its :class:`StopIteration` value.
 
     This is the extension point for anything that needs to *observe* or
@@ -509,8 +519,8 @@ def iterate(
     ValueError
         On any invalid argument, including a ``max_steps`` too small to
         accommodate the schedule's own floor-bound worst case. Raised on the
-        first step rather than at the call, since a generator's body
-        does not run until it is first advanced.
+        first advance of the generator rather than at the call, since a
+        generator's body does not run until then.
     TypeError
         If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
         not a :class:`~pyeki.linalg.PSDLinOp`.
@@ -518,10 +528,8 @@ def iterate(
     Warns
     -----
     UserWarning
-        Once per loop whose forward model returned predictions narrower than
-        ``state.ensemble.dtype``, which are promoted to it. Unlike the
-        failed-member warning, which :func:`run` issues and this does not,
-        nothing in the yielded records would reveal a promotion.
+        Once per call whose forward model returned predictions narrower than
+        ``state.ensemble.dtype``, which are promoted to it.
 
     Notes
     -----
@@ -623,7 +631,7 @@ def run(
         normal-looking result, and have been conditioning on a covariance
         damped at every step.
     UserWarning
-        Once per run whose forward model returned predictions narrower than
+        Once per call whose forward model returned predictions narrower than
         ``state.ensemble.dtype``, which are promoted to it.
 
     Notes
@@ -631,7 +639,7 @@ def run(
     Running on a state returned by a previous run **continues** it: same
     schedule, same policies, and the tail of the run is bit-identical to an
     uninterrupted one. This is the sole mechanism for checkpointing, and it
-    is why policies may not hold step state.
+    is why policies may not hold state across steps.
 
     Chaining a *new* ladder onto a finished state is a different thing and is
     a silent no-op — use :meth:`EKIState.restart <pyeki.eki.EKIState.restart>`.
@@ -999,7 +1007,7 @@ def _check_predictions(predictions, n_members: int, v_dim: int, working_dtype):
     return predictions.astype(promoted), predictions.dtype
 
 
-def _warn_promoted(arrived, working, stacklevel: int) -> None:
+def _warn_promoted(promoted_from, working_dtype, stacklevel: int) -> None:
     """Report a forward model narrower than the run it is driving.
 
     ``stacklevel`` counts out to the caller's own call: three from
@@ -1007,12 +1015,11 @@ def _warn_promoted(arrived, working, stacklevel: int) -> None:
     ``run`` or ``iterate`` that resumes it both sit in between.
     """
     warnings.warn(
-        f"pyeki.eki: the forward model returned {arrived} predictions, promoted "
-        f"to the run's working dtype {working}. Ensemble anomalies are formed "
-        f"by subtraction and lose digits to cancellation, so a model narrower "
-        f"than the run costs precision it cannot get back — the promotion only "
-        f"prevents a second loss in the conditioning arithmetic. Return "
-        f"{working} from the model where you can.",
+        f"pyeki.eki: the forward model returned {promoted_from} predictions, "
+        f"promoted to the run's working dtype {working_dtype}. Ensemble "
+        f"anomalies lose digits to cancellation, so a narrower model costs "
+        f"precision the promotion cannot recover. Return {working_dtype} from "
+        f"the model where you can.",
         stacklevel=stacklevel,
     )
 

@@ -1,10 +1,9 @@
 # Writing a forward model
 
-The forward model is the one part of a run pyEKI does not supply and cannot
-inspect, so what it must satisfy is the package's most important external
-interface. This page states that obligation in one place. There is nothing to
-subclass and nothing to register: pyEKI ships no forward models and defines no
-base class or protocol for one. {ref}`eki-failures` is the normative version.
+pyEKI supplies everything in a run except the forward model. This page is what
+that callable must satisfy; {ref}`eki-failures` is the normative statement.
+There is nothing to subclass and nothing to register: pyEKI ships no forward
+models and defines no base class or protocol for one.
 
 ## The interface
 
@@ -46,9 +45,9 @@ ordinary Python loop, which is equally legal.
 
 ## The whole obligation
 
-| | |
+| what | requirement |
 | --- | --- |
-| **argument** | one positional argument: a concrete `jax.Array`, shape exactly `(J, P)`, dtype `float64` by default |
+| **argument** | one positional argument: a concrete `jax.Array`, shape exactly `(J, P)`, in the run's working dtype (`float64` under the package default) |
 | **return** | any array-like of shape `(J, N)`: a `jax.Array`, a NumPy array, or a nested Python list |
 | **dtype** | a real floating dtype; a narrower one than the run's is promoted, with a warning |
 | **rows** | row `j` of the return depends only on row `j` of the argument |
@@ -66,7 +65,8 @@ to disk, block on a process that reads them.
 
 It is exactly two-dimensional — members down the leading axis, parameters
 across the trailing one — and never has a further axis in front, since a run
-binds one ensemble.
+binds one ensemble. Its dtype is the run's working dtype, `float64` unless you
+have disabled JAX's x64 mode.
 
 Being a `jax.Array`, it must be converted for any library that does not speak
 JAX:
@@ -100,11 +100,11 @@ The dtype must be a real floating one; an integer or complex return is a
 run's — in practice `float32` — is promoted to the run's working dtype and
 warns once per run.
 
-That warning is not pedantry. pyEKI enables `float64` because ensemble
+pyEKI enables `float64` because ensemble
 anomalies are formed by subtraction and lose digits to cancellation, and a
 model that computes or reports in single precision has already lost them before
 the array arrives; promoting prevents a *second* loss in the conditioning
-arithmetic and nothing more. Measured, a `float32` return costs about `7e-5`
+arithmetic and nothing more. A `float32` return costs about `7e-5`
 relative error in the posterior mean where predictions have a mean-to-spread
 ratio of `1e4`, and promotion halves it. Return `float64` where you can. Where
 you cannot, the run is still legitimate and the warning is telling you the
@@ -176,12 +176,12 @@ SOLVER.write_text(
 The wrapper:
 
 ```python
-N_OBS = 3
+V_DIM = 3
 
 def forward(ensemble):
     """Evaluate the external solver once per member."""
     members = np.asarray(ensemble)                  # read-only view; only read
-    predictions = np.full((members.shape[0], N_OBS), np.nan)
+    predictions = np.full((members.shape[0], V_DIM), np.nan)
 
     for j, member in enumerate(members):
         member_in = WORKDIR / f"in_{j}.txt"
@@ -197,13 +197,13 @@ def forward(ensemble):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
                 OSError, ValueError):
             continue                                # leave the row non-finite
-        if row.shape == (N_OBS,):
+        if row.shape == (V_DIM,):
             predictions[j] = row
 
     return predictions
 ```
 
-Three things in it are the point. **The result starts as `nan`**, so a member is
+Three details matter. **The result starts as `nan`**, so a member is
 valid only if something wrote over its row — every path that produces no
 prediction is already a correctly signalled failure, which is what keeps the
 `except` clause short enough to be right. **The `except` names its own
@@ -222,7 +222,7 @@ from pyeki.linalg import PSDDiagonal
 times = jnp.array([0.5, 1.0, 2.0])
 truth = jnp.array([2.0, 0.7])
 y = truth[0] * jnp.exp(-truth[1] * times) + jnp.array([0.02, -0.01, 0.015])
-noise = PSDDiagonal(jnp.full(N_OBS, 0.01))
+noise = PSDDiagonal(jnp.full(V_DIM, 0.01))
 prior = Gaussian(mean=jnp.array([1.0, 1.0]), cov=PSDDiagonal(jnp.array([1.0, 0.5])))
 
 state = EKIState.from_prior(jax.random.key(0), prior, n_members=32)
@@ -232,9 +232,9 @@ result.mean          # [2.0798, 0.7406]  against a truth of [2.0, 0.7]
 result.min_n_valid   # 29 of 32 — the prior puts mass on negative rates
 ```
 
-`min_n_valid` being 29 is the wrapper working: the prior puts some members at a
-negative decay rate, the solver exits non-zero there, and the wrapper turns each
-into a `nan` row the driver repairs.
+`min_n_valid` of 29 is the wrapper working: those three members drew a negative
+decay rate, the solver exited non-zero, and the wrapper turned each into a `nan`
+row the driver repaired.
 
 ## Common mistakes
 

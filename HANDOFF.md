@@ -170,7 +170,7 @@ layer; this is the index.
 | Every comparison against `nan` is `False` | a bisection on such a comparison silently returns its lower bracket, and a floor then makes that look like an ordinary step |
 | `jnp.mean(x, axis=-2)` without `keepdims` | the subtraction right-aligns against the batch axis, so an operand whose leading axis equals $J$ broadcasts and returns wrong anomalies without raising |
 | `np.asarray` on the forward model's argument returns a **read-only view**, not a copy | writing into it raises `assignment destination is read-only` from wherever you wrote, not at the conversion; copy with `np.array` |
-| `EKIResult` counts *evaluations*, `state.step` counts *updates*, and they differ by one whenever a run ends on a stopping rule or a `None` increment | one `n_steps` naming both is how three words for one concept accumulated; the terminal record is the one with a zero increment |
+| `EKIResult` counts *evaluations*, `state.step` counts *updates*, and they differ by one whenever a run ends on a stopping rule or a `None` increment | a single `n_steps` naming both is how the ambiguity arose; the terminal record is the one with a zero increment |
 | A `float32` forward model is promoted and warned about, not rejected | it still costs ~$7\times10^{-5}$ relative in the posterior mean where the prediction mean exceeds the spread by $10^4$; promotion recovers only about half, since the digits are gone before the array arrives |
 | `ensemble @ G` instead of `ensemble @ G.T` is silent when $G$ is square | the transposed model's predictions, right shape, no error; `G @ ensemble` raises, so it is the harmless mistake |
 

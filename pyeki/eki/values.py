@@ -320,7 +320,7 @@ class Evaluation:
     """Everything one forward evaluation produced.
 
     What a :class:`~pyeki.eki.Schedule`'s ``next_increment`` and a
-    :class:`~pyeki.eki.StoppingRule` see, what :func:`~pyeki.eki.apply`
+    :class:`~pyeki.eki.StoppingRule` see, what :func:`~pyeki.eki.assimilate`
     consumes, and what a run reports as its ``last_evaluation``. Returned by
     :func:`~pyeki.eki.evaluate`.
 
