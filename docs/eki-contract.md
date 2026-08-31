@@ -1343,8 +1343,8 @@ needs the stricter reading evaluates it themselves in an `iterate` loop.
 ## Inflation
 
 An `Inflation` is a callable
-`inflate(key, *, ensemble, step, beta, **_) -> Array`, shape preserving, pure,
-`jit`-safe. It runs at the top of every step, on the ensemble that is about to
+`inflate(key, *, ensemble, step, beta, **_) -> Array`, shape- and
+dtype-preserving, pure, `jit`-safe. It runs at the top of every step, on the ensemble that is about to
 be evaluated and updated ({ref}`eki-step`). The keyword-only convention and the
 `**_` recommendation are the update protocol's, for the same reasons
 ({ref}`eki-updates`); `step` and `beta` are supplied because a decaying
@@ -1479,7 +1479,10 @@ the person implementing one.
   which `pyeki/__init__.py` establishes at import.
 - **the members that will be recorded.** When an inflation is configured, the
   argument is the *inflated* ensemble, not `state.ensemble`, and it is the
-  ensemble carried on the resulting `Evaluation` ({ref}`eki-inflation`).
+  ensemble carried on the resulting `Evaluation` ({ref}`eki-inflation`). An
+  inflation's output is therefore checked for dtype as well as shape: it is
+  what the forward model is called on, so a narrower or non-floating one
+  would demote the step's arithmetic with nothing else raising.
 
 The layer promises nothing about device placement, and a caller must not
 depend on any.
@@ -2229,7 +2232,7 @@ because they are pure Python over shapes.
 | tier | checks | examples |
 | ---- | ------ | -------- |
 | 2. construction | ranks, static sizes, operator types, field domains | `ensemble` rank ≠ 2; $J < 2$; a key that is not a typed key, by shape **or** dtype; `FixedSchedule` increments not all positive; `ess_fraction` outside $(0,\ 1-10^{-6}]$; `n_bisect` $< 1$; `divergence_budget` not `None`, not finite, or $\le 0$; `max_increment` not finite; `min_increment` $>$ `max_increment`; `beta_target` $\le 0$; `tau \le 0` |
-| 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)` or not finite; `noise_cov` side ≠ $N$ or a family; `max_steps` not a positive `int`; the forward model's output not `(J, N)` or not of a real floating dtype; an inflation's output not `(J, P)`; an update's output not `(J, P)`; `AdditiveInflation.cov` of side ≠ $P$; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
+| 3. call | problem and per-step shapes, policy outputs, string arguments | `y` not `(N,)` or not finite; `noise_cov` side ≠ $N$ or a family; `max_steps` not a positive `int`; the forward model's output not `(J, N)` or not of a real floating dtype; an inflation's output not `(J, P)` or not of `state.ensemble`'s dtype; an update's output not `(J, P)`; `AdditiveInflation.cov` of side ≠ $P$; a schedule increment that is non-scalar, non-finite, or not strictly positive; `on_failure` not one of the two permitted strings |
 | 4. value (debug) | finiteness of the initial ensemble and of `beta`; finiteness of inflation fields; positivity of `anomaly_factor` | violations yield `nan` or a silently wrong ladder outside debug mode |
 
 `y`'s finiteness is checked **unconditionally**, not at tier 4, because it is

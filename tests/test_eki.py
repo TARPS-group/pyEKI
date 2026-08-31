@@ -1529,6 +1529,10 @@ def test_18_every_tier_two_and_tier_three_rule_raises_as_specified():
     with pytest.raises(ValueError, match="inflation returned shape"):
         run(state, problem.forward, y, noise, schedule=ladder,
             inflation=lambda key, *, ensemble, step, beta, **_: ensemble[:-1])
+    with pytest.raises(ValueError, match="inflation returned dtype"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            inflation=lambda key, *, ensemble, step, beta, **_:
+                ensemble.astype(jnp.float32))
     with pytest.raises(ValueError, match="update returned shape"):
         run(state, problem.forward, y, noise, schedule=ladder,
             update=lambda key, *, ensemble, **_: ensemble[:, :-1])
@@ -1692,6 +1696,32 @@ class _StopAtStepThree:
 
     def __call__(self, evaluation) -> bool:
         return evaluation.step >= 3
+
+
+def test_19_min_n_valid_is_the_minimum_over_the_history():
+    """The worst step, not the last one and not the best.
+
+    Reporting the last or the largest is the mutation this catches: on a run
+    whose failures recur the three coincide, so the fixture fails a different
+    number of members at each step.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    failures = iter([1, 3, 0, 2])
+
+    def failing(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[: next(failures)].set(jnp.nan)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = run(problem.state(), failing, y, noise,
+                     schedule=FixedSchedule.uniform(4))
+    per_step = [int(r.n_valid) for r in result.history]
+    assert per_step == [problem.J - 1, problem.J - 3, problem.J, problem.J - 2]
+    assert result.min_n_valid == min(per_step) == problem.J - 3
+    assert result.min_n_valid != per_step[-1], "not the last step"
+    assert result.min_n_valid != max(per_step), "not the best step"
 
 
 def test_19_last_evaluation_is_the_final_forward_call_and_off_by_one_where_it_should_be():
@@ -2190,11 +2220,13 @@ def test_26_the_external_executable_wrapper_of_the_guide_runs(tmp_path):
     """
     solver = tmp_path / "solver.py"
     solver.write_text(
-        "import sys, numpy as np\n"
-        "u = np.loadtxt(sys.argv[1])\n"
+        "import sys, math\n"
+        "u = [float(x) for x in open(sys.argv[1])]\n"
         "if u[1] < 0.0:\n"
         "    sys.exit('solver diverged: negative decay rate')\n"
-        "np.savetxt(sys.argv[2], u[0] * np.exp(-u[1] * np.array([0.5, 1.0, 2.0])))\n"
+        "with open(sys.argv[2], 'w') as out:\n"
+        "    for t in (0.5, 1.0, 2.0):\n"
+        "        out.write(repr(u[0] * math.exp(-u[1] * t)) + '\\n')\n"
     )
     v_dim = 3
 

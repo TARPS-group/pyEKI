@@ -230,6 +230,14 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, v_dim):
                 f"expected {state.ensemble.shape}. An Inflation is shape "
                 f"preserving."
             )
+        if members.dtype != state.ensemble.dtype:
+            raise ValueError(
+                f"evaluate: the inflation returned dtype {members.dtype}, "
+                f"expected {state.ensemble.dtype}. These members are what the "
+                f"forward model is called on and what the Evaluation carries, "
+                f"so a narrower or non-floating one demotes the step's "
+                f"arithmetic with nothing else raising."
+            )
 
     predictions, promoted_from = _check_predictions(
         forward(members), state.n_members, v_dim, state.ensemble.dtype

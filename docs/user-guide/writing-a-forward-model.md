@@ -133,6 +133,17 @@ counts as valid, and its enormous misfit reads to an adaptive schedule as
 genuine ensemble disagreement, so the run stalls rather than flagging it. Map
 those to non-finite rows in your wrapper, where the information exists.
 
+## Row independence
+
+**Row `j` of the return must depend only on row `j` of the argument.** The
+layer fits a Gaussian to the pairs and conditions with the resulting
+cross-covariance, so a model that normalizes across the ensemble, or shares a
+mutable accumulator between rows, returns something that is not a sample of
+the joint law at all. Nothing detects it: the shapes are right and the numbers
+are finite.
+
+This is the only requirement beyond the shapes and the failure signal.
+
 (what-is-not-required)=
 ## What is not required
 
@@ -148,15 +159,11 @@ schedules read that spread as disagreement and shorten their increments, so it
 costs more evaluations. Side effects — scratch files, job submissions, a process
 pool — are likewise fine.
 
-The one requirement beyond the shapes is **row independence**: row `j` of the
-return depends only on row `j` of the argument. A model that normalizes across
-the ensemble, or shares a mutable accumulator between rows, breaks the pairing
-the ensemble update is built on. Nothing detects it.
-
 ## A worked example: an external executable
 
 A solver invoked as a subprocess, one member at a time, which sometimes fails.
-The first block stands in for the external code; substitute your own.
+The first block stands in for the external code — deliberately plain, since
+the thing it represents is not a Python library. Substitute your own.
 
 ```python
 import pathlib, subprocess, sys, tempfile
@@ -165,11 +172,13 @@ import numpy as np
 WORKDIR = pathlib.Path(tempfile.mkdtemp())
 SOLVER = WORKDIR / "solver.py"
 SOLVER.write_text(
-    "import sys, numpy as np\n"
-    "u = np.loadtxt(sys.argv[1])\n"
+    "import sys, math\n"
+    "u = [float(x) for x in open(sys.argv[1])]\n"
     "if u[1] < 0.0:\n"
     "    sys.exit('solver diverged: negative decay rate')\n"
-    "np.savetxt(sys.argv[2], u[0] * np.exp(-u[1] * np.array([0.5, 1.0, 2.0])))\n"
+    "with open(sys.argv[2], 'w') as out:\n"
+    "    for t in (0.5, 1.0, 2.0):\n"
+    "        out.write(repr(u[0] * math.exp(-u[1] * t)) + '\\n')\n"
 )
 ```
 
