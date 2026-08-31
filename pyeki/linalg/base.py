@@ -201,8 +201,8 @@ def value_check(x, predicate, message: str) -> None:
     -----
     Two skip conditions are needed, not one. A tracer operand is the obvious
     case. The subtle case is a *concrete* operand inspected while a trace is
-    live — a closed-over constant inside :func:`jax.jit`, which is how a
-    driver loop passes an observation and a noise covariance. JAX stages a
+    live — a closed-over constant inside :func:`jax.jit`, the usual way a
+    caller supplies fixed data to a traced computation. JAX stages a
     primitive into the live trace regardless of whether its operands are
     tracers, so the predicate's array work is staged there and reading its
     result as a bool raises ``TracerBoolConversionError`` from inside a debug
@@ -771,7 +771,7 @@ class LinOp(abc.ABC):
         if self.batch_shape != ():
             raise ValueError(
                 f"{self!r}.{method}: a vmapped family cannot be applied "
-                f"directly; apply it under jax.vmap, member by member."
+                f"directly; apply it under jax.vmap, one at a time."
             )
 
     # -- operator arithmetic ------------------------------------------------------
@@ -823,8 +823,8 @@ class LinOp(abc.ABC):
         ----------
         c
             A true scalar: a Python or NumPy real number, or a 0-d array —
-            which may be traced, so a tempering increment computed inside a
-            ``jit``-ed step flows through.
+            which may be traced, so a scale computed inside a ``jit``-ed
+            computation flows through.
 
         Returns
         -------

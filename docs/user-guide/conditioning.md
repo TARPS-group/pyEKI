@@ -15,19 +15,19 @@ conditioning mathematics.
 import pyeki  # enables float64; import this before creating arrays
 import jax
 import jax.numpy as jnp
-from pyeki.gauss import Gaussian, EnsembleJoint
+from pyeki.gauss import Gaussian, EmpiricalJoint
 from pyeki.linalg import PSDDiagonal, DensePSD, block_diag
 
 prior = Gaussian(jnp.zeros(12), DensePSD.from_matrix(C0))   # mean + covariance
 u = prior.sample(key, 40)                                   # (40, 12) ensemble
 v = forward(u)                                              # (40, N) predictions
-joint = EnsembleJoint(u_samples=u, v_samples=v)                                 # the joint Gaussian
+joint = EmpiricalJoint(u_samples=u, v_samples=v)                                 # the joint Gaussian
 ```
 
 A `Gaussian` is a mean vector and a covariance operator. It is what you build a
 prior with, and what conditioning hands back.
 
-An `EnsembleJoint` holds two blocks of paired samples: `u_samples`, the block
+An `EmpiricalJoint` holds two blocks of paired samples: `u_samples`, the block
 being updated — the parameters — and `v_samples`, the predicted observations
 from the same members. It *acts as* the joint Gaussian whose mean and
 covariance match the ensemble's, so conditioning it is exact Gaussian
@@ -104,7 +104,7 @@ is the operator layer's scalar scaling:
 ```python
 for key_t, dbeta in schedule:
     v = forward(u)
-    u = EnsembleJoint(u_samples=u, v_samples=v).pathwise_update(key_t, y, noise_cov / dbeta)
+    u = EmpiricalJoint(u_samples=u, v_samples=v).pathwise_update(key_t, y, noise_cov / dbeta)
 ```
 
 The increment flows through a scalar field, so an adaptive schedule never
@@ -169,7 +169,7 @@ several joints, several priors, several noise levels — is a `jax.vmap` over th
 pytree, not an object with extra leading axes:
 
 ```python
-build = lambda u, v: EnsembleJoint(u_samples=u, v_samples=v)
+build = lambda u, v: EmpiricalJoint(u_samples=u, v_samples=v)
 joints = jax.vmap(build)(u_batch, v_batch)            # (8, J, P), (8, J, N)
 joints.batch_shape                                    # (8,)
 joints.transform_update(y, noise_cov)                 # ValueError: apply under vmap
@@ -178,7 +178,7 @@ updates = jax.vmap(lambda j, y: j.transform_update(y, noise_cov))(joints, ys)
 ```
 
 A family identifies itself — `batch_shape`, and a
-`vmapped(EnsembleJoint(...), batch=(8,))` repr — and refuses every operation
+`vmapped(EmpiricalJoint(...), batch=(8,))` repr — and refuses every operation
 with a message telling you to map it. The same holds for a family of noise
 operators: map it, do not pass it in directly.
 

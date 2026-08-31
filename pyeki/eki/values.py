@@ -175,9 +175,9 @@ class EKIState:
     would make the state's ``batch_shape`` ambiguous.
 
     **``step`` is cumulative across runs.** Resuming a partially-completed
-    ladder is the case that is designed for: a ten-iteration
-    :class:`~pyeki.eki.FixedSchedule` interrupted after four iterations resumes
-    at iteration four. The same property makes *chaining* a second, different
+    ladder is the case that is designed for: a ten-step
+    :class:`~pyeki.eki.FixedSchedule` interrupted after four steps resumes
+    at step four. The same property makes *chaining* a second, different
     ladder onto a finished state a silent no-op — the fresh schedule finds
     ``step >= n_steps`` already true and the run returns immediately with an
     empty history and the ensemble unchanged. A new ladder needs a new counter,
@@ -346,7 +346,7 @@ class Evaluation:
         least 2. Data rather than static metadata: nothing indexes a Python
         object with it, and a static field would give two evaluations with
         different counts different treedefs, retracing any ``jit``-ed policy
-        once per iteration.
+        once per step.
 
     Raises
     ------
@@ -721,18 +721,36 @@ class EKIResult:
         return self.state.mean
 
     @property
-    def n_steps(self) -> int:
-        """How many records this run produced."""
+    def n_evaluations(self) -> int:
+        """How many times this run called the forward model: one per record.
+
+        The run's cost in *member* evaluations is
+        :math:`J\\,n_{\\text{evaluations}}`, which is the caller's own
+        multiplication — this counts calls, and each one is handed the whole
+        ensemble.
+        """
         return len(self.history)
 
     @property
-    def n_evaluations(self) -> int:
-        """How many forward calls this run made: one per record.
+    def n_updates(self) -> int:
+        """How many times this run moved the ensemble.
 
-        Not :math:`J\\,n_{\\text{steps}}`, which counts member evaluations
-        and is the caller's own multiplication.
+        Equal to :attr:`n_evaluations`, or one less when the run ended on a
+        terminal evaluation — a stopping rule that fired, or a schedule whose
+        ``next_increment`` returned ``None``. Both decisions need an
+        evaluation to reach, so the evaluation is spent and no update
+        follows; a terminal record is the one with an ``increment`` of
+        exactly zero, and there is at most one, always last.
+
+        Not derivable from :attr:`status`, which does not distinguish a
+        schedule exhausted declaratively from one exhausted by returning
+        ``None``, nor from ``state.step``, which is cumulative across a
+        chain of runs.
         """
-        return self.n_steps
+        if not self.history:
+            return 0
+        ended_on_evaluation = float(self.history[-1].increment) == 0.0
+        return len(self.history) - int(ended_on_evaluation)
 
     @property
     def min_n_valid(self) -> int | None:
@@ -790,10 +808,11 @@ class EKIResult:
         return self.status == SCHEDULE_EXHAUSTED
 
     def __repr__(self) -> str:
-        """As ``EKIResult(status='schedule_exhausted', n_steps=17, beta=1.0)``."""
+        """As ``EKIResult(status='schedule_exhausted', n_evaluations=17, beta=1)``."""
         try:
             return (
-                f"EKIResult(status={self.status!r}, n_steps={self.n_steps}, "
+                f"EKIResult(status={self.status!r}, "
+                f"n_evaluations={self.n_evaluations}, "
                 f"beta={float(self.state.beta):g})"
             )
         except Exception:

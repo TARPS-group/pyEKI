@@ -22,7 +22,7 @@ That is a complete forward model.
 
 :::{important}
 **`forward` receives the whole ensemble, not one member.** It is called once
-per iteration with a `(J, P)` array and returns `(J, N)` — one prediction per
+per step with a `(J, P)` array and returns `(J, N)` — one prediction per
 member, in the same order. A function written for a single parameter vector is
 the most common mistake here, and it fails badly: depending on the arithmetic
 it either raises from deep inside JAX without mentioning the ensemble, or
@@ -209,7 +209,7 @@ prediction is already a correctly signalled failure, which is what keeps the
 `except` clause short enough to be right. **The `except` names its own
 failures** rather than catching everything, so a bug in the wrapper still
 reaches you. **Stale outputs are deleted first**, so a solver that exits zero
-without writing cannot return a previous iteration's answer.
+without writing cannot return a previous step's answer.
 
 Driving it is unremarkable:
 

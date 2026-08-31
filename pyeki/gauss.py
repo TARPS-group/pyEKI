@@ -1,17 +1,16 @@
-"""Joint Gaussian distributions and the conditioning EKI is built from.
+"""Joint Gaussian distributions and the conditioning built on them.
 
-The layer represents a joint Gaussian over two blocks — in Ensemble Kalman
-Inversion, the parameters and the predicted observations — and conditions it
-on a noisy observation of the second block. Every conditioning path routes
-through one algorithm, the whitened-SVD kernel described below, so nothing
-here forms a matrix of the parameter or observation dimension.
+The layer represents a joint Gaussian over two blocks, :math:`u` and
+:math:`v`, and conditions it on a noisy observation of the second. Every
+conditioning path routes through one algorithm, the whitened-SVD kernel
+described below, so nothing here forms a matrix of either block's dimension.
 
 ============================ ==================================================
 object                       represents
 ============================ ==================================================
 :class:`Gaussian`            one Gaussian distribution: a mean vector and a
                              :class:`~pyeki.linalg.PSDLinOp` covariance
-:class:`EnsembleJoint`       the joint Gaussian with an ensemble's empirical
+:class:`EmpiricalJoint`      the joint Gaussian with a sample's empirical
                              moments, held as :math:`J` paired samples
 :func:`gain_weights`         the Kalman-gain weights for a whitened residual
 :func:`sqrt_transform`       the deterministic square-root update transform
@@ -19,10 +18,10 @@ object                       represents
 
 Conventions shared by everything in the module:
 
-- **Samples are stored row-wise**: an ensemble is a ``(J, dim)`` array, one
-  member per row. This is what a :func:`jax.vmap`-ed forward model produces
-  and what the operator layer's batch contract treats as a batch of vectors,
-  so ensembles flow between the two layers with no transposes.
+- **Samples are stored row-wise**: a sample block is a ``(J, dim)`` array,
+  one draw per row. That is what :func:`jax.vmap` produces and what the
+  operator layer's batch contract treats as a batch of vectors, so sample
+  blocks flow between the two layers with no transposes.
 - **Anomalies are raw deviations from the sample mean**, with no
   normalization folded in, and **empirical covariances use the divisor**
   :math:`J - 1`.
@@ -58,7 +57,7 @@ The conditioning kernel. With :math:`A_v` the prediction anomalies,
     \\qquad S = U \\Sigma V^\\top \\ \\text{(thin SVD)},
 
 the Kalman gain :math:`K = \\widehat{C}_{uv}(\\widehat{C}_{vv} + R)^{-1}`
-applied to a residual :math:`r` is a combination of the ensemble's own
+applied to a residual :math:`r` is a combination of the samples' own
 :math:`u`-anomalies,
 
 .. math::
@@ -86,7 +85,7 @@ from jax import Array
 from .linalg import PSDLinOp, PSDLowRank, dense_matvec, value_check
 from .linalg.base import _broadcast_batch, _pytree_dataclass
 
-__all__ = ["EnsembleJoint", "Gaussian", "gain_weights", "sqrt_transform"]
+__all__ = ["EmpiricalJoint", "Gaussian", "gain_weights", "sqrt_transform"]
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +94,7 @@ __all__ = ["EnsembleJoint", "Gaussian", "gain_weights", "sqrt_transform"]
 
 
 def gain_weights(s: Array, b: Array) -> Array:
-    """Ensemble weights for a whitened residual: the shared conditioning core.
+    """Sample weights for a whitened residual: the shared conditioning core.
 
     A pure matrix function of its arguments — no divisor, no whitening and no
     randomness folded in. For the thin SVD :math:`s = U\\Sigma V^\\top`,
@@ -113,11 +112,11 @@ def gain_weights(s: Array, b: Array) -> Array:
     In conditioning, ``s`` is the scaled whitened anomaly matrix
     :math:`A_v W^\\top/\\sqrt{J-1}` and ``b`` a whitened residual
     :math:`W r`, and the returned weights give the gain applied to that
-    residual as a combination of the ensemble's own anomalies,
+    residual as a combination of the samples' own anomalies,
     :math:`K r = A_u^\\top w/\\sqrt{J-1}`. The multipliers are bounded by
     :math:`\\sigma/(1+\\sigma^2) \\le 1/2` for every :math:`\\sigma \\ge 0`,
     so the gain cannot blow up however collapsed or ill-conditioned the
-    ensemble becomes, and there is no regularization parameter to tune.
+    posterior becomes, and there is no regularization parameter to tune.
 
     Parameters
     ----------
@@ -143,12 +142,12 @@ def gain_weights(s: Array, b: Array) -> Array:
     Notes
     -----
     One SVD per call: batch the residuals of an update into a single call
-    rather than looping, since its :math:`J` per-member residuals are one
+    rather than looping, since its :math:`J` per-sample residuals are one
     ``(J, N)`` operand.
 
     Callers own the semantics of ``s`` and ``b``. The function cannot check
     that they are scaled, whitened and centered as conditioning requires,
-    which is why the methods of :class:`EnsembleJoint` — where those
+    which is why the methods of :class:`EmpiricalJoint` — where those
     conventions are enforced — are the default interface and this is the
     escape hatch.
 
@@ -222,7 +221,7 @@ def sqrt_transform(s: Array) -> Array:
     Notes
     -----
     :math:`T\\mathbf{1} = \\mathbf{1}` — so transformed anomalies still sum
-    to zero and a posterior ensemble's mean is not silently shifted —
+    to zero and the posterior mean is not silently shifted —
     follows from :math:`\\mathbf{1}^\\top s = 0` and holds only for such
     mean-centered ``s``, which is the only case the conditioning kernel
     produces. On general ``s``, :math:`T\\mathbf{1}` is whatever that matrix
@@ -255,7 +254,7 @@ class Gaussian:
     """A Gaussian distribution :math:`\\mathcal{N}(m, C)`.
 
     The prior a caller supplies, and the posterior
-    :meth:`EnsembleJoint.condition` returns.
+    :meth:`EmpiricalJoint.condition` returns.
 
     Each method requires specific operations of the covariance, and an
     unsupported one raises the operator layer's
@@ -307,8 +306,8 @@ class Gaussian:
     def from_samples(cls, samples) -> Gaussian:
         """The Gaussian fit to a set of samples: their empirical moments.
 
-        The one-block counterpart of :class:`EnsembleJoint`, which fits a
-        joint to two member-aligned blocks. Use it to read an ensemble's
+        The one-block counterpart of :class:`EmpiricalJoint`, which fits a
+        joint to two row-aligned blocks. Use it to read a block of samples'
         moments as a distribution — per-coordinate variances through
         ``cov.diag()``, fresh draws through :meth:`sample`.
 
@@ -339,7 +338,7 @@ class Gaussian:
         than :math:`O(n^2)`.
 
         Its rank is at most :math:`J-1`, so it is singular whenever
-        :math:`J - 1 < n` — the usual ensemble regime — and
+        :math:`J - 1 < n` — the usual regime for this layer — and
         :class:`~pyeki.linalg.PSDLowRank` accordingly provides ``diag`` and
         ``factor`` and withholds ``solve``, ``whiten`` and ``logdet``.
         :meth:`log_density` therefore raises
@@ -508,16 +507,16 @@ class Gaussian:
 
 
 # ---------------------------------------------------------------------------
-# the joint Gaussian of an ensemble's empirical moments
+# the joint Gaussian of paired samples' empirical moments
 # ---------------------------------------------------------------------------
 
 
 @_pytree_dataclass
-class EnsembleJoint:
-    """The joint Gaussian determined by an ensemble's empirical moments.
+class EmpiricalJoint:
+    """The joint Gaussian determined by paired samples' empirical moments.
 
-    Held in sample form: the object EKI builds once per step, uses for one
-    update, and discards. Its distribution is
+    Held in sample form: built for one conditioning operation and discarded.
+    Its distribution is
 
     .. math::
 
@@ -527,8 +526,8 @@ class EnsembleJoint:
         \\widehat{C}_{vu} & \\widehat{C}_{vv}\\end{pmatrix}\\right),
         \\qquad \\widehat{C}_{uv} = \\frac{A_u^\\top A_v}{J-1},
 
-    a Gaussian *fit to* the members rather than the equal-weight point-mass
-    distribution of the members themselves: every conditioning method below
+    a Gaussian *fit to* the samples rather than the equal-weight point-mass
+    distribution of the samples themselves: every conditioning method below
     is exact Gaussian conditioning applied to this fitted Gaussian. The
     samples are the representation from which its moments are read, and no
     moment matrix is ever formed.
@@ -536,19 +535,19 @@ class EnsembleJoint:
     All three conditioning methods condition on the same observation model,
     :math:`y = v + \\eta` with :math:`\\eta \\sim \\mathcal{N}(0, R)`, and
     share the trailing arguments ``y`` and ``noise_cov``. The two update
-    methods return updated members and update :math:`u` only, since EKI
-    re-evaluates the forward model to get the next step's :math:`v`;
-    :meth:`condition` returns the same posterior as a distribution.
+    methods return an updated :math:`u` block only, leaving :math:`v` to a
+    caller that needs a matching one to recompute it; :meth:`condition`
+    returns the same posterior as a distribution.
 
     Parameters
     ----------
     u_samples
-        The block to be updated — in EKI, the parameters — a ``(J, P)``
-        array, one member per row. Keyword-only.
+        The block to be updated, a ``(J, P)`` array, one draw per row.
+        Keyword-only.
     v_samples
-        The observed block — in EKI, the predicted observations — a
-        ``(J, N)`` array, member-aligned with ``u_samples``: row :math:`j`
-        of each belongs to the same member. Keyword-only.
+        The block that is observed, a ``(J, N)`` array row-aligned with
+        ``u_samples``: row :math:`j` of each belongs to the same draw.
+        Keyword-only.
 
     Raises
     ------
@@ -560,54 +559,54 @@ class EnsembleJoint:
     Notes
     -----
     Both fields are **keyword-only**. They are two arrays of the same rank
-    whose sizes agree on the member axis, so a swap is a shape-valid mistake
+    whose sizes agree on the sample axis, so a swap is a shape-valid mistake
     that no check can catch when :math:`P = N`: the update would be computed
     from the wrong blocks and return finite, plausible numbers. Naming them
     at the call site is the only thing that rules it out. The cost is that a
     family is built through a lambda rather than by mapping the constructor
     directly::
 
-        jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))(U, V)
+        jax.vmap(lambda u, v: EmpiricalJoint(u_samples=u, v_samples=v))(U, V)
 
     The four array properties — the two means and the two anomaly matrices —
     raise ``ValueError`` on a vmapped family, as the methods do.
 
     Nothing is factorized at construction, deliberately: the SVD of
-    :math:`S` depends on the noise operator, which arrives per update call
-    and changes at every tempering step. Each method computes its SVD once,
+    :math:`S` depends on the noise operator, which arrives per call and may
+    differ on every call. Each method computes its SVD once,
     uses it, and discards it, never caching it on the instance — which under
     ``jit`` would write the cache to a temporary copy and silently
     re-factorize on every call.
 
-    All three methods degrade gracefully when the prediction anomalies are
+    All three methods degrade gracefully when the :math:`v` anomalies are
     zero: the updates return ``u_samples`` unchanged and :meth:`condition`
-    returns the prior marginal's moments. A collapsed ensemble is a no-op,
-    not ``nan``, for finite inputs.
+    returns the prior marginal's moments. A collapsed sample block is a
+    no-op, not ``nan``, for finite inputs.
     """
 
     u_samples: Array = field(kw_only=True)
     v_samples: Array = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        _check_field_rank("EnsembleJoint", "u_samples", self.u_samples, 2)
-        _check_field_rank("EnsembleJoint", "v_samples", self.v_samples, 2)
+        _check_field_rank("EmpiricalJoint", "u_samples", self.u_samples, 2)
+        _check_field_rank("EmpiricalJoint", "v_samples", self.v_samples, 2)
         u_shape, v_shape = self.u_samples.shape, self.v_samples.shape
         if u_shape[0] != v_shape[0]:
             raise ValueError(
-                f"EnsembleJoint: u_samples and v_samples must have the same "
-                f"number of members, got shapes {u_shape} and {v_shape}"
+                f"EmpiricalJoint: u_samples and v_samples must have the same "
+                f"number of samples, got shapes {u_shape} and {v_shape}"
             )
         if u_shape[0] < 2:
             raise ValueError(
-                f"EnsembleJoint: at least 2 members are required, got "
+                f"EmpiricalJoint: at least 2 samples are required, got "
                 f"{u_shape[0]}. A single sample has no anomalies."
             )
-        _check_finite("EnsembleJoint", "u_samples", self.u_samples)
-        _check_finite("EnsembleJoint", "v_samples", self.v_samples)
+        _check_finite("EmpiricalJoint", "u_samples", self.u_samples)
+        _check_finite("EmpiricalJoint", "v_samples", self.v_samples)
 
     @property
-    def n_members(self) -> int:
-        """The ensemble size :math:`J`."""
+    def n_samples(self) -> int:
+        """The number of samples :math:`J`."""
         return int(self.u_samples.shape[-2])
 
     @property
@@ -624,7 +623,7 @@ class EnsembleJoint:
     def batch_shape(self) -> tuple[int, ...]:
         """The family's batch shape, ``()`` for a directly constructed object."""
         return _broadcast_batch(
-            "EnsembleJoint",
+            "EmpiricalJoint",
             tuple(self.u_samples.shape[:-2]),
             tuple(self.v_samples.shape[:-2]),
         )
@@ -661,7 +660,7 @@ class EnsembleJoint:
         """The stochastic (perturbed-observation) update: ``(J, P)``.
 
         Pathwise conditioning of the joint's own samples, one fresh
-        perturbation per member:
+        perturbation per sample:
 
         .. math::
 
@@ -690,7 +689,7 @@ class EnsembleJoint:
         Returns
         -------
         Array
-            Shape ``(J, P)``, row :math:`j` updating member :math:`j`.
+            Shape ``(J, P)``, row :math:`j` updating row :math:`j` of ``u_samples``.
 
         Raises
         ------
@@ -721,8 +720,8 @@ class EnsembleJoint:
         The output's sample mean and sample covariance (divisor
         :math:`J - 1`) are unbiased estimators of the posterior moments
         :meth:`transform_update` represents exactly; the mean has variance
-        :math:`K R K^\\top / J`. Individual members are not posterior draws:
-        conditional on the ensemble, member :math:`j` is distributed
+        :math:`K R K^\\top / J`. Individual samples are not posterior draws:
+        conditional on the sample block, sample :math:`j` is distributed
         :math:`\\mathcal{N}(u_j + K(y - v_j),\\, K R K^\\top)`.
 
         Precondition: ``noise_cov`` is nonsingular, which is ``whiten``'s own
@@ -735,21 +734,21 @@ class EnsembleJoint:
             y, noise_cov
         )
         U, sigma, Vt = self._conditioning_svd(whitened_anomalies)
-        eps = jax.random.normal(key, (self.n_members, self.v_dim))
-        # W(y - v_j) - eps_j, the per-member residual assembled from the mean
+        eps = jax.random.normal(key, (self.n_samples, self.v_dim))
+        # W(y - v_j) - eps_j, the per-sample residual assembled from the mean
         # residual and the anomalies rather than whitened a second time.
         b = whitened_residual - whitened_anomalies - eps
-        members = self.u_samples + self._combine_anomalies(
+        updated = self.u_samples + self._combine_anomalies(
             _weights_from_svd(U, sigma, Vt, b)
         )
-        _check_finite(where, "the updated ensemble", members, cause=_SINGULAR_NOISE)
-        return members
+        _check_finite(where, "the updated block", updated, cause=_SINGULAR_NOISE)
+        return updated
 
     def transform_update(self, y, noise_cov) -> Array:
         """The deterministic (square-root) update: ``(J, P)``.
 
         The moment-form posterior of the fitted joint Gaussian, returned in
-        ensemble representation:
+        sample representation:
 
         .. math::
 
@@ -758,7 +757,7 @@ class EnsembleJoint:
             _{m_{\\text{post}}} + (T A_u)_j, \\qquad
             T = \\texttt{sqrt\\_transform}(S).
 
-        No randomness, and no ``key``. The returned ensemble is an *exact*
+        No randomness, and no ``key``. The returned block is an *exact*
         representation of the moment posterior: its sample mean equals the
         posterior mean and its sample covariance (divisor :math:`J - 1`)
         equals the posterior covariance, both in exact arithmetic. Because
@@ -778,7 +777,7 @@ class EnsembleJoint:
         Returns
         -------
         Array
-            Shape ``(J, P)``, row :math:`j` updating member :math:`j`.
+            Shape ``(J, P)``, row :math:`j` updating row :math:`j` of ``u_samples``.
 
         Raises
         ------
@@ -793,7 +792,7 @@ class EnsembleJoint:
 
         Notes
         -----
-        Which update to use is the EKI layer's decision, not this layer's.
+        Which update to use is the caller's decision, not this layer's.
         This one replaces sampling noise with an exact transform of the
         anomalies; :meth:`pathwise_update` matches the posterior moments only
         in expectation, at the usual :math:`O(J^{-1/2})` rate.
@@ -802,14 +801,14 @@ class EnsembleJoint:
         mean, transform = self._posterior_mean_and_transform(y, noise_cov)
         # (J, J) @ (J, P): both operands are exactly 2-D, so this is the
         # plain matrix product, not a batch of vectors.
-        members = mean + transform @ self.u_anomalies
-        _check_finite(where, "the updated ensemble", members, cause=_SINGULAR_NOISE)
-        return members
+        updated = mean + transform @ self.u_anomalies
+        _check_finite(where, "the updated block", updated, cause=_SINGULAR_NOISE)
+        return updated
 
     def condition(self, y, noise_cov) -> Gaussian:
         """Moment-form conditioning: the posterior as a :class:`Gaussian`.
 
-        The same posterior :meth:`transform_update` represents as members,
+        The same posterior :meth:`transform_update` represents as samples,
         for sampling at any size and for diagnostics:
 
         .. math::
@@ -860,7 +859,7 @@ class EnsembleJoint:
         -----
         The returned covariance is honest about rank:
         :math:`\\operatorname{rank}(C_{\\text{post}}) \\le J - 1`, so it is
-        singular whenever :math:`J - 1 < P`, the usual EKI regime. The
+        singular whenever :math:`J - 1 < P`, the usual regime here. The
         posterior therefore supports :meth:`Gaussian.sample` — the factor is
         the stored representation — but not
         :meth:`Gaussian.log_density`, which raises
@@ -875,7 +874,7 @@ class EnsembleJoint:
         y, where = self._validate_call("condition", y, noise_cov)
         mean, transform = self._posterior_mean_and_transform(y, noise_cov)
         factor = (transform @ self.u_anomalies).swapaxes(-1, -2) / math.sqrt(
-            self.n_members - 1
+            self.n_samples - 1
         )
         # Both halves of the result, checked before the covariance and the
         # distribution are built, so the diagnosis names this call rather
@@ -887,15 +886,15 @@ class EnsembleJoint:
         return Gaussian(mean, PSDLowRank(factor))
 
     def __repr__(self) -> str:
-        """As ``EnsembleJoint(n_members=100, u_dim=12, v_dim=40)``; never raises."""
+        """As ``EmpiricalJoint(n_samples=100, u_dim=12, v_dim=40)``; never raises."""
         try:
             base = (
-                f"EnsembleJoint(n_members={self.n_members}, u_dim={self.u_dim}, "
+                f"EmpiricalJoint(n_samples={self.n_samples}, u_dim={self.u_dim}, "
                 f"v_dim={self.v_dim})"
             )
             batch = self.batch_shape
         except Exception:
-            return "<EnsembleJoint (unprintable leaves)>"
+            return "<EmpiricalJoint (unprintable leaves)>"
         return f"vmapped({base}, batch={batch})" if batch != () else base
 
     # -- private: call validation, and the whitened-SVD assembly --
@@ -940,7 +939,7 @@ class EnsembleJoint:
         :math:`J + 1` stacked rows :math:`[A_v;\\, y - \\bar v]`. Every
         whitened quantity the kernel needs follows: :math:`S` is the first
         block over :math:`\\sqrt{J-1}`, the deterministic paths want the
-        second as it stands, and the stochastic path's per-member residual is
+        second as it stands, and the stochastic path's per-sample residual is
         :math:`W(y - v_j) = W(y - \\bar v) - W a_j`. Whitening the anomalies
         and the residuals in two calls would instead cost :math:`2J`
         applications of :math:`W` in the stochastic update, which for a dense
@@ -964,7 +963,7 @@ class EnsembleJoint:
 
     def _conditioning_svd(self, whitened_anomalies: Array):
         """The thin SVD of :math:`S = A_v W^\\top/\\sqrt{J-1}`, computed once."""
-        return _thin_svd(whitened_anomalies / math.sqrt(self.n_members - 1))
+        return _thin_svd(whitened_anomalies / math.sqrt(self.n_samples - 1))
 
     def _posterior_mean_and_transform(self, y, noise_cov) -> tuple[Array, Array]:
         """The posterior mean and the transform :math:`T`, from a single SVD.
@@ -980,17 +979,17 @@ class EnsembleJoint:
         mean = self.u_mean + self._combine_anomalies(
             _weights_from_svd(U, sigma, Vt, whitened_residual)
         )
-        return mean, _transform_from_svd(U, sigma, self.n_members)
+        return mean, _transform_from_svd(U, sigma, self.n_samples)
 
     def _combine_anomalies(self, weights: Array) -> Array:
         """Apply the :math:`u`-anomalies to weights: :math:`A_u^\\top w/\\sqrt{J-1}`.
 
         Carries any batch axes of ``weights``, so one call handles both a
-        single weight vector and the :math:`J` per-member vectors of a
+        single weight vector and the :math:`J` per-sample vectors of a
         stochastic update.
         """
         anomalies = self.u_anomalies.swapaxes(-1, -2)  # (P, J)
-        return dense_matvec(anomalies, weights) / math.sqrt(self.n_members - 1)
+        return dense_matvec(anomalies, weights) / math.sqrt(self.n_samples - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1074,7 +1073,7 @@ def _check_not_vmap_family(obj, operation: str) -> None:
     if batch != ():
         raise ValueError(
             f"{obj!r}.{operation}: a vmapped family cannot be used directly; its "
-            f"batch shape is {batch}. Apply it under jax.vmap, member by member."
+            f"batch shape is {batch}. Apply it under jax.vmap, row by row."
         )
 
 
@@ -1125,24 +1124,24 @@ _SINGULAR_NOISE = (
 
 
 def _centered(x: Array) -> Array:
-    """Deviations from the sample mean over the member axis, formed stably.
+    """Deviations from the sample mean over the sample axis, formed stably.
 
     Mathematically :math:`x - \\mathbf{1}\\bar x^\\top`, computed by removing
-    the first member before averaging. Two things follow, neither of them true
+    the first row before averaging. Two things follow, neither of them true
     of a direct subtraction of :func:`jax.numpy.mean`:
 
-    - **Identical members give exactly zero.** ``jnp.mean`` of :math:`J`
+    - **Identical rows give exactly zero.** ``jnp.mean`` of :math:`J`
       bit-identical rows sums and divides, which does not in general return
-      the value it was given, so a collapsed ensemble otherwise acquires
+      the value it was given, so a collapsed sample block otherwise acquires
       spurious anomalies of about :math:`\\varepsilon\\lvert\\bar x\\rvert`.
       The gain amplifies those into a wrong, finite, ``nan``-free update once
-      the members are large: at :math:`v \\equiv 6\\times10^{23}` the spurious
+      the rows are large: at :math:`v \\equiv 6\\times10^{23}` the spurious
       update is of order 1 where the exact answer is no update at all.
     - **Cancellation is governed by the spread, not the magnitude.** The error
       is :math:`O(\\varepsilon \\max_j \\lvert x_j - x_0 \\rvert)` rather than
       :math:`O(\\varepsilon \\max_j \\lvert x_j \\rvert)`, which matters
-      whenever the mean is large relative to the anomalies — a converged
-      ensemble, late in a tempering run.
+      whenever the mean is large relative to the anomalies, which is the
+      regime a nearly collapsed sample block sits in.
     """
     shifted = x - x[..., :1, :]
     return shifted - jnp.mean(shifted, axis=-2, keepdims=True)
@@ -1170,7 +1169,7 @@ def _weights_from_svd(U: Array, sigma: Array, Vt: Array, b: Array) -> Array:
     return dense_matvec(U, coefficients)
 
 
-def _transform_from_svd(U: Array, sigma: Array, n_members: int) -> Array:
+def _transform_from_svd(U: Array, sigma: Array, n_samples: int) -> Array:
     """Assemble :math:`T = I_J + U((I+\\Sigma^2)^{-1/2} - I)U^\\top`.
 
     The identity completion is what makes this exact at every rank: for a
@@ -1191,5 +1190,5 @@ def _transform_from_svd(U: Array, sigma: Array, n_members: int) -> Array:
     modifier = 1.0 / jnp.sqrt(1.0 + sigma**2) - 1.0
     # (J, rho) @ (rho, J): both operands are exactly 2-D, so this is the
     # plain matrix product, not a batch of vectors.
-    return jnp.eye(n_members, dtype=U.dtype) + (U * modifier) @ U.swapaxes(-1, -2)
+    return jnp.eye(n_samples, dtype=U.dtype) + (U * modifier) @ U.swapaxes(-1, -2)
 

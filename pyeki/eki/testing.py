@@ -37,7 +37,7 @@ Notes
 The behaviour these checks verify is specified by the "Ensemble Kalman
 Inversion contract" page of the documentation.
 
-Purity is the reason the harness exists. A policy holding iteration state
+Purity is the reason the harness exists. A policy holding step state
 silently breaks resumption, and that is a failure a test suite can catch in
 its own package's policies and cannot catch in a user's. Calling a policy
 twice on one evaluation and comparing is two lines.
@@ -228,11 +228,11 @@ def check_update(
         ensemble = jnp.asarray(rng.normal(size=(6, 3)))
     if predictions is None:
         predictions = jnp.asarray(rng.normal(size=(ensemble.shape[0], 4)))
-    n_obs = predictions.shape[-1]
+    v_dim = predictions.shape[-1]
     if noise_cov is None:
-        noise_cov = PSDDiagonal(jnp.full((n_obs,), 0.5))
+        noise_cov = PSDDiagonal(jnp.full((v_dim,), 0.5))
     if y is None:
-        y = jnp.asarray(rng.normal(size=(n_obs,)))
+        y = jnp.asarray(rng.normal(size=(v_dim,)))
     increment = jnp.asarray(increment, dtype=ensemble.dtype)
     beta = jnp.asarray(beta, dtype=ensemble.dtype)
     name = repr(update)

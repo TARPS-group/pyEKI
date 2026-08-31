@@ -153,7 +153,7 @@ class Scaled(LinOp):
         The operator to scale.
     c
         Scalar array (0-d). Held as an array so a traced value — a
-        tempering increment chosen inside a ``jit``-ed step — flows through
+        scalar chosen inside a ``jit``-ed computation — flows through
         without rebuilding the base operator.
     """
 

@@ -1,12 +1,12 @@
-"""One iteration, as its two phases, and the two loops over them.
+"""One step, as its two phases, and the two loops over them.
 
 =================== =========================================================
 function            does
 =================== =========================================================
 :func:`evaluate`    inflate, call the forward model, repair, summarize
-:func:`apply`       validate the increment, update, check finiteness, advance
-:func:`advance`     :func:`evaluate` then :func:`apply`, at a given increment
-:func:`iterate`     the driver as a generator, yielding after every iteration
+:func:`assimilate`  validate the increment, update, check finiteness, advance
+:func:`advance`     :func:`evaluate` then :func:`assimilate`, at an increment
+:func:`iterate`     the driver as a generator, yielding after every step
 :func:`run`         the driver as a function, returning an
                     :class:`~pyeki.eki.EKIResult`
 =================== =========================================================
@@ -15,7 +15,7 @@ The two phases are public because the forward evaluation is the resource a
 run is organized around, and separating them is what lets a caller spend it
 deliberately: one :class:`~pyeki.eki.Evaluation` serves any number of trial
 increments, so a backtracking or damped loop costs one forward evaluation per
-iteration plus one per rejection rather than two per trial.
+step plus one per rejection rather than two per trial.
 
 :func:`run` and :func:`iterate` are two wrappers around one private driver.
 Neither is implemented over the other: all three end-paths look alike from
@@ -31,7 +31,7 @@ Conventions shared by everything in the module:
   and the number of compilations is bounded independently of the number of
   steps.
 - **The forward model is any callable** ``(J, P) -> (J, N)``, never traced
-  and never inspected. It is called once per iteration with the whole ensemble,
+  and never inspected. It is called once per step with the whole ensemble,
   and receives a concrete ``jax.Array`` — never a tracer — so it may do
   anything Python can do. It may return any array-like; a real floating
   dtype is required, and one narrower than the run's is promoted with a
@@ -48,7 +48,7 @@ Notes
 The behaviour of this module is specified by the "Ensemble Kalman Inversion
 contract" page of the documentation, which is normative.
 
-One iteration synchronizes with the device a small fixed number of times —
+One step synchronizes with the device a small fixed number of times —
 the validity count, the increment, and the updated ensemble's finiteness — and
 those reads cannot be coalesced, since the increment decides whether to
 dispatch the update and the finiteness check reads a value the update
@@ -85,7 +85,7 @@ from .values import (
     OnFailure,
 )
 
-__all__ = ["advance", "apply", "evaluate", "iterate", "run"]
+__all__ = ["advance", "assimilate", "evaluate", "iterate", "run"]
 
 #: The layer's logger. No handler is installed; a caller who wants progress
 #: reports adds one.
@@ -194,18 +194,18 @@ def evaluate(
     mathematically the identity there but not bit-exactly so.
     """
     _check_state(state, "evaluate")
-    y, n_obs = _check_problem("evaluate", y, noise_cov)
+    y, v_dim = _check_problem("evaluate", y, noise_cov)
     _check_on_failure(on_failure)
     evaluation, _, promoted_from = _evaluate(
-        state, forward, y, noise_cov, inflation, on_failure, n_obs
+        state, forward, y, noise_cov, inflation, on_failure, v_dim
     )
     if promoted_from is not None:
         _warn_promoted(promoted_from, state.ensemble.dtype, stacklevel=3)
     return evaluation
 
 
-def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
-    """Steps 1-5 of an iteration, with the problem already validated.
+def _evaluate(state, forward, y, noise_cov, inflation, on_failure, v_dim):
+    """Operations 1-5 of a step, with the problem already validated.
 
     Returns the evaluation, the valid-member count as a Python ``int`` — which
     the driver needs for its warning and which would otherwise have to be read
@@ -229,7 +229,7 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
             )
 
     predictions, promoted_from = _check_predictions(
-        forward(members), state.n_members, n_obs, state.ensemble.dtype
+        forward(members), state.n_members, v_dim, state.ensemble.dtype
     )
     members, predictions, n_valid = _handle_failures(
         state, members, predictions, on_failure=on_failure
@@ -247,7 +247,7 @@ def _evaluate(state, forward, y, noise_cov, inflation, on_failure, n_obs):
     return evaluation, n_valid, promoted_from
 
 
-def apply(
+def assimilate(
     state: EKIState,
     evaluation: Evaluation,
     *,
@@ -306,7 +306,7 @@ def apply(
     ``y`` and ``noise_cov`` are passed again rather than carried on the
     evaluation, which holds no problem data — it is a record of an
     evaluation, not a bound problem. That is also what makes this the entry
-    point for anything varying the *data* between iterations, which the driver
+    point for anything varying the *data* between steps, which the driver
     deliberately fixes for a whole run.
 
     **The evaluation is checked against the state's position** — its ``step``
@@ -331,15 +331,15 @@ def apply(
     fused step would have spent :math:`J` model evaluations before rejecting
     an argument the caller got wrong.
     """
-    _check_state(state, "apply")
-    y, _ = _check_problem("apply", y, noise_cov)
-    dbeta = _check_increment("apply", increment)
+    _check_state(state, "assimilate")
+    y, _ = _check_problem("assimilate", y, noise_cov)
+    dbeta = _check_increment("assimilate", increment)
     _check_provenance(state, evaluation)
-    return _apply(state, evaluation, dbeta, y, noise_cov, update)
+    return _assimilate(state, evaluation, dbeta, y, noise_cov, update)
 
 
-def _apply(state, evaluation, dbeta, y, noise_cov, update):
-    """Steps 6-9 of an iteration, with the increment already validated."""
+def _assimilate(state, evaluation, dbeta, y, noise_cov, update):
+    """Operations 6-9 of a step, with the increment already validated."""
     key_next, _, key_update = _split_key(state.key)
     updated = jnp.asarray(
         update(
@@ -355,19 +355,19 @@ def _apply(state, evaluation, dbeta, y, noise_cov, update):
     )
     if updated.shape != state.ensemble.shape:
         raise ValueError(
-            f"apply: the update returned shape {updated.shape}, expected "
+            f"assimilate: the update returned shape {updated.shape}, expected "
             f"{state.ensemble.shape}"
         )
     if updated.dtype != state.ensemble.dtype:
         raise ValueError(
-            f"apply: the update returned dtype {updated.dtype}, expected "
+            f"assimilate: the update returned dtype {updated.dtype}, expected "
             f"{state.ensemble.dtype}. A float32 update quietly demotes a run's "
             f"precision, and every downstream check still passes at its own "
             f"tolerance."
         )
     if not bool(jnp.all(jnp.isfinite(updated))):
         raise EKIError(
-            f"apply: the update returned a non-finite ensemble at step "
+            f"assimilate: the update returned a non-finite ensemble at step "
             f"{state.step}, beta {float(state.beta):g}. Silent nan propagation "
             f"through a long run is the worst outcome available to this layer, "
             f"so it is raised here rather than carried forward.",
@@ -388,11 +388,11 @@ def advance(
     inflation=None,
     on_failure: OnFailure = "repair",
 ):
-    """One iteration at a known increment: :func:`evaluate` then :func:`apply`.
+    """One step at a known increment: :func:`evaluate` then :func:`assimilate`.
 
-    Exactly ``apply(state, evaluate(state, forward, y, noise_cov,
+    Exactly ``assimilate(state, evaluate(state, forward, y, noise_cov,
     inflation=..., on_failure=...), increment=increment, y=y,
-    noise_cov=noise_cov, update=...)``, provided because one iteration at a
+    noise_cov=noise_cov, update=...)``, provided because one step at a
     known increment is the common case.
 
     Parameters
@@ -420,7 +420,7 @@ def advance(
     Raises
     ------
     EKIError, ValueError, TypeError
-        As :func:`evaluate` and :func:`apply` do.
+        As :func:`evaluate` and :func:`assimilate` do.
 
     Notes
     -----
@@ -431,7 +431,7 @@ def advance(
     evaluation = evaluate(
         state, forward, y, noise_cov, inflation=inflation, on_failure=on_failure
     )
-    return apply(
+    return assimilate(
         state,
         evaluation,
         increment=increment,
@@ -459,18 +459,18 @@ def iterate(
     on_failure: OnFailure = "repair",
     max_steps: int = 1000,
 ):
-    """The driver as a generator: yields after every iteration.
+    """The driver as a generator: yields after every step.
 
-    Yields ``(EKIState, HistoryRecord, Evaluation)`` after each iteration,
-    including the terminal evaluation-only iteration, and **returns** the
+    Yields ``(EKIState, HistoryRecord, Evaluation)`` after each step,
+    including the terminal evaluation-only step, and **returns** the
     terminating status as its :class:`StopIteration` value.
 
     This is the extension point for anything that needs to *observe* or
     *interrupt* a run: per-step checkpointing, custom logging, a wall-clock
     budget, stopping on parameter stagnation, an early ``break``. Exceptions
     propagate; abandoning the generator is safe. Anything that needs to
-    *revisit* an iteration — backtracking, damping, trial increments — uses
-    :func:`evaluate` and :func:`apply` directly instead.
+    *revisit* a step — backtracking, damping, trial increments — uses
+    :func:`evaluate` and :func:`assimilate` directly instead.
 
     Parameters
     ----------
@@ -492,24 +492,24 @@ def iterate(
     on_failure
         ``"repair"`` or ``"raise"``. Keyword-only.
     max_steps
-        A safety bound on the iterations of **this call**, a positive
+        A safety bound on the steps of **this call**, a positive
         ``int``, default ``1000``. Keyword-only.
 
     Yields
     ------
     tuple
-        ``(state, record, evaluation)`` after each iteration.
+        ``(state, record, evaluation)`` after each step.
 
     Raises
     ------
     EKIError
         If ``max_steps`` is reached, or on any of the failure conditions
-        :func:`evaluate` and :func:`apply` raise. Every raise path carries
+        :func:`evaluate` and :func:`assimilate` raise. Every raise path carries
         ``state`` and ``history``.
     ValueError
         On any invalid argument, including a ``max_steps`` too small to
         accommodate the schedule's own floor-bound worst case. Raised on the
-        first iteration rather than at the call, since a generator's body
+        first step rather than at the call, since a generator's body
         does not run until it is first advanced.
     TypeError
         If ``state`` is not an :class:`~pyeki.eki.EKIState`, or ``noise_cov``
@@ -536,7 +536,7 @@ def iterate(
     they accumulated, :data:`~pyeki.eki.INTERRUPTED`, and the last yielded
     evaluation.
 
-    **``max_steps`` bounds the iterations of this call, not
+    **``max_steps`` bounds the steps of this call, not
     ``state.step``.** The distinction is invisible on a fresh run and
     decisive on a resumed one: bounding the cumulative index would make the
     catch-checkpoint-resume recovery a guaranteed no-op for the ``max_steps``
@@ -593,7 +593,7 @@ def run(
     on_failure
         ``"repair"`` or ``"raise"``. Keyword-only.
     max_steps
-        A safety bound on the iterations of this call, a positive ``int``,
+        A safety bound on the steps of this call, a positive ``int``,
         default ``1000``. Keyword-only.
 
     Returns
@@ -621,7 +621,7 @@ def run(
         Once per run in which any member ever failed. Under
         ``on_failure="repair"`` a run can otherwise complete, return a
         normal-looking result, and have been conditioning on a covariance
-        damped at every iteration.
+        damped at every step.
     UserWarning
         Once per run whose forward model returned predictions narrower than
         ``state.ensemble.dtype``, which are promoted to it.
@@ -631,7 +631,7 @@ def run(
     Running on a state returned by a previous run **continues** it: same
     schedule, same policies, and the tail of the run is bit-identical to an
     uninterrupted one. This is the sole mechanism for checkpointing, and it
-    is why policies may not hold iteration state.
+    is why policies may not hold step state.
 
     Chaining a *new* ladder onto a finished state is a different thing and is
     a silent no-op — use :meth:`EKIState.restart <pyeki.eki.EKIState.restart>`.
@@ -639,7 +639,7 @@ def run(
     There is no ``"max_steps"`` status, because exceeding ``max_steps``
     raises. The bound is a safety net against a schedule that can never be
     exhausted and a run with no stopping rule; a genuinely step-limited run
-    is a :class:`~pyeki.eki.FixedSchedule` with that many iterations, or a
+    is a :class:`~pyeki.eki.FixedSchedule` with that many steps, or a
     ``break`` in an :func:`iterate` loop.
     """
     driver = _drive(
@@ -703,7 +703,7 @@ def _drive(
 ):
     """The loop that knows why it stopped, as a generator returning the status."""
     _check_state(state, where)
-    y, n_obs = _check_problem(where, y, noise_cov)
+    y, v_dim = _check_problem(where, y, noise_cov)
     _check_on_failure(on_failure)
     _check_max_steps(where, max_steps)
     _check_schedule(where, schedule)
@@ -727,7 +727,7 @@ def _drive(
             )
         try:
             evaluation, n_valid, promoted_from = _evaluate(
-                state, forward, y, noise_cov, inflation, on_failure, n_obs
+                state, forward, y, noise_cov, inflation, on_failure, v_dim
             )
         except EKIError as failure:
             failure.history = tuple(records)
@@ -762,7 +762,7 @@ def _drive(
             break
 
         try:
-            state, record = _apply(
+            state, record = _assimilate(
                 state,
                 evaluation,
                 _check_increment(where, increment),
@@ -815,7 +815,7 @@ def _ladder_finished(schedule, step: int, beta) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# private: the array work of one iteration
+# private: the array work of one step
 # ---------------------------------------------------------------------------
 
 
@@ -958,11 +958,11 @@ def _check_problem(where: str, y, noise_cov):
     # UnsupportedOpError is constructed by the operator that lacks the
     # operation and propagated unmodified.
     noise_cov._require("whiten")
-    n_obs = noise_cov.shape[0]
+    v_dim = noise_cov.shape[0]
     y = jnp.asarray(y)
-    if y.ndim != 1 or y.shape[0] != n_obs:
+    if y.ndim != 1 or y.shape[0] != v_dim:
         raise ValueError(
-            f"{where}: expected y of shape ({n_obs},) to match {noise_cov!r}, "
+            f"{where}: expected y of shape ({v_dim},) to match {noise_cov!r}, "
             f"got shape {y.shape}"
         )
     if not bool(jnp.all(jnp.isfinite(y))):
@@ -971,10 +971,10 @@ def _check_problem(where: str, y, noise_cov):
             f"surfaces as a full-budget run of nan updates or as an "
             f"'increment not finite' error, neither of which names y."
         )
-    return y, n_obs
+    return y, v_dim
 
 
-def _check_predictions(predictions, n_members: int, n_obs: int, working_dtype):
+def _check_predictions(predictions, n_members: int, v_dim: int, working_dtype):
     """Validate the forward model's output: the one check that runs every step.
 
     Accepts anything ``jnp.asarray`` accepts, and returns the predictions in
@@ -983,10 +983,10 @@ def _check_predictions(predictions, n_members: int, n_obs: int, working_dtype):
     widens: a model returning a dtype wider than the run's is left alone.
     """
     predictions = jnp.asarray(predictions)
-    if predictions.shape != (n_members, n_obs):
+    if predictions.shape != (n_members, v_dim):
         raise ValueError(
             f"evaluate: the forward model returned shape {predictions.shape}, "
-            f"expected ({n_members}, {n_obs})"
+            f"expected ({n_members}, {v_dim})"
         )
     if not jnp.issubdtype(predictions.dtype, jnp.floating):
         raise ValueError(
@@ -1039,12 +1039,12 @@ def _check_provenance(state: EKIState, evaluation) -> None:
     """Require that the evaluation came from this state."""
     if not isinstance(evaluation, Evaluation):
         raise TypeError(
-            f"apply: evaluation must be an Evaluation, got "
+            f"assimilate: evaluation must be an Evaluation, got "
             f"{type(evaluation).__name__}"
         )
     if evaluation.step != state.step or not bool(evaluation.beta == state.beta):
         raise ValueError(
-            f"apply: the evaluation belongs to a different state — evaluation at "
+            f"assimilate: the evaluation belongs to a different state — evaluation at "
             f"step {evaluation.step}, beta {float(evaluation.beta):g}; state at "
             f"step {state.step}, beta {float(state.beta):g}. Pairing the two "
             f"would take the key split from one and the members from the other "
@@ -1073,7 +1073,7 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
     """Refuse a bound too small for the schedule's own floor-bound worst case.
 
     A schedule exposing ``beta_target`` and a floor needs at most
-    ``ceil((beta_target - beta) / min_increment)`` further iterations, and this
+    ``ceil((beta_target - beta) / min_increment)`` further steps, and this
     raises before the first forward evaluation when ``max_steps`` is below
     that. A schedule that does not expose a floor is not checked.
 
@@ -1088,14 +1088,14 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
         return
     try:
         remaining = float(beta_target) - float(beta)
-        worst_case = _iterations_needed(remaining, float(floor))
+        worst_case = _steps_needed(remaining, float(floor))
     except (TypeError, ValueError, ZeroDivisionError):
         return
     if worst_case > max_steps:
         raise ValueError(
             f"{where}: max_steps={max_steps} cannot accommodate {schedule!r}, "
             f"whose floor of {floor} against a remaining budget of {remaining:g} "
-            f"needs up to {worst_case} iterations. Raise max_steps to at least "
+            f"needs up to {worst_case} steps. Raise max_steps to at least "
             f"{worst_case}, or raise min_increment. Checked here so that a run "
             f"cannot spend its whole evaluation budget and then report an "
             f"EKIError on precisely the badly-conditioned problems the floor "
@@ -1103,10 +1103,10 @@ def _check_budget_against_bound(where: str, schedule, beta, max_steps: int) -> N
         )
 
 
-def _iterations_needed(remaining: float, floor: float) -> int:
+def _steps_needed(remaining: float, floor: float) -> int:
     """``ceil(remaining / floor)``, robust to the division's own round-off.
 
-    Computing it naively makes ``1e-9 / 1e-12`` report 1001 iterations rather
+    Computing it naively makes ``1e-9 / 1e-12`` report 1001 steps rather
     than 1000, because the quotient lands just above the integer. A quotient
     within a relative whisker of an integer is taken to be that integer.
     """

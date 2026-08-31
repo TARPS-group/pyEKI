@@ -41,7 +41,7 @@ Conventions shared by everything in the module:
   error at all. Implementations **should** also accept and ignore ``**_``,
   which is the layer's forwards-compatibility seam.
 - **Policies are pure and stateless.** A policy must be a pure function of
-  its arguments and its own frozen fields, and must not carry iteration
+  its arguments and its own frozen fields, and must not carry step
   state — which is what makes a run resumable from an
   :class:`~pyeki.eki.EKIState` alone, and why a schedule receives the step
   index instead of counting calls.
@@ -71,7 +71,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array, lax
 
-from ..gauss import EnsembleJoint, Gaussian
+from ..gauss import EmpiricalJoint, Gaussian
 from ..linalg import PSDLinOp, static_field, value_check
 from ..linalg.base import _broadcast_batch, _pytree_dataclass
 from .helpers import (
@@ -104,7 +104,7 @@ __all__ = [
 
 
 class EnsembleUpdate(Protocol):
-    """One iteration of the ladder: the move that an increment produces.
+    """One step of the ladder: the move that an increment produces.
 
     An implementation maps an ensemble, its predictions, the observation, the
     **base** noise covariance and a 0-d increment to a new ensemble. The two
@@ -113,8 +113,8 @@ class EnsembleUpdate(Protocol):
     Requirements on any implementation:
 
     - It receives both the increment and the absolute level, and the two mean
-      different things: ``increment`` is how far this iteration moves,
-      ``beta`` is where the iteration starts, and ``step`` is which iteration
+      different things: ``increment`` is how far this step moves,
+      ``beta`` is where the step starts, and ``step`` is which step
       it is. The shipped rules use only the increment.
     - It consumes the key whole and is a deterministic function of its
       arguments including the key. A deterministic rule ignores the key.
@@ -155,9 +155,9 @@ class EnsembleUpdate(Protocol):
 
 
 class Schedule(Protocol):
-    """One method and two declarative attributes: how far each iteration moves.
+    """One method and two declarative attributes: how far each step moves.
 
-    ``n_steps`` is the ladder's length in iterations, or ``None`` if it is not
+    ``n_steps`` is the ladder's length in steps, or ``None`` if it is not
     step-bounded; ``beta_target`` is the temperature budget, or ``None`` for
     an unbounded ladder. Both are read, never called, and must be constant
     for the life of the object — they are static metadata on a frozen policy,
@@ -198,7 +198,7 @@ class StoppingRule(Protocol):
     """Whether to stop, given the current evaluation.
 
     Returns a Python ``bool``, is pure, and — like a schedule — must not hold
-    iteration state. It is consulted before the increment is chosen, so a run
+    step state. It is consulted before the increment is chosen, so a run
     that already fits the data takes no further update.
 
     Notes
@@ -231,7 +231,7 @@ class Inflation(Protocol):
     coincide in the interior of a run and differ at its two ends: the cost of
     this choice is that the **initial** ensemble is inflated before it is
     ever evaluated. A caller who needs the pristine initial ensemble
-    evaluated drives the first iteration with ``inflation=None``.
+    evaluated drives the first step with ``inflation=None``.
 
     Applying inflation between the forward evaluation and the update would
     invalidate the predictions, and is forbidden.
@@ -258,7 +258,7 @@ class TransformUpdate:
     """The deterministic square-root update; ignores the key. **The default.**
 
     Delegates to
-    :meth:`EnsembleJoint.transform_update <pyeki.gauss.EnsembleJoint.transform_update>`
+    :meth:`EmpiricalJoint.transform_update <pyeki.gauss.EmpiricalJoint.transform_update>`
     with the tempered operator ``noise_cov / increment``. Holds no field.
 
     Notes
@@ -299,7 +299,7 @@ class PathwiseUpdate:
     """The stochastic perturbed-observation update; consumes the key.
 
     Delegates to
-    :meth:`EnsembleJoint.pathwise_update <pyeki.gauss.EnsembleJoint.pathwise_update>`
+    :meth:`EmpiricalJoint.pathwise_update <pyeki.gauss.EmpiricalJoint.pathwise_update>`
     with the tempered operator ``noise_cov / increment``. Holds no field.
 
     Notes
@@ -335,14 +335,14 @@ class PathwiseUpdate:
 
 @jax.jit
 def _transform_update(ensemble, predictions, y, noise_cov, increment) -> Array:
-    return EnsembleJoint(
+    return EmpiricalJoint(
         u_samples=ensemble, v_samples=predictions
     ).transform_update(y, noise_cov / increment)
 
 
 @jax.jit
 def _pathwise_update(key, ensemble, predictions, y, noise_cov, increment) -> Array:
-    return EnsembleJoint(
+    return EmpiricalJoint(
         u_samples=ensemble, v_samples=predictions
     ).pathwise_update(key, y, noise_cov / increment)
 
@@ -382,7 +382,7 @@ class FixedSchedule:
     state as finished — see :meth:`EKIState.restart
     <pyeki.eki.EKIState.restart>` before chaining one run onto another.
 
-    Its ``repr`` summarizes rather than enumerates, since a 200-iteration
+    Its ``repr`` summarizes rather than enumerates, since a 200-step
     optimization ladder would otherwise print 200 floats into every traceback
     and test id.
     """
@@ -417,7 +417,7 @@ class FixedSchedule:
 
     @classmethod
     def uniform(cls, n_steps: int) -> FixedSchedule:
-        """``T`` equal iterations of ``1 / T``: the sampling form's ladder.
+        """``T`` equal steps of ``1 / T``: the sampling form's ladder.
 
         Reaches :math:`\\beta = 1` to round-off, not exactly:
         :math:`T \\cdot (1/T)` is not exactly 1 in floating point.
@@ -426,7 +426,7 @@ class FixedSchedule:
         -----
         The layer's exactness claim therefore holds to round-off under this
         constructor rather than exactly. No correction is applied to the last
-        iteration; a caller who needs the sum to be exact passes increments
+        step; a caller who needs the sum to be exact passes increments
         that are exact in binary, such as powers of two.
         """
         n_steps = _positive_int("FixedSchedule.uniform", "n_steps", n_steps)
@@ -434,7 +434,7 @@ class FixedSchedule:
 
     @classmethod
     def constant(cls, increment: float, n_steps: int) -> FixedSchedule:
-        """``T`` equal iterations of ``increment``.
+        """``T`` equal steps of ``increment``.
 
         The optimization form's ladder when ``increment * n_steps > 1``, and
         a single Kalman update at ``constant(1.0, 1)``.
@@ -444,7 +444,7 @@ class FixedSchedule:
 
     @property
     def n_steps(self) -> int:
-        """The ladder's length in iterations."""
+        """The ladder's length in steps."""
         return len(self.increments)
 
     @property
@@ -458,7 +458,7 @@ class FixedSchedule:
         if not 0 <= step < len(self.increments):
             raise IndexError(
                 f"{self!r}.next_increment: step {step} is outside a ladder of "
-                f"{len(self.increments)} iterations. The driver checks exhaustion "
+                f"{len(self.increments)} steps. The driver checks exhaustion "
                 f"before evaluating, so this is reachable only by calling the "
                 f"schedule directly."
             )
@@ -497,8 +497,8 @@ class AdaptiveESSSchedule:
         The effective sample size sought, as a fraction of :math:`J`. Default
         ``0.5``; must lie in :math:`(0,\\ 1 - 10^{-6}]`.
     n_bisect
-        How many bisection iterations to run. Default ``50``; must be at
-        least 1. Each iteration halves the bracket, so the returned
+        How many bisection steps to run. Default ``50``; must be at
+        least 1. Each step halves the bracket, so the returned
         increment sits within :math:`2^{-n}` of the criterion — about
         :math:`10^{-9}` at 30, and float64 round-off at the default.
 
@@ -583,7 +583,7 @@ class AdaptiveMisfitSchedule:
 
     Where :class:`AdaptiveESSSchedule` asks whether the ensemble can still
     describe the next target, this asks how much data the noise at this
-    iteration can explain, and solves for the increment directly instead of
+    step can explain, and solves for the increment directly instead of
     bisecting.
 
     Parameters

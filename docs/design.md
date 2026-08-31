@@ -276,7 +276,7 @@ E_{\beta+\delta}[\Phi])$ — the $\log Z$ terms cancel — and cannot be evaluat
 at step $t$, since it depends on the next measure. It is therefore approximated
 in two regimes: dropping the unknown non-negative term gives the upper bound
 $\delta\,\overline{\Phi}$, accurate when the mean misfit falls substantially
-across the iteration; and a first-order expansion of $\overline{\Phi}$ in
+across the step; and a first-order expansion of $\overline{\Phi}$ in
 $\delta$ gives $\delta^2\sigma^2_\Phi$, accurate when it barely moves. Neither
 is valid throughout, so the divergence is approximated by the **smaller** of
 the two,

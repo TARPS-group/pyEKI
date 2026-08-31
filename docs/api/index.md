@@ -103,7 +103,7 @@ Joint Gaussian distributions and conditioning. See
 .. autoclass:: pyeki.gauss.Gaussian
    :members: n, batch_shape, sample, log_density
 
-.. autoclass:: pyeki.gauss.EnsembleJoint
+.. autoclass:: pyeki.gauss.EmpiricalJoint
    :members: n_members, u_dim, v_dim, batch_shape, u_mean, v_mean,
              u_anomalies, v_anomalies, pathwise_update, transform_update,
              condition
@@ -191,13 +191,13 @@ and {doc}`../eki-contract` for the full behavioural contract.
    :members: __call__
 ```
 
-### The driver, and one iteration
+### The driver, and one step
 
 ```{eval-rst}
 .. autofunction:: pyeki.eki.run
 .. autofunction:: pyeki.eki.iterate
 .. autofunction:: pyeki.eki.evaluate
-.. autofunction:: pyeki.eki.apply
+.. autofunction:: pyeki.eki.assimilate
 .. autofunction:: pyeki.eki.advance
 ```
 
