@@ -738,10 +738,9 @@ its scope:
   conditioning result is fed back in as the next call's input: a `nan` block
   is handed straight to whatever expensive computation produces the next
   :math:`v`, and a computation that returns finite nonsense for `nan` inputs
-  launders it beyond recovery. An operator's result goes back to the caller
-  who asked for it.
-  The asymmetry is deliberate, and is not an argument for adding output
-  checks to `pyeki.linalg`.
+  launders it beyond recovery. An operator's result goes back to the caller who
+  asked for it. The asymmetry is deliberate, and is not an argument for adding
+  output checks to `pyeki.linalg`.
 - **It is the only cheap detection of a singular `noise_cov`.** The three
   methods behave identically under it. Before this rule `condition` alone
   raised, because it happened to route its mean through a constructor — and
@@ -1080,13 +1079,13 @@ must verify at least:
    ({ref}`gauss-consumers`), `condition` and `transform_update` reproduce
    that joint's closed-form posterior moments.
 7. **Marginal formulas**: `sample` matches its pinned elementwise
-   definition; `log_density` matches the dense closed form at batch ranks
-   0, 1, and 2 and differentiates. `from_samples` reproduces the sample mean
-   and the $J-1$ covariance exactly against a dense reference, agrees with
+   definition; `log_density` matches the dense closed form at batch ranks 0, 1,
+   and 2 and differentiates. `from_samples` reproduces the sample mean and the
+   $J-1$ covariance exactly against a dense reference, agrees with
    `EmpiricalJoint`'s $u$-block moments from the same samples, holds a
    `PSDLowRank` of width $J$ that withholds `solve`, `whiten` and `logdet`,
-   gives identical samples exactly zero spread, and validates rank and
-   sample count.
+   gives identical samples exactly zero spread, and validates rank and sample
+   count.
 8. **Degeneracy**: zero prediction anomalies — every row of `v_samples`
    given the *same, exactly representable* value, since a collapsed
    block of arbitrary values leaves anomalies at $O(\varepsilon)$

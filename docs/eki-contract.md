@@ -217,11 +217,10 @@ $\beta_{t+1} = \beta_t + \Delta\beta_t$:
 
 Operation 3 is exact Gaussian conditioning of a Gaussian *fitted to* the
 ensemble. Two approximations are inherent to the step: the joint law of $(u,
-G(u))$ under
-$\pi_{\beta_t}$ is replaced by a Gaussian, and its moments are replaced by
-$J$-member empirical estimates. Both are exact when $G$ is affine and the
-ensemble's empirical moments equal $\pi_{\beta_t}$'s, which is what makes the
-exactness claim of {ref}`eki-honesty` reachable at all.
+G(u))$ under $\pi_{\beta_t}$ is replaced by a Gaussian, and its moments are
+replaced by $J$-member empirical estimates. Both are exact when $G$ is affine
+and the ensemble's empirical moments equal $\pi_{\beta_t}$'s, which is what
+makes the exactness claim of {ref}`eki-honesty` reachable at all.
 
 Those two are the *only* inherent ones, but they are not the only ones a
 configured run makes. The stochastic update adds Monte Carlo noise of order
@@ -733,8 +732,7 @@ order, before each call:
    finished ({ref}`eki-schedules`), end the run with status
    `"schedule_exhausted"`. This is checked *before* the forward model is
    evaluated, which is why exhaustion is separated from the increment: a fixed
-   ladder of $T$ steps must cost exactly $T$ ensemble evaluations,
-   not $T + 1$.
+   ladder of $T$ steps must cost exactly $T$ ensemble evaluations, not $T + 1$.
 2. **Safety bound.** If this call has already completed `max_steps`
    steps, raise `EKIError`. The message must name `max_steps`, the
    schedule, and whether a stopping rule was supplied, since an unbounded
@@ -762,14 +760,13 @@ order, before each call:
    This forces the internal factoring, so the contract states it rather than
    leaving it to be rediscovered. The layer has two private phases: *evaluate*
    (operations 1–5: split, inflate, call the model, repair, summarize) and
-   *assimilate*
-   (operations 6–9: validate the increment, update, check finiteness,
-   advance). Public `advance` is evaluate-then-assimilate with the increment
-   given; `iterate` is evaluate, then its own decisions, then assimilate with
-   the increment chosen. The forward model is therefore called **exactly once
-   per step** in both, which an implementation that had `iterate` call `step`
-   naively would violate by evaluating twice — the one cost the layer exists to
-   economize.
+   *assimilate* (operations 6–9: validate the increment, update, check
+   finiteness, advance). Public `advance` is evaluate-then-assimilate with the
+   increment given; `iterate` is evaluate, then its own decisions, then
+   assimilate with the increment chosen. The forward model is therefore called
+   **exactly once per step** in both, which an implementation that had
+   `iterate` call `step` naively would violate by evaluating twice — the one
+   cost the layer exists to economize.
 4. **Stopping rule.** If `stop is not None and stop(evaluation)`, end the run
    with status `"stopping_rule"`, emitting a terminal record
    ({ref}`eki-diagnostics`) and leaving the state unchanged.
@@ -1940,14 +1937,11 @@ discarded, that evaluation is recorded as a final `HistoryRecord` with
 `float(J)` — written by the driver rather than obtained from
 `effective_sample_size`, since `exp(log J)` is not `J` in floating point. It
 appears at most once, always last, and in exactly two cases: a stopping rule
-fired
-({ref}`eki-stopping`), or a schedule's `increment` returned `None`
+fired ({ref}`eki-stopping`), or a schedule's `increment` returned `None`
 ({ref}`eki-schedules`). A run ended by the schedule's attributes performs no
-such evaluation
-and emits no such record. A zero increment in a
-record therefore means "evaluated, then stopped"; this is the one zero
-increment the layer permits, and it is written by the driver, never returned
-by a schedule.
+such evaluation and emits no such record. A zero increment in a record
+therefore means "evaluated, then stopped"; this is the one zero increment the
+layer permits, and it is written by the driver, never returned by a schedule.
 
 **Stacking the history** is `result.stacked`: a single `HistoryRecord` whose
 `batch_shape` is `(T,)` and whose every field is `(T,)`-shaped — a family in
@@ -2505,11 +2499,11 @@ print their static fields, which are small and informative:
 `AdaptiveESSSchedule(beta_target=1.0, min_increment=0.001, max_increment=1.0,
 ess_fraction=0.5, n_bisect=50)`, `MultiplicativeInflation(anomaly_factor=1.02)`
 — with the one exception that a policy holding a *large* static field
-summarizes it instead
-(`FixedSchedule(n_steps=200, total=200.0)`, {ref}`eki-schedules`), since the
-general rule assumes those fields are small. `EKIResult` prints its status and
-counts: `EKIResult(status='schedule_exhausted', n_evaluations=17, beta=1)`.
-`repr` never raises.
+summarizes it instead (`FixedSchedule(n_steps=200, total=200.0)`,
+{ref}`eki-schedules`), since the general rule assumes those fields are small.
+`EKIResult` prints its status and counts:
+`EKIResult(status='schedule_exhausted', n_evaluations=17, beta=1)`. `repr`
+never raises.
 
 (eki-surface)=
 ## Public surface
@@ -2569,7 +2563,7 @@ asymmetry that gives `pyeki.linalg` a `check_operator` applies here.
 | -------- | ------ |
 | `check_schedule(schedule, evaluation)` | `n_steps` and `beta_target` are present, of the right types, and unchanged by reads; `next_increment` returns `None` or a scalar, finite, strictly positive value; **purity**, by calling twice on the same evaluation and comparing bit-exactly |
 | `check_update(update, key, **operands)` | the result is `(J, P)` with the incoming dtype; determinism given the key; the subspace property of {ref}`eki-subspace`, unless the rule declares it leaves the span; `jit`-safety with static shapes |
-| `check_inflation(inflation, key, ensemble)` | shape preservation; purity; that the mean is preserved, unless the rule declares otherwise |
+| `check_inflation(inflation, key, ensemble)` | shape and dtype preservation; purity; that the mean is preserved, unless the rule declares otherwise |
 | `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
 
 The two conditional checks read a declaration off the policy: an update
@@ -3006,10 +3000,9 @@ The *algorithms* that want trial evaluations — line search, backtracking on a
 rejected increment, damped Gauss–Newton-style iterative ensemble smoothers —
 are not excluded. They are written against the public `evaluate` and
 `assimilate`, which are exactly the propose-evaluate-accept-or-retry loop and
-are shown as one
-({ref}`eki-step`). The distinction is between the driver spending evaluations
-on a caller's behalf, which it never does, and a caller spending them
-deliberately, which it may.
+are shown as one ({ref}`eki-step`). The distinction is between the driver
+spending evaluations on a caller's behalf, which it never does, and a caller
+spending them deliberately, which it may.
 
 **Changing the data between steps.** `run` and `iterate` bind `(forward, y,
 noise_cov)` once, and a generator cannot be handed a new observation, so

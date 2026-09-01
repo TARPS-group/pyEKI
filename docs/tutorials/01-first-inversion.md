@@ -28,7 +28,8 @@ what EKI is, what tempering is, or that `pyeki.linalg` exists.
   `(J, N)`, not one member at a time.** A reader who writes a per-member
   function gets a shape error from inside JAX with no indication of the cause.
   Show the ensemble-shaped version, and show the `jax.vmap` one-liner for
-  wrapping a per-member model.
+  wrapping a per-member model. {doc}`../user-guide/writing-a-forward-model`
+  states the full obligation; link to it rather than restating it.
 - A prior: `Gaussian(mean=..., cov=PSDDiagonal(...))`. Introduce `PSDDiagonal`
   as "the diagonal covariance" with no discussion of the operator layer.
 - An observation error covariance, also `PSDDiagonal`.

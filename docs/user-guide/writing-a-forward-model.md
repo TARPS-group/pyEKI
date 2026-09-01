@@ -100,15 +100,14 @@ The dtype must be a real floating one; an integer or complex return is a
 run's — in practice `float32` — is promoted to the run's working dtype and
 warns once per run.
 
-pyEKI enables `float64` because ensemble
-anomalies are formed by subtraction and lose digits to cancellation, and a
-model that computes or reports in single precision has already lost them before
-the array arrives; promoting prevents a *second* loss in the conditioning
-arithmetic and nothing more. A `float32` return costs about `7e-5`
-relative error in the posterior mean where predictions have a mean-to-spread
-ratio of `1e4`, and promotion halves it. Return `float64` where you can. Where
-you cannot, the run is still legitimate and the warning is telling you the
-price.
+pyEKI enables `float64` because ensemble anomalies are formed by subtraction
+and lose digits to cancellation, and a model that computes or reports in single
+precision has already lost them before the array arrives; promoting prevents a
+*second* loss in the conditioning arithmetic and nothing more. A `float32`
+return costs about `7e-5` relative error in the posterior mean where
+predictions have a mean-to-spread ratio of `1e4`, and promotion halves it.
+Return `float64` where you can. Where you cannot, the run is still legitimate
+and the warning is telling you the price.
 
 ## Signalling failure
 

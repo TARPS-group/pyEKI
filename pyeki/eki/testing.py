@@ -286,8 +286,8 @@ def check_update(
 def check_inflation(inflation, key=None, ensemble=None, *, step: int = 0, beta=0.25):
     """Check an :class:`~pyeki.eki.Inflation` against its protocol.
 
-    Verifies shape preservation; purity, by calling twice on the same
-    arguments and comparing bit-exactly; and that the ensemble mean is
+    Verifies shape and dtype preservation; purity, by calling twice on the
+    same arguments and comparing bit-exactly; and that the ensemble mean is
     preserved, unless the rule declares ``changes_mean = True``.
 
     Parameters
@@ -319,6 +319,11 @@ def check_inflation(inflation, key=None, ensemble=None, *, step: int = 0, beta=0
     assert inflated.shape == ensemble.shape, (
         f"{name}: returned shape {inflated.shape}, expected {ensemble.shape}. "
         f"An Inflation is shape preserving."
+    )
+    assert inflated.dtype == ensemble.dtype, (
+        f"{name}: returned dtype {inflated.dtype}, expected {ensemble.dtype}. "
+        f"These members are what the forward model is called on, so a driver "
+        f"rejects a narrower or non-floating one."
     )
     _identical(
         inflated,

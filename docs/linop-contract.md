@@ -935,8 +935,9 @@ right-hand side) and the batch convention. The reasoning:
   contract axis `-2`, treat leading axes as batches of *matrices*. So
   there is exactly one consistent array semantics available for `op @ X`,
   and it is `matmat`.
-- That semantics collides with this layer's canonical data layout. A batched caller supplies `(J, n)` row-batches, and
-  applying an operator to one is a *batch-of-vectors* operation. Given
+- That semantics collides with this layer's canonical data layout. A batched
+  caller supplies `(J, n)` row-batches, and applying an operator to one is a
+  *batch-of-vectors* operation. Given
   `R` of side $n$, the natural-looking `R @ batch` is a confusing
   shape error when $J \ne n$ — and when $J = n$ it is shape-valid,
   contracts the wrong axis, and returns a wrong answer silently. The

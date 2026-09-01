@@ -62,6 +62,11 @@ Tutorials 1 to 3. Tutorial 4 is helpful but not required.
 `EKIResult.min_n_valid`, `HistoryRecord.n_valid`,
 `pyeki.eki.repair_failed_members`.
 
+The wrapper obligation itself — catch your own exceptions, return a non-finite
+row — is specified in {doc}`../user-guide/writing-a-forward-model`, whose
+worked example is an external executable that does exactly that. This page
+should exercise it, not restate it.
+
 ## Notes for the writer
 
 The user guide's "Failed members", "Driving the loop yourself" and

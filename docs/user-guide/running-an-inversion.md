@@ -354,8 +354,8 @@ a whole run.
 
 `run` on a state returned by a previous run **continues** it, and the tail is
 bit-identical to an uninterrupted run. That is the sole checkpointing
-mechanism, and it is why policies may not hold state across steps: a schedule that
-counted its own calls would be unresumable. `EKIState` is a pytree of arrays
+mechanism, and it is why policies may not hold state across steps: a schedule
+that counted its own calls would be unresumable. `EKIState` is a pytree of arrays
 and one small static, so serializing it is your choice of format.
 
 `EKIError` carries the run, on every raise path:
