@@ -2,7 +2,7 @@
 
 `pyeki.eki` is the layer that turns Gaussian conditioning into a *run*: an
 initial ensemble, a ladder of intermediate targets, one ensemble update per
-rung, and a record of what happened.
+step, and a record of what happened.
 
 This page is about *when and why* to reach for each piece. The
 {doc}`../eki-contract` reference page specifies exactly *what* each one does,
@@ -31,9 +31,15 @@ result.beta           # 1.0 — the ladder finished
 ```
 
 `forward` is any callable taking a `(J, P)` array of members and returning a
-`(J, N)` array of predictions. That is the whole forward-model interface: pyEKI
-ships no models and defines no base class, and the callable may be `jit`-ed,
-may fan out over processes, or may block on a job scheduler.
+`(J, N)` array of predictions: pyEKI ships no models and defines no base class,
+and the callable may be `jit`-ed, may fan out over processes, or may block on a
+job scheduler. It is called **once per step with the whole ensemble**,
+never one member at a time.
+
+Shapes are not quite the whole interface — a model that can fail also owes the
+run a failure signal, described under [Failed members](#failed-members) below.
+{doc}`writing-a-forward-model` states the complete obligation in one place, and
+is the page to read before wrapping an external code.
 
 ## Three choices, and the same driver
 
@@ -86,7 +92,7 @@ same observation with the noise covariance divided by that increment. So a
 step is
 
 ```python
-EnsembleJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov / dbeta)
+EmpiricalJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov / dbeta)
 ```
 
 and nothing in `pyeki.gauss` had to change to serve tempering.
@@ -102,8 +108,8 @@ factor growing with the ladder's length.
 
 | schedule | ladder | reach for it when |
 | --- | --- | --- |
-| `FixedSchedule.uniform(T)` | `T` rungs of `1/T`, to $\beta = 1$ | you must know the evaluation budget in advance |
-| `FixedSchedule.constant(c, T)` | `T` rungs of `c` | the optimization form, or `constant(1.0, 1)` for a single Kalman update |
+| `FixedSchedule.uniform(T)` | `T` steps of `1/T`, to $\beta = 1$ | you must know the evaluation budget in advance |
+| `FixedSchedule.constant(c, T)` | `T` steps of `c` | the optimization form, or `constant(1.0, 1)` for a single Kalman update |
 | `AdaptiveESSSchedule()` | adaptive, budget 1 | the posterior ensemble is the deliverable |
 | `AdaptiveMisfitSchedule()` | adaptive, budget 1 | the *fit* is the deliverable, or evaluations are scarce |
 
@@ -112,8 +118,8 @@ move before this ensemble stops describing it? — and measure it differently.
 `AdaptiveESSSchedule` keeps the effective sample size of the tempering weights
 above a fraction of $J$, so each intermediate target stays representable by the
 ensemble that must describe it. `AdaptiveMisfitSchedule` instead absorbs as
-much data per rung as the noise at that rung can explain, calibrated to the
-observation dimension rather than to the ensemble size.
+much data per step as the noise at that step can explain, calibrated
+to the observation dimension rather than to the ensemble size.
 
 They do not agree, and they are not variants of one idea: the misfit schedule
 takes **far longer steps**, driving the effective sample size to within a
@@ -129,10 +135,10 @@ adaptivity is free in the resource that matters.
 A budgeted adaptive schedule cannot overshoot its budget: the increment is
 clamped by the remaining budget last, after the floor and the ceiling. At the
 shipped defaults — `beta_target=1.0`, `min_increment=1e-3` — the worst case is
-1000 rungs, which is exactly `run`'s default `max_steps`. Lowering the floor or
-*raising* the budget breaks that relation, and the driver checks the arithmetic
-at entry and raises `ValueError` before spending an evaluation rather than
-letting you discover it a thousand model calls later.
+1000 steps, which is exactly `run`'s default `max_steps`. Lowering the
+floor or *raising* the budget breaks that relation, and the driver checks the
+arithmetic at entry and raises `ValueError` before spending an evaluation
+rather than letting you discover it a thousand model calls later.
 :::
 
 ## Choosing an update
@@ -159,15 +165,18 @@ of a run is available.
 result.status              # "schedule_exhausted" or "stopping_rule" from run
 result.budget_complete     # did the ladder finish?
 result.stop_fired          # did the stopping rule fire?
-result.n_steps             # records; n_evaluations is the same number
+result.n_evaluations       # forward calls: one per record
+result.n_completed_steps   # steps taken: times the ensemble moved
 result.min_n_valid         # the worst step's valid-member count
 result.stacked             # the history, every field (T,)-shaped
 result.last_evaluation     # the final forward evaluation
 ```
 
-`n_steps` and `n_evaluations` are the same number — one record per forward
-evaluation. On a stopping-rule exit the last record is the terminal one,
-whose update was discarded, so neither counts *rungs* there.
+`n_completed_steps` equals `n_evaluations`, or one less: a run that stops
+because a stopping rule fired, or because a schedule returned `None`, needed an
+evaluation to reach that decision and then discarded the update. Your cost in
+model calls is `n_evaluations`, and in member evaluations
+`n_evaluations * n_members`.
 
 `stacked` is the whole history as one record, which is what you plot:
 
@@ -244,9 +253,10 @@ failure fraction.
 
 Failures are surfaced three ways, because any one of them is easy to miss:
 every record carries `n_valid`, the driver logs at `WARNING`, and `run` issues
-one `warnings.warn` per run in which any member ever failed. `on_failure="raise"`
-turns any failure into an `EKIError` instead; fewer than two valid members
-raises under either setting, since a single member has no anomalies.
+one `warnings.warn` per run in which any member ever failed.
+`on_failure="raise"` turns any failure into an `EKIError` instead; fewer than
+two valid members raises under either setting, since a single member has no
+anomalies.
 
 What the signal *cannot* see is finite nonsense — a solver returning zeros, its
 initial condition, or a sentinel such as `-9999`. A fill value is the dangerous
@@ -254,6 +264,8 @@ case: it produces an enormous misfit, which an adaptive schedule reads as
 genuine ensemble disagreement and answers by shrinking the increment, so the
 run stalls on a broken member instead of flagging it. Map those to non-finite
 rows in your own wrapper, where the information exists.
+{doc}`writing-a-forward-model` works through a wrapper that does this for an
+external executable.
 
 ## Inflation
 
@@ -290,10 +302,10 @@ external formula's definition before transcribing it.
 
 ## Driving the loop yourself
 
-`iterate` is the same run as a generator, yielding
-`(state, record, evaluation)` after every rung. It is the extension point for
-anything that needs to *observe* or *interrupt*: per-step checkpointing,
-custom logging, a wall-clock budget, an early `break`.
+`iterate` is the same run as a generator, yielding `(state, record,
+evaluation)` after every step. It is the extension point for anything that
+needs to *observe* or *interrupt*: per-step checkpointing, custom logging, a
+wall-clock budget, an early `break`.
 
 ```python
 from pyeki.eki import INTERRUPTED, EKIResult, iterate
@@ -309,19 +321,19 @@ result = EKIResult(state=state, history=tuple(records),
                    status=INTERRUPTED, last_evaluation=evaluation)
 ```
 
-Anything that needs to *revisit* a rung — backtracking, damping, trial
+Anything that needs to *revisit* a step — backtracking, damping, trial
 increments — uses the two phases directly instead. `evaluate` costs the forward
-evaluation and moves nothing; `apply` moves the state by a given increment,
+evaluation and moves nothing; `assimilate` moves the state by a given increment,
 using an evaluation you already have. One evaluation therefore serves any
 number of trial increments:
 
 ```python
-from pyeki.eki import apply, evaluate
+from pyeki.eki import assimilate, evaluate
 
 s, delta = state, 1.0
 current = evaluate(s, forward, y, noise_cov)
 while not done(current):
-    trial, record = apply(s, current, increment=delta, y=y, noise_cov=noise_cov)
+    trial, record = assimilate(s, current, increment=delta, y=y, noise_cov=noise_cov)
     probe = evaluate(trial, forward, y, noise_cov)
     if probe.centre_misfit < current.centre_misfit:
         s, current, delta = trial, probe, delta * 1.5   # accept, lengthen
@@ -329,12 +341,12 @@ while not done(current):
         delta = delta / 2                               # reject, reuse `current`
 ```
 
-The accepted branch reuses `probe` as the next rung's evaluation, so this costs
-one forward evaluation per rung plus one per rejection — which is what
-backtracking costs in any implementation. A loop written against `advance`
+The accepted branch reuses `probe` as the next step's evaluation, so this
+costs one forward evaluation per step plus one per rejection — which is
+what backtracking costs in any implementation. A loop written against `advance`
 alone would re-evaluate the current state on every trial, doubling that.
 
-The same pair is how you vary the *data* between rungs — a subsampled or
+The same pair is how you vary the *data* between steps — a subsampled or
 randomized observation vector — which `run` and `iterate` deliberately fix for
 a whole run.
 
@@ -342,8 +354,8 @@ a whole run.
 
 `run` on a state returned by a previous run **continues** it, and the tail is
 bit-identical to an uninterrupted run. That is the sole checkpointing
-mechanism, and it is why policies may not hold iteration state: a schedule that
-counted its own calls would be unresumable. `EKIState` is a pytree of arrays
+mechanism, and it is why policies may not hold state across steps: a schedule
+that counted its own calls would be unresumable. `EKIState` is a pytree of arrays
 and one small static, so serializing it is your choice of format.
 
 `EKIError` carries the run, on every raise path:
@@ -361,7 +373,7 @@ except EKIError as exc:
 There is no `"max_steps"` status, because exceeding `max_steps` **raises**: a
 sampling run that silently returned an ensemble at $\beta = 0.7$ labelled as a
 posterior is the failure the two termination booleans exist to expose.
-`max_steps` bounds the iterations of *this call*, not `state.step`, so a
+`max_steps` bounds the steps of *this call*, not `state.step`, so a
 resumed run gets the allowance you asked for.
 
 ## Progress reporting
@@ -388,7 +400,7 @@ deliberately open to extension at the algorithm level.
 Two rules bind every policy. Everything after the key is **keyword-only**,
 because an update's `ensemble` and `predictions` have the same shape whenever
 $P = N$ and a positional protocol would let them be transposed with no error at
-all. And a policy must be **pure**: no iteration state, no counters, which is
+all. And a policy must be **pure**: no state across steps, no counters, which is
 what keeps a run resumable.
 
 `pyeki.eki.testing` is the harness for one, and purity is the reason it exists:

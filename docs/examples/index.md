@@ -27,7 +27,7 @@ page for the decisions that must be made first.
 
 `02_nonlinear.ipynb` — **A nonlinear model, and what the ladder buys.**
 : A mildly nonlinear model where a single unit step and an adaptive ladder give
-  visibly different answers. Show the ensemble at each rung, the misfit
+  visibly different answers. Show the ensemble at each step, the misfit
   trajectory, and the ESS. Make the point that exactness is claimed for the
   affine-Gaussian case only, and that this is an approximation with no
   consistency guarantee.

@@ -34,6 +34,42 @@ Out of scope, deliberately and permanently:
   EKI needs structured operators. Add a structure when EKI needs it, not
   because it would be nice to have.
 
+## Layer boundaries and vocabulary
+
+The four layers are a hierarchy, and **vocabulary flows downward only**. A
+layer may name a layer above it to justify its own scope; it may not borrow
+that layer's concepts to define its own behaviour.
+
+| layer | speaks of | must not speak of |
+| ----- | --------- | ----------------- |
+| `pyeki.linalg` | operators, batches, rows, factors, whiteners | Gaussians, conditioning, priors, posteriors, samples, ensembles, members, steps |
+| `pyeki.gauss` | Gaussians, conditioning, samples, the `u` and `v` blocks | ensembles, members, steps, tempering, forward models, EKI |
+| `pyeki.eki` | runs, steps, ensembles, members, tempering, forward models | — |
+
+The one permitted upward reference is **naming a consumer to justify scope**:
+"a square variant will be added when an EKI consumer needs `solve`" is fine,
+because this package scopes the lower layers by what EKI needs. Using the
+consumer's *time or domain vocabulary* to define lower-layer semantics is not:
+write "a scale that may itself be traced", never "the per-step noise
+covariance". A lower layer must read correctly to someone who has never heard
+of EKI.
+
+The boundary is crossed in exactly one place, where `pyeki.eki` builds an
+`EmpiricalJoint` from its ensemble: members go in, samples come out.
+
+**Names for sizes.** `n_<plural noun>` counts things — `n_members` (EKI),
+`n_samples` (gauss), `n_valid`, `n_steps`, `n_evaluations`, `n_in`/`n_out`
+(linalg). `<block>_dim` is the dimension of a named vector block — `u_dim`,
+`v_dim`. There is exactly one name per quantity: $N$ is `v_dim`, never also
+`n_obs`.
+
+**Names for the parts of an EKI run** are normative and specified in
+`docs/eki-contract.md` under *Terminology*: a **run** contains **steps**, each
+step has two **phases** (`evaluate` and `assimilate`) made of numbered
+**operations**, and each step is preceded by one **evaluation** of the forward
+model. "Rung" and "iteration" as a countable noun are retired; do not
+reintroduce them.
+
 ## Package management
 
 `uv`. Use `uv sync` and `uv sync --group dev`; never `pip install` into the

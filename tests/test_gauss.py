@@ -27,7 +27,7 @@ import pytest
 from jax import Array
 
 import pyeki  # noqa: F401  -- enables x64 before any array exists
-from pyeki.gauss import EnsembleJoint, Gaussian, gain_weights, sqrt_transform
+from pyeki.gauss import EmpiricalJoint, Gaussian, gain_weights, sqrt_transform
 from pyeki.linalg import (
     Dense,
     DensePSD,
@@ -416,7 +416,7 @@ def test_2_weights_are_invariant_to_the_choice_of_whitener():
     ]
     np.testing.assert_allclose(weights[0], weights[1], rtol=0, atol=1e4 * EPS)
 
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     np.testing.assert_allclose(
         joint.transform_update(jnp.asarray(y), plain),
         joint.transform_update(jnp.asarray(y), rotated),
@@ -517,7 +517,7 @@ def test_4_posterior_moments_match_the_dense_posterior(J, P, N):
     satisfy the elementwise identity u_j' = m_post + sqrt(J-1) F_j."""
     U, V, R, y = _problem(J, P, N)
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, C_post = _dense_posterior(U, V, R, y)
     scale = max(np.abs(m_post).max(), np.abs(C_post).max())
 
@@ -548,7 +548,7 @@ def test_4_posterior_covariance_rank_is_bounded_by_the_ensemble():
     """rank(C_post) <= J - 1, so the posterior is singular in the usual regime."""
     J, P, N = 5, 8, 6
     U, V, R, y = _problem(J, P, N)
-    posterior = EnsembleJoint(
+    posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
     ).condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
     singular = np.linalg.svd(np.asarray(posterior.cov.to_dense()), compute_uv=False)
@@ -566,11 +566,8 @@ def test_5_pathwise_update_matches_the_dense_perturbed_observation_update(J, P, 
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
     key = jax.random.key(4)
 
-    got = np.asarray(
-        EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)).pathwise_update(
-            key, jnp.asarray(y), noise_cov
-        )
-    )
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    got = np.asarray(joint.pathwise_update(key, jnp.asarray(y), noise_cov))
 
     eps = np.asarray(jax.random.normal(key, (J, N)))
     W = _recovered_whitener(noise_cov, N)
@@ -623,7 +620,7 @@ def test_6_exact_moment_ensemble_reaches_the_analytic_posterior():
     )
     scale = max(np.abs(m_post).max(), np.abs(C_post).max())
 
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
 
     posterior = joint.condition(jnp.asarray(y), noise_cov)
@@ -681,13 +678,13 @@ def test_7_from_samples_holds_a_low_rank_factor_and_never_forms_the_matrix():
 
 
 def test_7_from_samples_agrees_with_the_joint_it_is_the_one_block_case_of():
-    """Its moments equal EnsembleJoint's u-block moments, from the same members."""
+    """Its moments equal EmpiricalJoint's u-block moments, from the same members."""
     J, P, N = 7, 4, 3
     u = jnp.asarray(RNG.normal(size=(J, P)))
     v = jnp.asarray(RNG.normal(size=(J, N)))
 
     fit = Gaussian.from_samples(u)
-    joint = EnsembleJoint(u_samples=u, v_samples=v)
+    joint = EmpiricalJoint(u_samples=u, v_samples=v)
 
     np.testing.assert_array_equal(fit.mean, joint.u_mean)
     want = np.asarray(joint.u_anomalies).T @ np.asarray(joint.u_anomalies) / (J - 1)
@@ -794,7 +791,7 @@ def test_8_zero_prediction_anomalies_make_both_updates_the_identity(J, P, N):
     V = np.tile(np.full(N, 0.5), (J, 1))  # 0.5 is exact in binary
     noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
     y = jnp.asarray(RNG.normal(size=N))
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
 
     pathwise = joint.pathwise_update(jax.random.key(0), y, noise_cov)
     np.testing.assert_array_equal(pathwise, jnp.asarray(U))
@@ -835,7 +832,7 @@ def test_8_primitives_are_finite_on_an_exactly_collapsed_operand():
 def test_9_noise_covariance_without_whiten_raises_from_the_conditioning_methods():
     """PSDLowRank is the shipped PSDLinOp that disclaims whiten."""
     J, P, N = 5, 3, 4
-    joint = EnsembleJoint(
+    joint = EmpiricalJoint(
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
@@ -880,7 +877,7 @@ def test_9_posterior_log_density_raises_at_any_ensemble_size(J, P):
     choice withholds whiten at every width."""
     N = 5
     U, V, R, y = _problem(J, P, N)
-    posterior = EnsembleJoint(
+    posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
     ).condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
     assert posterior.cov.supports("factor")
@@ -909,22 +906,22 @@ def test_10_gaussian_construction_validation():
         Gaussian(jnp.zeros(0), cov)
 
 
-def test_10_ensemble_joint_construction_validation():
+def test_10_empirical_joint_construction_validation():
     with pytest.raises(ValueError, match="rank 2"):
-        EnsembleJoint(u_samples=jnp.zeros(6), v_samples=jnp.zeros((3, 2)))
+        EmpiricalJoint(u_samples=jnp.zeros(6), v_samples=jnp.zeros((3, 2)))
     with pytest.raises(ValueError, match="rank 2"):
-        EnsembleJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((3, 2, 1)))
-    with pytest.raises(ValueError, match="same number of members"):
-        EnsembleJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((4, 2)))
-    with pytest.raises(ValueError, match="at least 2 members"):
-        EnsembleJoint(u_samples=jnp.zeros((1, 2)), v_samples=jnp.zeros((1, 2)))
+        EmpiricalJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((3, 2, 1)))
+    with pytest.raises(ValueError, match="same number of samples"):
+        EmpiricalJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((4, 2)))
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        EmpiricalJoint(u_samples=jnp.zeros((1, 2)), v_samples=jnp.zeros((1, 2)))
     with pytest.raises(ValueError, match="core sizes must be positive"):
-        EnsembleJoint(u_samples=jnp.zeros((3, 0)), v_samples=jnp.zeros((3, 2)))
+        EmpiricalJoint(u_samples=jnp.zeros((3, 0)), v_samples=jnp.zeros((3, 2)))
 
 
 def test_10_conditioning_call_validation():
     J, P, N = 5, 3, 4
-    joint = EnsembleJoint(
+    joint = EmpiricalJoint(
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
@@ -992,14 +989,14 @@ def test_10_value_checks_are_debug_only():
 
     # off by default: no exception, just a nan-bearing object
     Gaussian(jnp.asarray([0.0, jnp.nan, 0.0]), cov)
-    EnsembleJoint(**joint_args)
+    EmpiricalJoint(**joint_args)
     gain_weights(jnp.asarray([[jnp.nan, 0.0]]), jnp.zeros(2))
 
     with debug_checks(True):
         with pytest.raises(ValueError, match="mean must be finite"):
             Gaussian(jnp.asarray([0.0, jnp.nan, 0.0]), cov)
         with pytest.raises(ValueError, match="v_samples must be finite"):
-            EnsembleJoint(**joint_args)
+            EmpiricalJoint(**joint_args)
         with pytest.raises(ValueError, match="s must be finite"):
             gain_weights(jnp.asarray([[jnp.nan, 0.0]]), jnp.zeros(2))
         with pytest.raises(ValueError, match="b must be finite"):
@@ -1007,7 +1004,7 @@ def test_10_value_checks_are_debug_only():
         with pytest.raises(ValueError, match="s must be finite"):
             sqrt_transform(jnp.asarray([[jnp.nan, 0.0]]))
 
-        good = EnsembleJoint(
+        good = EmpiricalJoint(
             u_samples=jnp.asarray(RNG.normal(size=(3, 2))),
         v_samples=jnp.asarray(RNG.normal(size=(3, 2))),
         )
@@ -1023,7 +1020,7 @@ def _reference_problem():
     J, P, N = 6, 3, 4
     U, V, R, y = _problem(J, P, N)
     return (
-        EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)),
+        EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)),
         DensePSD.from_matrix(jnp.asarray(R)),
         jnp.asarray(y),
     )
@@ -1081,10 +1078,10 @@ def test_11_constructing_a_joint_inside_vmap_round_trips():
     """The vmap exit boundary rebuilds a family, bypassing the constructor."""
     U = jnp.asarray(RNG.normal(size=(5, 6, 3)))
     V = jnp.asarray(RNG.normal(size=(5, 6, 4)))
-    family = jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))(U, V)
-    assert type(family) is EnsembleJoint
+    family = jax.vmap(lambda u, v: EmpiricalJoint(u_samples=u, v_samples=v))(U, V)
+    assert type(family) is EmpiricalJoint
     assert family.batch_shape == (5,)
-    assert (family.n_members, family.u_dim, family.v_dim) == (6, 3, 4)
+    assert (family.n_samples, family.u_dim, family.v_dim) == (6, 3, 4)
 
 
 def test_11_a_vmapped_family_agrees_with_a_python_loop():
@@ -1095,7 +1092,7 @@ def test_11_a_vmapped_family_agrees_with_a_python_loop():
     noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
 
     def update(u, v, y):
-        return EnsembleJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov)
+        return EmpiricalJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov)
 
     batched = jax.vmap(update)(jnp.asarray(U), jnp.asarray(V), jnp.asarray(ys))
     looped = jnp.stack(
@@ -1153,8 +1150,8 @@ def test_12_repr_names_static_sizes_and_no_array_data():
     gaussian = Gaussian(jnp.zeros(12), DensePSD.from_matrix(jnp.asarray(_psd(12))))
     assert repr(gaussian) == "Gaussian(n=12)"
 
-    joint = EnsembleJoint(u_samples=jnp.zeros((100, 12)), v_samples=jnp.zeros((100, 40)))
-    assert repr(joint) == "EnsembleJoint(n_members=100, u_dim=12, v_dim=40)"
+    joint = EmpiricalJoint(u_samples=jnp.zeros((100, 12)), v_samples=jnp.zeros((100, 40)))
+    assert repr(joint) == "EmpiricalJoint(n_samples=100, u_dim=12, v_dim=40)"
 
     for text in (repr(gaussian), repr(joint)):
         assert "0." not in text and "Array" not in text
@@ -1162,10 +1159,10 @@ def test_12_repr_names_static_sizes_and_no_array_data():
 
 def test_12_repr_never_raises_on_unreadable_leaves():
     treedef = jax.tree_util.tree_structure(
-        EnsembleJoint(u_samples=jnp.zeros((2, 2)), v_samples=jnp.zeros((2, 2)))
+        EmpiricalJoint(u_samples=jnp.zeros((2, 2)), v_samples=jnp.zeros((2, 2)))
     )
     broken = jax.tree_util.tree_unflatten(treedef, [object(), object()])
-    assert repr(broken) == "<EnsembleJoint (unprintable leaves)>"
+    assert repr(broken) == "<EmpiricalJoint (unprintable leaves)>"
 
 
 def test_12_the_pinned_prng_draws_are_snapshotted():
@@ -1228,13 +1225,13 @@ def test_13_gaussian_family_is_legible_and_inert():
         family.log_density(jnp.zeros(12))
 
 
-def test_13_ensemble_joint_family_is_legible_and_inert():
+def test_13_empirical_joint_family_is_legible_and_inert():
     joint, noise_cov, y = _reference_problem()
     family = _stacked(joint)
     assert family.batch_shape == (8,)
-    assert (family.n_members, family.u_dim, family.v_dim) == (6, 3, 4)
+    assert (family.n_samples, family.u_dim, family.v_dim) == (6, 3, 4)
     assert repr(family) == (
-        "vmapped(EnsembleJoint(n_members=6, u_dim=3, v_dim=4), batch=(8,))"
+        "vmapped(EmpiricalJoint(n_samples=6, u_dim=3, v_dim=4), batch=(8,))"
     )
 
     with pytest.raises(ValueError, match="vmapped family"):
@@ -1268,7 +1265,7 @@ def test_13_a_family_noise_covariance_is_rejected_at_the_call():
 
 def test_13_inconsistently_stacked_leaves_are_diagnosed_at_batch_shape():
     treedef = jax.tree_util.tree_structure(
-        EnsembleJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((3, 4)))
+        EmpiricalJoint(u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((3, 4)))
     )
     mismatched = jax.tree_util.tree_unflatten(
         treedef, [jnp.zeros((2, 3, 2)), jnp.zeros((5, 3, 4))]
@@ -1381,7 +1378,7 @@ def test_regression_mixing_perturbation_representations_corrupts_the_update():
     U, V, R, y = _problem(J, P, N)
     Q, _ = np.linalg.qr(RNG.normal(size=(N, N)))
     noise_cov = RotatedWhitenPSD.from_matrix(R, Q)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     key = jax.random.key(6)
 
     whitened_route = np.asarray(joint.pathwise_update(key, jnp.asarray(y), noise_cov))
@@ -1417,7 +1414,7 @@ def test_regression_uncentered_transform_shifts_the_ensemble_mean():
     U, V, R, y = _problem(J, P, N)
     V = V + 20.0  # a large mean makes the uncentered error unmistakable
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, _ = _dense_posterior(U, V, R, y)
 
     # the layer centers, so its transform fixes the ones vector and the
@@ -1487,7 +1484,7 @@ def test_regression_singular_noise_covariance_yields_nan_without_raising():
     """
     J, P, N = 5, 3, 4
     U, V, _, y = _problem(J, P, N)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     diagonal = jnp.asarray([1.0, 0.0, 2.0, 3.0])  # a zero variance
     singular = PSDDiagonal(diagonal)
 
@@ -1522,7 +1519,7 @@ def test_regression_all_three_methods_report_a_nan_result_in_debug_mode():
     """
     J, P, N = 5, 3, 4
     U, V, _, y = _problem(J, P, N)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     singular = PSDDiagonal(jnp.asarray([1.0, 0.0, 2.0, 3.0]))
 
     with debug_checks(True):
@@ -1547,7 +1544,7 @@ def test_regression_result_checks_are_skipped_under_jit():
     """
     J, P, N = 5, 3, 4
     U, V, _, y = _problem(J, P, N)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     singular = PSDDiagonal(jnp.asarray([1.0, 0.0, 2.0, 3.0]))
 
     with debug_checks(True):
@@ -1597,7 +1594,7 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
     """
     J, P, N = 6, 3, 4
     U, V, R, y = _problem(J, P, N)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
 
     for name, call in (
         ("pathwise_update", lambda cov: joint.pathwise_update(
@@ -1651,7 +1648,7 @@ def test_regression_anomalies_are_centered_before_whitening():
     exact = _exact_posterior_mean(U, V, Rm, np.asarray(y))
     scale = max(1.0, np.abs(exact).max())
 
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     shipped = np.asarray(joint.condition(y, noise_cov).mean)
 
     # the same kernel, whitening before centering -- the reverted grouping
@@ -1689,7 +1686,7 @@ def test_regression_a_collapsed_ensemble_is_exact_at_any_magnitude():
 
     for magnitude in (1.0, 0.1, 6.02e23, 1e150):
         V = np.full((J, N), magnitude)
-        joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+        joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
 
         np.testing.assert_array_equal(joint.v_anomalies, jnp.zeros((J, N)))
         np.testing.assert_array_equal(
@@ -1713,7 +1710,7 @@ def test_regression_debug_checks_survive_a_trace_over_closed_over_arrays():
     J, P, N = 4, 3, 2
     U = np.random.default_rng(0).normal(size=(J, P))
     V = np.random.default_rng(1).normal(size=(J, N))
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     y = jnp.zeros(N)
     noise_cov = PSDDiagonal(jnp.ones(N))
     eager = np.asarray(joint.transform_update(y, noise_cov))
@@ -1730,7 +1727,7 @@ def test_regression_debug_checks_survive_a_trace_over_closed_over_arrays():
         jax.jit(lambda: joint.pathwise_update(jax.random.key(0), y, noise_cov))()
         # and a scan, which is how a tempering driver runs
         def step(carry, _):
-            joint_t = EnsembleJoint(u_samples=carry, v_samples=jnp.asarray(V))
+            joint_t = EmpiricalJoint(u_samples=carry, v_samples=jnp.asarray(V))
             return joint_t.transform_update(y, noise_cov), None
 
         out, _ = jax.lax.scan(step, jnp.asarray(U), None, length=3)
@@ -1749,7 +1746,7 @@ def test_regression_check_order_with_two_simultaneous_violations():
     win, and which one is the contract's ordering rule.
     """
     J, P, N = 5, 3, 4
-    joint = EnsembleJoint(
+    joint = EmpiricalJoint(
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
@@ -1794,7 +1791,7 @@ def test_error_messages_name_the_object_the_method_and_the_offending_value():
     pin them: a terse message losing the repr, the method and the shape passes
     every other validation test."""
     J, P, N = 5, 3, 4
-    joint = EnsembleJoint(
+    joint = EmpiricalJoint(
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
@@ -1827,7 +1824,7 @@ def test_derived_moment_properties_have_the_documented_values():
     zeros passes the whole suite."""
     J, P, N = 6, 3, 4
     U, V, _, _ = _problem(J, P, N)
-    joint = EnsembleJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
+    joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
 
     for got, want in (
         (joint.u_mean, U.mean(axis=0)),
@@ -1873,7 +1870,7 @@ def test_gaussian_batch_shape_includes_its_covariance_contribution():
 
 
 def test_gaussian_repr_never_raises_on_unreadable_leaves():
-    """The never-raises rule is per class, and only EnsembleJoint was covered."""
+    """The never-raises rule is per class, and only EmpiricalJoint was covered."""
     treedef = jax.tree_util.tree_structure(
         Gaussian(jnp.zeros(2), DensePSD.from_matrix(jnp.eye(2)))
     )
@@ -1892,16 +1889,16 @@ def test_non_array_fields_are_rejected_at_construction():
     with pytest.raises(TypeError, match="no shape to check"):
         Gaussian([0.0, 0.0, 0.0], cov)
     with pytest.raises(TypeError, match="no shape to check"):
-        EnsembleJoint(u_samples=[[1.0, 2.0], [3.0, 4.0]], v_samples=jnp.zeros((2, 2)))
+        EmpiricalJoint(u_samples=[[1.0, 2.0], [3.0, 4.0]], v_samples=jnp.zeros((2, 2)))
     with pytest.raises(TypeError, match="no shape to check"):
-        EnsembleJoint(u_samples=jnp.zeros((2, 2)), v_samples=[[1.0], [2.0]])
+        EmpiricalJoint(u_samples=jnp.zeros((2, 2)), v_samples=[[1.0], [2.0]])
 
     # NumPy arrays have a shape and are accepted; the checks then apply
     Gaussian(np.zeros(3), cov)
     with pytest.raises(ValueError, match="disagrees"):
         Gaussian(np.zeros(4), cov)
-    with pytest.raises(ValueError, match="at least 2 members"):
-        EnsembleJoint(u_samples=np.zeros((1, 2)), v_samples=np.zeros((1, 2)))
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        EmpiricalJoint(u_samples=np.zeros((1, 2)), v_samples=np.zeros((1, 2)))
 
 
 def test_primitives_coerce_their_matrix_operand():
@@ -1930,13 +1927,13 @@ def test_the_transform_does_not_promote_the_dtype():
     y = jnp.asarray(RNG.normal(size=N), dtype=jnp.float32)
 
     assert sqrt_transform(s).dtype == jnp.float32
-    joint = EnsembleJoint(u_samples=U, v_samples=V)
+    joint = EmpiricalJoint(u_samples=U, v_samples=V)
     assert joint.transform_update(y, noise_cov).dtype == jnp.float32
     posterior = joint.condition(y, noise_cov)
     assert posterior.mean.dtype == posterior.cov.F.dtype == jnp.float32
 
     # float64 stays float64, which is what the package actually runs on
-    joint64 = EnsembleJoint(
+    joint64 = EmpiricalJoint(
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
@@ -1944,7 +1941,7 @@ def test_the_transform_does_not_promote_the_dtype():
     assert joint64.transform_update(jnp.zeros(N), cov64).dtype == jnp.float64
 
 
-def test_ensemble_joint_fields_are_keyword_only():
+def test_empirical_joint_fields_are_keyword_only():
     """The two fields are same-rank arrays agreeing on the member axis, so a
     swap is shape-valid whenever P == N and no check can catch it.
 
@@ -1956,10 +1953,10 @@ def test_ensemble_joint_fields_are_keyword_only():
     V = jnp.asarray(RNG.normal(size=(5, 3)))  # P == N: a swap is undetectable
 
     with pytest.raises(TypeError, match="positional"):
-        EnsembleJoint(U, V)
+        EmpiricalJoint(U, V)
 
-    joint = EnsembleJoint(u_samples=U, v_samples=V)
-    swapped = EnsembleJoint(u_samples=V, v_samples=U)
+    joint = EmpiricalJoint(u_samples=U, v_samples=V)
+    swapped = EmpiricalJoint(u_samples=V, v_samples=U)
     noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(3)))
     y = jnp.asarray(RNG.normal(size=3))
 
@@ -1971,7 +1968,7 @@ def test_ensemble_joint_fields_are_keyword_only():
     assert not np.allclose(a, b)
 
     # the pytree path bypasses __init__, so families are unaffected
-    family = jax.vmap(lambda u, v: EnsembleJoint(u_samples=u, v_samples=v))(
+    family = jax.vmap(lambda u, v: EmpiricalJoint(u_samples=u, v_samples=v))(
         jnp.zeros((4, 5, 3)), jnp.zeros((4, 5, 3))
     )
     assert family.batch_shape == (4,)

@@ -26,7 +26,7 @@ Tutorials 1 and 2.
   page.
 - **Per-step noise is $\Sigma/\Delta\beta$, never $\Sigma/\beta$.** Getting it
   wrong yields a plausible posterior that is wrong by $(T+1)/2$ times the data
-  precision on a uniform $T$-rung ladder, growing with ladder length. Worth
+  precision on a uniform $T$-step ladder, growing with ladder length. Worth
   stating even though the library gets it right, because readers reimplementing
   or reading other code will meet it.
 - Sampling form: `AdaptiveESSSchedule`, budget $\beta = 1$, no stopping rule.

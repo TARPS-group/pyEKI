@@ -419,7 +419,7 @@ def test_constructors_reject_batched_arrays():
     slip constructs nothing. Batched families exist only through pytree
     reconstruction, which bypasses the constructor."""
     with pytest.raises(ValueError, match="vmap"):
-        PSDDiagonal(jnp.ones((100, 6)))  # an ensemble where a diagonal was meant
+        PSDDiagonal(jnp.ones((100, 6)))  # a batch of vectors where a diagonal was meant
     with pytest.raises(ValueError, match="vmap"):
         Dense(jnp.ones((4, 3, 3)))
     with pytest.raises(ValueError, match="vmap"):
@@ -617,10 +617,10 @@ def test_matmul_composes_operators_via_the_product_factory():
         d * A  # multiplication of operators has a name, and it is @
 
 
-def test_tempering_scales_with_a_traced_increment():
-    """The Scaled consumer: per-step noise Sigma / dbeta with dbeta chosen
-    inside a jit-ed step. Whitening the tempered operator multiplies by
-    sqrt(dbeta), exactly."""
+def test_scaling_by_a_traced_scalar():
+    """The Scaled consumer: ``A / c`` with ``c`` chosen inside a jit-ed
+    computation. Whitening the scaled operator multiplies by sqrt(c),
+    exactly."""
     R = DensePSD.from_matrix(jnp.asarray(_psd(3)))
     r = jnp.asarray(RNG.normal(size=3))
 

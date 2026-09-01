@@ -1,6 +1,6 @@
 """Conformance and regression tests for the Ensemble Kalman Inversion layer.
 
-The file has two sections. The first works through the twenty-six numbered
+The file has two sections. The first works through the thirty numbered
 conformance obligations of the "Ensemble Kalman Inversion contract"; the
 second holds one targeted regression test per class of silent failure that
 contract names, under the same do-not-delete rule as the two layers below —
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import subprocess
+import sys
 import warnings
 
 import jax
@@ -47,7 +49,7 @@ from pyeki.eki import (
     PathwiseUpdate,
     TransformUpdate,
     advance,
-    apply,
+    assimilate,
     effective_sample_size,
     evaluate,
     iterate,
@@ -55,7 +57,8 @@ from pyeki.eki import (
     repair_failed_members,
     run,
 )
-from pyeki.gauss import EnsembleJoint, Gaussian
+from pyeki.eki.driver import _check_predictions
+from pyeki.gauss import EmpiricalJoint, Gaussian
 from pyeki.linalg import (
     DensePSD,
     PSDDiagonal,
@@ -167,7 +170,7 @@ _EXACT_LADDERS = [
 
 
 # ===========================================================================
-# Section 1 -- the twenty-six conformance obligations
+# Section 1 -- the thirty conformance obligations
 # ===========================================================================
 
 
@@ -176,7 +179,7 @@ def test_1_the_ladder_telescopes_to_one_shot_conditioning(increments):
     """A ladder summing to 1 reproduces the exact posterior, to floating point.
 
     The layer's central correctness property. Per-step precisions add: with an
-    affine forward model, conditioning with ``R / increment`` at each rung
+    affine forward model, conditioning with ``R / increment`` at each step
     contributes ``increment * G^T R^-1 G`` to the posterior precision, so a
     ladder summing to 1 composes to one-shot conditioning at beta = 1.
 
@@ -193,7 +196,7 @@ def test_1_the_ladder_telescopes_to_one_shot_conditioning(increments):
         problem.noise_cov,
         schedule=FixedSchedule(increments),
     )
-    assert result.n_steps == len(increments)
+    assert result.n_evaluations == len(increments)
     got_mean, got_cov = _moments(result.ensemble)
     want_mean, want_cov = problem.posterior()
 
@@ -208,10 +211,10 @@ def test_2_the_level_mis_scaling_is_caught_by_that_tolerance():
 
     The layer's signature silent failure: it raises nothing and produces a
     plausible-looking posterior, wrong by an amount that *grows with ladder
-    length*. On a uniform T-rung ladder the level form accumulates
+    length*. On a uniform T-step ladder the level form accumulates
     ``sum_t t/T = (T + 1)/2`` times the data precision instead of one.
 
-    The mis-scaling is written out locally, against ``EnsembleJoint``
+    The mis-scaling is written out locally, against ``EmpiricalJoint``
     directly, so this test measures the bug rather than the implementation.
     Two assertions: the mis-scaled ladder lands on the exact posterior at
     level ``(T + 1)/2`` — the documented, problem-independent form — and its
@@ -226,7 +229,7 @@ def test_2_the_level_mis_scaling_is_caught_by_that_tolerance():
         for _ in range(n_steps):
             beta += 1.0 / n_steps
             predictions = problem.forward(members)
-            members = EnsembleJoint(
+            members = EmpiricalJoint(
                 u_samples=members, v_samples=predictions
             ).transform_update(y, problem.noise_cov / beta)  # the bug: level
 
@@ -249,7 +252,7 @@ def test_3_the_stochastic_update_composes_to_the_same_posterior():
     """``PathwiseUpdate`` reproduces a dense reference, and telescopes in mean.
 
     Two halves. Elementwise, for a fixed key, a ladder reproduces a
-    hand-written dense perturbed-observation reference applied rung by rung.
+    hand-written dense perturbed-observation reference applied step by step.
     And its posterior moments match the one-shot posterior *in expectation*,
     tested as a mean over many keys with a tolerance derived from the
     ``K R K^T / J`` scale rather than tuned.
@@ -306,7 +309,7 @@ def test_3_the_stochastic_update_composes_to_the_same_posterior():
 
 
 def _dense_pathwise_step(members, predictions, problem, *, y, increment, key):
-    """One perturbed-observation rung, in plain dense linear algebra."""
+    """One perturbed-observation step, in plain dense linear algebra."""
     J = members.shape[0]
     Au = members - members.mean(axis=0)
     Av = predictions - predictions.mean(axis=0)
@@ -342,7 +345,7 @@ def test_4_fixed_schedule_takes_its_increments_and_completes_under_its_own_bound
         max_steps=len(increments),
     )
     assert result.status == SCHEDULE_EXHAUSTED
-    assert result.n_steps == len(increments)
+    assert result.n_evaluations == len(increments)
     assert len(problem.calls) == len(increments)
     assert np.allclose(np.asarray(result.stacked.increment), increments)
     assert float(result.beta) == pytest.approx(sum(increments), abs=8 * EPS)
@@ -367,7 +370,7 @@ def test_4_a_schedule_returning_none_ends_the_run_with_a_terminal_record():
         schedule=_GiveUpAfterTwo(),
     )
     assert result.status == SCHEDULE_EXHAUSTED
-    assert result.n_steps == 3
+    assert result.n_evaluations == 3
     assert float(result.stacked.increment[-1]) == 0.0
     assert float(result.stacked.beta_next[-1]) == float(result.stacked.beta[-1])
     # The literal float(J), not effective_sample_size(misfits, 0.0): J = 12 is
@@ -406,7 +409,8 @@ def test_4_both_adaptive_schedules_reach_their_budget_without_exceeding_it(
         problem.noise_cov,
         schedule=schedule,
     )
-    assert again.n_steps == 0
+    assert again.n_evaluations == 0
+    assert again.n_completed_steps == 0
 
 
 @pytest.mark.parametrize(
@@ -482,11 +486,11 @@ def test_4_an_unbounded_ladder_runs_without_raising(schedule_type):
     assert result.status == STOPPING_RULE
 
 
-def test_4_rung_counts_are_exact_under_a_capped_criterion():
-    """A budget of 1 under a ceiling of 0.3 takes exactly four rungs.
+def test_4_step_counts_are_exact_under_a_capped_criterion():
+    """A budget of 1 under a ceiling of 0.3 takes exactly four steps.
 
     One test pins the ``>=`` in the exhaustion check, ``budget_tol``,
-    cap-beats-floor, and the absence of a trailing dribble rung. The
+    cap-beats-floor, and the absence of a trailing dribble step. The
     criterion is ``inf`` because every misfit is identical, so the ceiling is
     the only thing choosing the increment.
     """
@@ -494,8 +498,8 @@ def test_4_rung_counts_are_exact_under_a_capped_criterion():
     class _ConstantModel:
         """Every member predicts the same thing, so every misfit is equal."""
 
-        def __init__(self, n_members, n_obs):
-            self.shape = (n_members, n_obs)
+        def __init__(self, n_members, v_dim):
+            self.shape = (n_members, v_dim)
             self.calls = 0
 
         def __call__(self, u):
@@ -513,7 +517,7 @@ def test_4_rung_counts_are_exact_under_a_capped_criterion():
             problem.noise_cov,
             schedule=schedule_type(beta_target=1.0, max_increment=0.3),
         )
-        assert result.n_steps == 4, schedule_type
+        assert result.n_evaluations == 4, schedule_type
         assert model.calls == 4
         got = np.asarray(result.stacked.increment)
         assert np.allclose(got, [0.3, 0.3, 0.3, 0.1], atol=1e-12)
@@ -539,7 +543,7 @@ def test_4_ess_bisection_returns_the_safe_end_and_matches_a_hand_written_one():
     assert _reference_ess(misfit_values, got) >= target
     assert 1e-9 < got < 4.0
 
-    # A hand-written bisection at the same count, pinning both the iteration
+    # A hand-written bisection at the same count, pinning both the step
     # count and the log-space computation.
     lo, hi = 0.0, 4.0
     for _ in range(n_bisect):
@@ -643,7 +647,7 @@ def _reference_ess(misfit_values: np.ndarray, increment: float) -> float:
 
 
 def _evaluation_with_misfits(
-    misfit_values: np.ndarray, *, beta: float = 0.0, step: int = 0, n_obs: int = 4
+    misfit_values: np.ndarray, *, beta: float = 0.0, step: int = 0, v_dim: int = 4
 ) -> Evaluation:
     """An ``Evaluation`` whose misfits are exactly the values given.
 
@@ -651,7 +655,7 @@ def _evaluation_with_misfits(
     ``sqrt(2 * phi_j)``, so ``0.5 * ||b_j||**2`` is exactly ``phi_j``.
     """
     n_members = misfit_values.size
-    residuals = np.zeros((n_members, n_obs))
+    residuals = np.zeros((n_members, v_dim))
     residuals[:, 0] = np.sqrt(2.0 * misfit_values)
     members = np.asarray(
         _exact_moment_ensemble(n_members, np.zeros(2), np.eye(2))
@@ -660,7 +664,7 @@ def _evaluation_with_misfits(
         step=step,
         beta=beta,
         ensemble=jnp.asarray(members),
-        predictions=jnp.zeros((n_members, n_obs)),
+        predictions=jnp.zeros((n_members, v_dim)),
         whitened_residuals=jnp.asarray(residuals),
         rms_parameter_spread=jnp.asarray(1.0),
         n_valid=n_members,
@@ -717,7 +721,7 @@ def test_6_the_two_adaptive_criteria_are_distinct_and_measurably_so():
     """
     rng = np.random.default_rng(11)
     misfit_values = 50.0 + 8.0 * rng.normal(size=40)
-    evaluation = _evaluation_with_misfits(misfit_values, n_obs=80)
+    evaluation = _evaluation_with_misfits(misfit_values, v_dim=80)
 
     unbounded = dict(beta_target=None, min_increment=1e-9, max_increment=1e6)
     misfit_step = float(AdaptiveMisfitSchedule(**unbounded).next_increment(evaluation))
@@ -732,16 +736,16 @@ def test_6_the_two_adaptive_criteria_are_distinct_and_measurably_so():
 
 def test_7_the_discrepancy_stop_fires_on_its_threshold_and_ends_the_run():
     """Fires exactly when ``2 Phi(vbar) <= tau^2 N``, before the increment."""
-    n_obs = 4
+    v_dim = 4
     for tau in (0.5, 1.0, 2.0):
         rule = DiscrepancyStop(tau=tau)
         for centre_misfit in (0.1, 0.9, 2.0, 4.5, 9.0):
             evaluation = _evaluation_with_misfits(
-                np.full(4, centre_misfit), n_obs=n_obs
+                np.full(4, centre_misfit), v_dim=v_dim
             )
             # Every member has the same residual, so the centre misfit is it.
             assert float(evaluation.centre_misfit) == pytest.approx(centre_misfit)
-            assert rule(evaluation) is (2.0 * centre_misfit <= tau**2 * n_obs)
+            assert rule(evaluation) is (2.0 * centre_misfit <= tau**2 * v_dim)
 
 
 def test_7_a_fired_stop_ends_the_run_with_a_zero_increment_terminal_record():
@@ -756,7 +760,7 @@ def test_7_a_fired_stop_ends_the_run_with_a_zero_increment_terminal_record():
         stop=DiscrepancyStop(tau=1e6),
     )
     assert result.status == STOPPING_RULE
-    assert result.n_steps == 1
+    assert result.n_evaluations == 1
     assert float(result.stacked.increment[0]) == 0.0
     assert len(problem.calls) == 1
     # Ended at step 0, with an empty *update* history and the state untouched.
@@ -807,7 +811,7 @@ def test_8_max_steps_raises_with_a_payload_that_makes_the_run_resumable():
     assert np.array_equal(
         np.asarray(resumed.ensemble), np.asarray(uninterrupted.ensemble)
     )
-    assert resumed.n_steps == 34
+    assert resumed.n_evaluations == 34
 
 
 def test_8_a_budgeted_schedule_with_a_positive_floor_never_reaches_the_bound():
@@ -1110,7 +1114,7 @@ def test_12_runs_are_reproducible_resumable_and_agree_with_iterate():
     second = run(problem.state(), problem.forward, y, noise, **common)
     assert np.array_equal(np.asarray(first.ensemble), np.asarray(second.ensemble))
 
-    # Stop after four rungs and resume: the tail is bit-exact.
+    # Stop after four steps and resume: the tail is bit-exact.
     partial_state = problem.state()
     taken = 0
     for yielded in iterate(problem.state(), problem.forward, y, noise, **common):
@@ -1136,7 +1140,7 @@ def test_12_runs_are_reproducible_resumable_and_agree_with_iterate():
             break
         records.append(record)
     assert status == first.status
-    assert len(records) == first.n_steps
+    assert len(records) == first.n_evaluations
     assert np.array_equal(
         np.asarray(last_state.ensemble), np.asarray(first.ensemble)
     )
@@ -1206,8 +1210,8 @@ def test_14_a_run_compiles_a_bounded_number_of_times_whatever_its_length():
     force a retrace per step, so nothing whole — no ``EKIState``, no
     ``Evaluation`` — is passed into a jitted function; the arrays are.
     Asserted against the compilation caches of the layer's own jitted
-    functions rather than inspected by eye: a thirty-rung run must add no
-    compilations that a three-rung run of the same problem has not already
+    functions rather than inspected by eye: a thirty-step run must add no
+    compilations that a three-step run of the same problem has not already
     paid for.
 
     An increment baked in as a Python constant is deliberately *not* what
@@ -1234,7 +1238,7 @@ def test_14_a_run_compiles_a_bounded_number_of_times_whatever_its_length():
 
     assert after_long == after_short, (
         f"compilations grew with the number of steps: {after_short} -> "
-        f"{after_long} over ten times as many rungs"
+        f"{after_long} over ten times as many steps"
     )
     assert after_short - before <= 12
 
@@ -1323,7 +1327,7 @@ def test_15_the_history_stacks_including_its_two_integer_fields():
 
 
 def test_16_the_two_phases_compose_and_one_evaluation_serves_two_increments():
-    """``advance`` is ``apply`` of ``evaluate``, and a rejected trial is free."""
+    """``advance`` is ``assimilate`` of ``evaluate``, and a rejected trial is free."""
     problem = _AffineProblem()
     y, noise = jnp.asarray(problem.y), problem.noise_cov
     state = problem.state()
@@ -1333,7 +1337,7 @@ def test_16_the_two_phases_compose_and_one_evaluation_serves_two_increments():
     )
     calls_after_advance = len(problem.calls)
     evaluation = evaluate(state, problem.forward, y, noise)
-    applied_state, applied_record = apply(
+    applied_state, applied_record = assimilate(
         state, evaluation, increment=0.3, y=y, noise_cov=noise
     )
     assert np.array_equal(
@@ -1344,8 +1348,8 @@ def test_16_the_two_phases_compose_and_one_evaluation_serves_two_increments():
 
     # One evaluation, two trial increments, no further model calls.
     before = len(problem.calls)
-    small, _ = apply(state, evaluation, increment=0.1, y=y, noise_cov=noise)
-    large, _ = apply(state, evaluation, increment=0.9, y=y, noise_cov=noise)
+    small, _ = assimilate(state, evaluation, increment=0.1, y=y, noise_cov=noise)
+    large, _ = assimilate(state, evaluation, increment=0.9, y=y, noise_cov=noise)
     assert len(problem.calls) == before
     assert float(small.beta) == pytest.approx(0.1)
     assert float(large.beta) == pytest.approx(0.9)
@@ -1356,13 +1360,13 @@ def test_16_the_two_phases_compose_and_one_evaluation_serves_two_increments():
     # A mismatched evaluation is refused, and the increment is checked first.
     moved, _ = advance(state, problem.forward, y, noise, increment=0.2)
     with pytest.raises(ValueError, match="different state"):
-        apply(moved, evaluation, increment=0.1, y=y, noise_cov=noise)
+        assimilate(moved, evaluation, increment=0.1, y=y, noise_cov=noise)
     before = len(problem.calls)
     for bad in (0.0, -0.5, np.inf, np.nan):
         with pytest.raises(ValueError, match="strictly positive"):
-            apply(state, evaluation, increment=bad, y=y, noise_cov=noise)
+            assimilate(state, evaluation, increment=bad, y=y, noise_cov=noise)
     assert len(problem.calls) == before, (
-        "apply must validate its increment before doing any array work"
+        "assimilate must validate its increment before doing any array work"
     )
 
 
@@ -1525,6 +1529,10 @@ def test_18_every_tier_two_and_tier_three_rule_raises_as_specified():
     with pytest.raises(ValueError, match="inflation returned shape"):
         run(state, problem.forward, y, noise, schedule=ladder,
             inflation=lambda key, *, ensemble, step, beta, **_: ensemble[:-1])
+    with pytest.raises(ValueError, match="inflation returned dtype"):
+        run(state, problem.forward, y, noise, schedule=ladder,
+            inflation=lambda key, *, ensemble, step, beta, **_:
+                ensemble.astype(jnp.float32))
     with pytest.raises(ValueError, match="update returned shape"):
         run(state, problem.forward, y, noise, schedule=ladder,
             update=lambda key, *, ensemble, **_: ensemble[:, :-1])
@@ -1590,7 +1598,9 @@ def test_18_reprs_are_types_and_static_sizes_with_no_array_data():
     assert repr(state) == f"EKIState(n_members={problem.J}, u_dim={problem.P}, step=0)"
     assert repr(evaluation) == f"Evaluation(step=0, n_members={problem.J})"
     assert repr(record) == "HistoryRecord(step=0)"
-    assert repr(result) == "EKIResult(status='schedule_exhausted', n_steps=2, beta=1)"
+    assert repr(result) == (
+        "EKIResult(status='schedule_exhausted', n_evaluations=2, beta=1)"
+    )
     assert repr(TransformUpdate()) == "TransformUpdate()"
     assert repr(DiscrepancyStop(tau=2.0)) == "DiscrepancyStop(tau=2.0)"
     assert repr(MultiplicativeInflation(1.02)) == (
@@ -1688,6 +1698,32 @@ class _StopAtStepThree:
         return evaluation.step >= 3
 
 
+def test_19_min_n_valid_is_the_minimum_over_the_history():
+    """The worst step, not the last one and not the best.
+
+    Reporting the last or the largest is the mutation this catches: on a run
+    whose failures recur the three coincide, so the fixture fails a different
+    number of members at each step.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    failures = iter([1, 3, 0, 2])
+
+    def failing(u):
+        v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+        return v.at[: next(failures)].set(jnp.nan)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = run(problem.state(), failing, y, noise,
+                     schedule=FixedSchedule.uniform(4))
+    per_step = [int(r.n_valid) for r in result.history]
+    assert per_step == [problem.J - 1, problem.J - 3, problem.J, problem.J - 2]
+    assert result.min_n_valid == min(per_step) == problem.J - 3
+    assert result.min_n_valid != per_step[-1], "not the last step"
+    assert result.min_n_valid != max(per_step), "not the best step"
+
+
 def test_19_last_evaluation_is_the_final_forward_call_and_off_by_one_where_it_should_be():
     problem = _AffineProblem()
     y, noise = jnp.asarray(problem.y), problem.noise_cov
@@ -1726,7 +1762,7 @@ def test_19_last_evaluation_is_the_final_forward_call_and_off_by_one_where_it_sh
     finished = run(
         stopped.state, problem.forward, y, noise, schedule=FixedSchedule.uniform(3)
     )
-    assert finished.n_steps == 0 and finished.last_evaluation is None
+    assert finished.n_evaluations == 0 and finished.last_evaluation is None
 
 
 def test_20_inflation_and_the_update_see_the_true_ladder_and_are_applied_in_place():
@@ -1851,15 +1887,15 @@ def test_22_the_parameter_spread_is_exact_against_a_closed_form():
     assert got != pytest.approx(np.sqrt(a**2 + b**2 + d**2))
 
 
-def _spread_of(members: np.ndarray, n_obs: int) -> float:
+def _spread_of(members: np.ndarray, v_dim: int) -> float:
     """The ``rms_parameter_spread`` the layer reports for these members."""
     J = members.shape[0]
     state = EKIState(jnp.asarray(members), 0.0, 0, jax.random.key(0))
     evaluation = evaluate(
         state,
-        lambda u: jnp.zeros((J, n_obs)),
-        jnp.zeros(n_obs),
-        PSDDiagonal(jnp.ones(n_obs)),
+        lambda u: jnp.zeros((J, v_dim)),
+        jnp.zeros(v_dim),
+        PSDDiagonal(jnp.ones(v_dim)),
     )
     return float(evaluation.rms_parameter_spread)
 
@@ -1871,12 +1907,13 @@ def test_23_a_finished_ladder_is_a_no_op_and_restart_gives_the_full_one():
 
     for schedule in (FixedSchedule.uniform(4), AdaptiveESSSchedule(beta_target=1.0)):
         finished = run(problem.state(), problem.forward, y, noise, schedule=schedule)
-        assert finished.n_steps > 0
+        assert finished.n_evaluations > 0
         calls_before = len(problem.calls)
 
         again = run(finished.state, problem.forward, y, noise, schedule=schedule)
         assert again.status == SCHEDULE_EXHAUSTED
-        assert again.n_steps == 0
+        assert again.n_evaluations == 0
+        assert again.n_completed_steps == 0
         assert again.history == ()
         assert again.last_evaluation is None
         assert np.array_equal(
@@ -1887,7 +1924,7 @@ def test_23_a_finished_ladder_is_a_no_op_and_restart_gives_the_full_one():
         restarted = run(
             finished.state.restart(), problem.forward, y, noise, schedule=schedule
         )
-        assert restarted.n_steps == finished.n_steps
+        assert restarted.n_evaluations == finished.n_evaluations
         assert float(restarted.state.beta) == pytest.approx(float(finished.beta))
 
 
@@ -1988,7 +2025,7 @@ def test_25_the_three_axes_compose(schedule, update, inflation_kind, with_stop):
     assert result.n_evaluations == len(problem.calls)
     assert np.all(np.isfinite(np.asarray(result.ensemble)))
     stacked = result.stacked
-    assert stacked.batch_shape == (result.n_steps,)
+    assert stacked.batch_shape == (result.n_evaluations,)
     assert np.all(np.isfinite(np.asarray(stacked.ess)))
     assert np.all(np.asarray(stacked.ess) >= 1.0 - 1e-9)
 
@@ -2048,7 +2085,7 @@ def test_26_the_pinned_prior_draw_and_restart_blocks_run():
 
 
 def test_26_the_backtracking_loop_runs_and_costs_what_the_contract_says():
-    """One forward evaluation per rung plus one per rejection."""
+    """One forward evaluation per step plus one per rejection."""
     problem = _AffineProblem()
     forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
     accepted = 0
@@ -2060,7 +2097,7 @@ def test_26_the_backtracking_loop_runs_and_costs_what_the_contract_says():
     current = evaluate(s, forward, y, noise_cov)
     rejections = 0
     while not done(current):
-        trial, record = apply(
+        trial, record = assimilate(
             s, current, increment=delta, y=y, noise_cov=noise_cov
         )
         probe = evaluate(trial, forward, y, noise_cov)
@@ -2130,7 +2167,7 @@ def test_26_the_eki_error_checkpoint_and_interrupted_result_patterns_run():
     )
     assert result.status == INTERRUPTED
     assert not result.stop_fired and not result.budget_complete
-    assert result.n_steps == 2
+    assert result.n_evaluations == 2
 
 
 def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
@@ -2172,6 +2209,314 @@ def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
     assert np.trace(got_cov) < np.trace(honest)
 
 
+def test_26_the_external_executable_wrapper_of_the_guide_runs(tmp_path):
+    """The one runnable recipe outside the contract page that earns a test.
+
+    The wrapper obligation -- catch your own failures and return a non-finite
+    row -- is the single thing the layer needs from a forward model beyond its
+    shape, and nothing else here exercises it against a real process. The
+    solver exits non-zero on a negative decay rate, which the prior puts mass
+    on, so the failure path is reached without being contrived.
+    """
+    solver = tmp_path / "solver.py"
+    solver.write_text(
+        "import sys, math\n"
+        "u = [float(x) for x in open(sys.argv[1])]\n"
+        "if u[1] < 0.0:\n"
+        "    sys.exit('solver diverged: negative decay rate')\n"
+        "with open(sys.argv[2], 'w') as out:\n"
+        "    for t in (0.5, 1.0, 2.0):\n"
+        "        out.write(repr(u[0] * math.exp(-u[1] * t)) + '\\n')\n"
+    )
+    v_dim = 3
+
+    def forward(ensemble):
+        members = np.asarray(ensemble)
+        predictions = np.full((members.shape[0], v_dim), np.nan)
+        for j, member in enumerate(members):
+            member_in, member_out = tmp_path / f"in_{j}.txt", tmp_path / f"out_{j}.txt"
+            member_out.unlink(missing_ok=True)
+            np.savetxt(member_in, member)
+            try:
+                subprocess.run(
+                    [sys.executable, str(solver), str(member_in), str(member_out)],
+                    check=True, capture_output=True, timeout=60,
+                )
+                row = np.loadtxt(member_out)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                    OSError, ValueError):
+                continue
+            if row.shape == (v_dim,):
+                predictions[j] = row
+        return predictions
+
+    times = jnp.array([0.5, 1.0, 2.0])
+    truth = jnp.array([2.0, 0.7])
+    y = truth[0] * jnp.exp(-truth[1] * times) + jnp.array([0.02, -0.01, 0.015])
+    noise = PSDDiagonal(jnp.full(v_dim, 0.01))
+    prior = Gaussian(
+        mean=jnp.array([1.0, 1.0]), cov=PSDDiagonal(jnp.array([1.0, 0.5]))
+    )
+    state = EKIState.from_prior(jax.random.key(0), prior, n_members=32)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, forward, y, noise, schedule=AdaptiveESSSchedule())
+
+    # The failure path was genuinely taken, and reported: the prior puts mass
+    # on negative decay rates, on which the solver exits non-zero.
+    assert result.min_n_valid < state.n_members
+    assert [w for w in caught if "evaluations failed" in str(w.message)]
+    # The numbers the guide prints, so its output cannot rot unnoticed.
+    assert result.min_n_valid == 29
+    assert np.allclose(np.asarray(result.mean), [2.0798, 0.7406], atol=5e-5)
+    # A run driven entirely by subprocesses, returning a numpy array read
+    # back off disk, still lands in the run's dtype.
+    assert result.last_evaluation.predictions.dtype == jnp.float64
+    assert np.abs(np.asarray(result.mean) - np.asarray(truth)).max() < 0.2
+
+
+def test_27_the_forward_model_receives_what_the_contract_promises():
+    """Concrete, two-dimensional, in the run's dtype, and post-inflation.
+
+    The tracer assertion is the one that fails silently and late: a concrete
+    argument is what makes a subprocess model legal, and a driver rewritten
+    over ``lax.scan`` would break it without breaking any other test here.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    state = problem.state()
+    seen = []
+
+    def recording(u):
+        assert isinstance(u, jax.Array)
+        assert not isinstance(u, jax.core.Tracer)
+        assert u.shape == (problem.J, problem.P)
+        assert u.dtype == state.ensemble.dtype
+        # np.asarray on the argument is a read-only view, which the guide's
+        # wrapper depends on being safe to hold and unsafe to write.
+        assert not np.asarray(u).flags.writeable
+        seen.append(np.asarray(u))
+        return u @ jnp.asarray(problem.G).T
+
+    run(state, recording, y, noise, schedule=FixedSchedule.uniform(2))
+    assert len(seen) == 2
+    # The first call is on the state's own members, untouched.
+    assert np.array_equal(seen[0], np.asarray(state.ensemble))
+
+    # With an inflation, it is the inflated members -- not state.ensemble.
+    seen.clear()
+    factor = 3.0
+    run(
+        state, recording, y, noise, schedule=FixedSchedule.uniform(1),
+        inflation=MultiplicativeInflation(factor),
+    )
+    members = np.asarray(state.ensemble)
+    centre = members.mean(axis=0, keepdims=True)
+    expected = centre + factor * (members - centre)
+    assert np.abs(seen[0] - expected).max() < 64 * EPS * np.abs(expected).max()
+    assert np.abs(seen[0] - members).max() > 0.0
+
+    # Writing into that view raises, rather than silently corrupting the
+    # ensemble: the failure a wrapper hits is loud.
+    with pytest.raises(ValueError, match="read-only"):
+        np.asarray(state.ensemble)[0, 0] = 1.0
+
+
+def test_28_the_accepted_containers_are_a_promise_not_a_tolerance():
+    """A jax array, a numpy array and a nested list give bit-identical runs."""
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    G = np.asarray(problem.G)
+
+    # The same numbers in three containers: computed once, so this tests the
+    # container and not whether numpy's BLAS and XLA agree bit for bit.
+    def as_jax(u):
+        return jnp.asarray(np.asarray(u) @ G.T)
+
+    def as_numpy(u):
+        return np.asarray(u) @ G.T
+
+    def as_list(u):
+        return (np.asarray(u) @ G.T).tolist()
+
+    runs = [
+        run(problem.state(), f, y, noise, schedule=FixedSchedule.uniform(3))
+        for f in (as_jax, as_numpy, as_list)
+    ]
+    reference = np.asarray(runs[0].ensemble)
+    for other in runs[1:]:
+        # Bit-identical: the claim is that the container cannot matter.
+        assert np.array_equal(np.asarray(other.ensemble), reference)
+        assert other.last_evaluation.predictions.dtype == jnp.float64
+
+
+def test_29_a_narrow_forward_model_is_promoted_and_warned_about_once():
+    """Promotion widens only, warns once per run, and never demotes the state.
+
+    "Exactly once" is what this pins. A per-step warning left to the
+    caller's filter displays once under the default filter too, and would
+    pass any test asserting only that a warning was seen.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+    state = problem.state()
+
+    def coarse(u):
+        return (jnp.asarray(u) @ jnp.asarray(problem.G).T).astype(jnp.float32)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, coarse, y, noise, schedule=FixedSchedule.uniform(4))
+    promotions = [w for w in caught if "promoted" in str(w.message)]
+    assert len(promotions) == 1
+    assert "float32" in str(promotions[0].message)
+    assert result.n_evaluations == 4
+    # Promoted on receipt: nothing downstream sees the narrow dtype.
+    assert result.last_evaluation.predictions.dtype == jnp.float64
+    assert result.ensemble.dtype == jnp.float64
+
+    # A float64 model on a float64 run is silent.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(state, problem.forward, y, noise, schedule=FixedSchedule.uniform(4))
+    assert not [w for w in caught if "promoted" in str(w.message)]
+
+    # Once per *run*, not once if the first step happened to promote. A model
+    # that degrades only in some parameter regimes is the realistic case, and
+    # a flag keyed off `state.step` would warn here not at all -- and never at
+    # all on a resumed run, since `step` is cumulative.
+    class _DegradesLater:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, u):
+            self.calls += 1
+            v = jnp.asarray(u) @ jnp.asarray(problem.G).T
+            return v if self.calls == 1 else v.astype(jnp.float32)
+
+    late = _DegradesLater()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run(state, late, y, noise, schedule=FixedSchedule.uniform(4))
+    promotions = [w for w in caught if "promoted" in str(w.message)]
+    assert late.calls == 4
+    assert len(promotions) == 1, "the warning is once per run, not once at step 0"
+    assert "float32" in str(promotions[0].message)
+
+    # And once on a run resumed from a nonzero step.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run(result.state.restart(), coarse, y, noise,
+            schedule=FixedSchedule.uniform(2))
+    assert len([w for w in caught if "promoted" in str(w.message)]) == 1
+
+    # The evaluate phase has no run to be once per, so it warns per call.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = evaluate(state, coarse, y, noise)
+        evaluate(state, coarse, y, noise)
+    assert len([w for w in caught if "promoted" in str(w.message)]) == 2
+    assert first.predictions.dtype == jnp.float64
+
+    # A non-floating return is still a ValueError, never a conversion.
+    with pytest.raises(ValueError, match="real floating dtype"):
+        run(state, lambda u: np.asarray(np.asarray(u) @ problem.G.T, np.int64),
+            y, noise, schedule=FixedSchedule.uniform(2))
+
+
+def test_29_promotion_only_ever_widens():
+    """A model wider than the run is left exactly as it is."""
+    problem = _AffineProblem(J=8)
+    state = problem.state()
+    working = state.ensemble.dtype
+    narrow = jnp.zeros((problem.J, problem.N), jnp.float32)
+    wide = jnp.zeros((problem.J, problem.N), working)
+
+    got, arrived = _check_predictions(narrow, problem.J, problem.N, working)
+    assert got.dtype == working and arrived == jnp.float32
+    got, arrived = _check_predictions(wide, problem.J, problem.N, working)
+    assert got.dtype == working and arrived is None
+    # Against a float32 run, a float64 model is not demoted and not warned on.
+    got, arrived = _check_predictions(wide, problem.J, problem.N, jnp.float32)
+    assert got.dtype == working and arrived is None
+
+
+def test_30_the_evaluation_and_update_counts_hold_on_every_exit():
+    """One evaluation per step, plus one when stopping needed a look.
+
+    Asserted as equalities in both directions on all four termination paths.
+    "At most one apart" would pass an implementation that spent a needless
+    evaluation on the declarative paths, which is the regression this guards:
+    the exhaustion check reads only ``step`` and ``beta``, so it must exit
+    before evaluating.
+    """
+    problem = _AffineProblem(J=8)
+    y, noise = jnp.asarray(problem.y), problem.noise_cov
+
+    class _Counted:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, u):
+            self.calls += 1
+            return jnp.asarray(u) @ jnp.asarray(problem.G).T
+
+    class _StopAt:
+        def __init__(self, k):
+            self.k = k
+
+        def __call__(self, evaluation):
+            return int(evaluation.step) >= self.k
+
+    class _NoneAt:
+        n_steps, beta_target = None, None
+
+        def __init__(self, k):
+            self.k = k
+
+        def next_increment(self, evaluation):
+            return None if int(evaluation.step) >= self.k else 0.1
+
+    cases = [
+        ("fixed ladder", dict(schedule=FixedSchedule.uniform(5)), 0),
+        ("budgeted adaptive", dict(schedule=AdaptiveESSSchedule()), 0),
+        ("stopping rule", dict(schedule=FixedSchedule.constant(0.1, n_steps=50),
+                               stop=_StopAt(3)), 1),
+        ("increment None", dict(schedule=_NoneAt(3)), 1),
+    ]
+    for label, kwargs, terminal in cases:
+        state = problem.state()
+        model = _Counted()
+        result = run(state, model, y, noise, **kwargs)
+        assert result.n_evaluations == model.calls, label
+        moved = int(result.state.step) - int(state.step)
+        assert result.n_completed_steps == moved, label
+        # The exact relationship, in both directions.
+        gap = result.n_evaluations - result.n_completed_steps
+        assert gap == terminal, label
+        # A terminal record is the zero-increment one, at most one, always last.
+        zeros = [i for i, r in enumerate(result.history)
+                 if float(r.increment) == 0.0]
+        assert zeros == ([len(result.history) - 1] if terminal else []), label
+
+    # max_steps is an exact cap on forward calls, hence on member evaluations.
+    class _Unbounded:
+        n_steps, beta_target = None, None
+
+        def next_increment(self, evaluation):
+            return 0.1
+
+    for bound in (1, 3, 7):
+        model = _Counted()
+        with pytest.raises(EKIError, match="max_steps"):
+            run(problem.state(), model, y, noise,
+                schedule=_Unbounded(), max_steps=bound)
+        # Exactly `bound` ensemble evaluations, so exactly J * bound member
+        # evaluations: the hard budget a caller with an expensive model needs.
+        assert model.calls == bound
+
+
 # ===========================================================================
 # Section 2 -- one targeted regression test per silent-failure class
 #
@@ -2184,7 +2529,7 @@ def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
 # field declared static (test 15), the safety bound checked before ladder
 # exhaustion (test 4), the min/max inversion and the two clamp-precedence
 # inversions (test 4), the bisection returning `hi` (test 4), a record field
-# disagreeing with its evaluation (test 21), two forward evaluations per rung
+# disagreeing with its evaluation (test 21), two forward evaluations per step
 # (tests 4, 16 and 19), chaining a fresh ladder onto a finished state
 # (test 23), DiscrepancyStop on a budgeted ladder (test 19), and the Tikhonov
 # augmentation at beta = 1 (test 26).
@@ -2291,7 +2636,7 @@ def test_regression_the_key_split_is_three_way_in_a_pinned_order():
     """No numeric test can catch this in the default configuration.
 
     The default consumes no randomness at all, so the guard is a
-    ``jax.random.key_data`` snapshot of a multi-rung ``PathwiseUpdate`` run,
+    ``jax.random.key_data`` snapshot of a multi-step ``PathwiseUpdate`` run,
     together with the property the fixed arity exists for: turning inflation
     on must not shift the update's stream.
     """
@@ -2329,7 +2674,7 @@ def test_regression_a_fill_value_model_stalls_an_adaptive_ladder_silently():
     A solver returning a sentinel such as -9999 produces an enormous misfit
     for one member, which an adaptive schedule reads as genuine ensemble
     disagreement and answers by shrinking the increment — here all the way to
-    the floor, so a one-rung ladder becomes a fifty-rung one. Nothing raises
+    the floor, so a one-step ladder becomes a fifty-step one. Nothing raises
     and nothing warns; ``n_valid`` reports every member valid. Documented as
     a behaviour rather than fixed, because the layer cannot see it.
 
@@ -2343,7 +2688,7 @@ def test_regression_a_fill_value_model_stalls_an_adaptive_ladder_silently():
     clean = run(
         problem.state(), problem.forward, y, noise, schedule=schedule, max_steps=50
     )
-    assert clean.n_steps == 1
+    assert clean.n_evaluations == 1
 
     def with_fill_value(u):
         v = jnp.asarray(u) @ jnp.asarray(problem.G).T
@@ -2353,7 +2698,7 @@ def test_regression_a_fill_value_model_stalls_an_adaptive_ladder_silently():
         problem.state(), with_fill_value, y, noise, schedule=schedule, max_steps=50
     )
     assert stalled.min_n_valid == problem.J, "every member looks valid"
-    assert stalled.n_steps == 50
+    assert stalled.n_evaluations == 50
     assert np.all(np.asarray(stalled.stacked.increment) == pytest.approx(1e-3))
 
 
@@ -2410,12 +2755,17 @@ def test_regression_a_float32_update_cannot_quietly_demote_a_run():
         run(problem.state(), problem.forward, y, noise,
             schedule=FixedSchedule.uniform(2), update=demoting)
 
-    # A float32 forward model is the caller's own precision choice, but it
-    # must not demote the run: the state stays float64 throughout.
+    # The asymmetry with a float32 forward model is deliberate: an update's
+    # return becomes the state and demotes every later step, while a
+    # prediction is consumed within one step and is promoted on receipt
+    # (test 29). Either way the run stays float64.
     def coarse(u):
         return (jnp.asarray(u) @ jnp.asarray(problem.G).T).astype(jnp.float32)
 
-    result = run(problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2))
+    with pytest.warns(UserWarning, match="promoted"):
+        result = run(
+            problem.state(), coarse, y, noise, schedule=FixedSchedule.uniform(2)
+        )
     assert result.ensemble.dtype == jnp.float64
 
 
@@ -2483,21 +2833,21 @@ def test_8_every_eki_error_path_carries_the_history_accumulated_so_far():
 
         return forward
 
-    # (a) fewer than two valid members, on the fourth rung
+    # (a) fewer than two valid members, on the fourth step
     with pytest.raises(EKIError, match="At least 2 are required") as caught:
         run(problem.state(), fails_at(3, list(range(1, problem.J))), y, noise,
             schedule=ladder)
     assert len(caught.value.history) == 3
     assert caught.value.state.step == 3
 
-    # (b) on_failure="raise", on the second rung
+    # (b) on_failure="raise", on the second step
     with pytest.raises(EKIError, match="on_failure='raise'") as caught:
         run(problem.state(), fails_at(1, [2]), y, noise, schedule=ladder,
             on_failure="raise")
     assert len(caught.value.history) == 1
     assert caught.value.state.step == 1
 
-    # (c) a non-finite update, on the third rung
+    # (c) a non-finite update, on the third step
     poison = {"n": 0}
 
     def sometimes_poisons(key, *, ensemble, predictions, y, noise_cov, increment,
@@ -2520,7 +2870,7 @@ def test_8_every_eki_error_path_carries_the_history_accumulated_so_far():
     assert isinstance(caught.value.history, tuple)
     resumed = run(caught.value.state, problem.forward, y, noise,
                   schedule=ladder, max_steps=30)
-    assert resumed.n_steps == 28
+    assert resumed.n_evaluations == 28
 
 
 def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
@@ -2528,7 +2878,7 @@ def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
 
     Ten increments of 0.1 accumulate to 0.9999999999999999, strictly below
     1.0, so an exhaustion check written as `beta >= beta_target` would demand
-    an eleventh rung. The four-rung `(0.3, 0.3, 0.3, 0.1)` ladder does not
+    an eleventh step. The four-step `(0.3, 0.3, 0.3, 0.1)` ladder does not
     catch this: those increments happen to sum to exactly 1.0.
     """
     problem = _AffineProblem()
@@ -2544,7 +2894,7 @@ def test_4_budget_tol_absorbs_a_ladder_that_lands_just_below_its_budget():
         problem.state(), problem.forward, jnp.asarray(problem.y),
         problem.noise_cov, schedule=schedule, max_steps=12,
     )
-    assert result.n_steps == 10, "a bare `>=` would take an eleventh rung"
+    assert result.n_evaluations == 10, "a bare `>=` would take an eleventh step"
     assert float(result.beta) == pytest.approx(accumulated, abs=8 * EPS)
     assert float(result.beta) < 1.0
 
@@ -2646,9 +2996,9 @@ def test_16_the_provenance_check_catches_a_stale_evaluation_not_a_foreign_run():
     evaluation = evaluate(state, first.forward, y, noise)
 
     # Caught: the state has moved on, so the positions disagree.
-    moved, _ = apply(state, evaluation, increment=0.25, y=y, noise_cov=noise)
+    moved, _ = assimilate(state, evaluation, increment=0.25, y=y, noise_cov=noise)
     with pytest.raises(ValueError, match="different state"):
-        apply(moved, evaluation, increment=0.25, y=y, noise_cov=noise)
+        assimilate(moved, evaluation, increment=0.25, y=y, noise_cov=noise)
 
     # Not caught: a foreign evaluation at the same position is accepted, and
     # the result is the foreign problem's answer rather than this one's.
@@ -2656,16 +3006,16 @@ def test_16_the_provenance_check_catches_a_stale_evaluation_not_a_foreign_run():
         second.state(), second.forward, jnp.asarray(second.y), second.noise_cov
     )
     assert foreign.step == state.step and float(foreign.beta) == float(state.beta)
-    mixed, _ = apply(state, foreign, increment=0.25, y=y, noise_cov=noise)
-    expected, _ = apply(
+    mixed, _ = assimilate(state, foreign, increment=0.25, y=y, noise_cov=noise)
+    expected, _ = assimilate(
         second.state(), foreign, increment=0.25, y=y, noise_cov=noise
     )
     assert np.array_equal(np.asarray(mixed.ensemble), np.asarray(expected.ensemble))
     assert not np.array_equal(np.asarray(mixed.ensemble), np.asarray(moved.ensemble))
 
 
-def test_14_n_valid_is_data_so_a_jitted_policy_does_not_retrace_per_rung():
-    """A static ``n_valid`` would give each rung its own treedef.
+def test_14_n_valid_is_data_so_a_jitted_policy_does_not_retrace_per_step():
+    """A static ``n_valid`` would give each step its own treedef.
 
     ``next_increment`` is the layer's documented extension point, and jitting
     one is the obvious thing to do with it; a static field on the object it
@@ -2707,7 +3057,7 @@ def test_4_the_entry_budget_check_measures_the_remaining_budget():
     y, noise = jnp.asarray(problem.y), problem.noise_cov
     schedule = AdaptiveESSSchedule(beta_target=1.0, min_increment=1e-3)
 
-    # 0.01 of budget remains, so at most 10 further rungs are possible.
+    # 0.01 of budget remains, so at most 10 further steps are possible.
     part_way = EKIState(
         jnp.asarray(problem.members), 0.99, 0, jax.random.key(0)
     )
@@ -2718,16 +3068,16 @@ def test_4_the_entry_budget_check_measures_the_remaining_budget():
         run(part_way, problem.forward, y, noise, schedule=schedule, max_steps=9)
 
     # A fresh run is still held to the whole budget: the check is a worst-case
-    # guarantee, not a prediction of how many rungs this problem will take.
+    # guarantee, not a prediction of how many steps this problem will take.
     with pytest.raises(ValueError, match="cannot accommodate"):
         run(problem.state(), problem.forward, y, noise, schedule=schedule,
             max_steps=999)
 
     # And the quotient is robust to its own round-off: 1e-9 / 1e-12 is 1000
-    # rungs, not the 1001 a naive ceil of the float division reports.
-    from pyeki.eki.driver import _rungs_needed
+    # steps, not the 1001 a naive ceil of the float division reports.
+    from pyeki.eki.driver import _steps_needed
 
-    assert _rungs_needed(1e-9, 1e-12) == 1000
-    assert _rungs_needed(1.0, 1e-3) == 1000
-    assert _rungs_needed(0.55, 0.1) == 6
-    assert _rungs_needed(-0.5, 1e-3) == 0
+    assert _steps_needed(1e-9, 1e-12) == 1000
+    assert _steps_needed(1.0, 1e-3) == 1000
+    assert _steps_needed(0.55, 0.1) == 6
+    assert _steps_needed(-0.5, 1e-3) == 0

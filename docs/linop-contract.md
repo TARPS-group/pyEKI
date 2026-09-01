@@ -157,8 +157,8 @@ same holds for `solve_mat`/`solve` and `whiten_mat`/`whiten`). What
 distinguishes this layer from column-stacked operator libraries is not
 whether matrix application is batched vector application — it is — but
 which axis carries a batch of vectors in the *vector* methods: leading,
-because that is what `vmap` produces and the layout in which ensembles
-arrive from a `vmap`-ed forward model.
+because that is what `vmap` produces and the layout a batched caller
+naturally supplies.
 
 The matrix methods are the single exception to "contract the trailing
 axis": their core operand is 2-D, so they contract axis `-2` and carry `k`
@@ -188,7 +188,7 @@ along. `k` is part of the core shape, never a batch axis.
 (contract-batching-operators)=
 ### Batching over operators
 
-A family of operators — one covariance per ensemble member, say — is a
+A family of operators — one covariance per row of a batch, say — is a
 *batched pytree*: apply `jax.vmap` over the operator argument, and inside
 the mapped function the operator behaves exactly like an unbatched one.
 
@@ -235,7 +235,7 @@ computed from static information only:
   strict constructors guarantee it. Non-empty batch shapes arise only
   from pytree reconstruction. Inside a `vmap` trace, leaves are presented
   at core shape, so `batch_shape == ()` there and every operation works,
-  member by member.
+  one at a time.
 
 **Inertness.** When `batch_shape` is non-empty, every operation the type
 defines raises `ValueError`, with a message naming the operator, the
@@ -264,9 +264,9 @@ object is meant to be used.
 The inertness guard is designed to be *loosened*, never worked around. A
 future revision may define direct operation calls on families by
 `vmap`-ing the hook in the public layer, with gufunc-style broadcasting
-between `batch_shape` and the operand's leading batch axes — member `i`
+between `batch_shape` and the operand's leading batch axes — element `i`
 applied to vector `i` when they align, one vector broadcast across all
-members otherwise. Hooks would stay written for the unbatched case (the
+elements otherwise. Hooks would stay written for the unbatched case (the
 batching lives once, in the public layer), constructors would stay
 strict, and the upgrade is backward compatible by construction: code that
 was correct under the guard only ever saw `batch_shape == ()`, so turning
@@ -625,7 +625,8 @@ it its `solve`.
 layer's one shipped class subject to the singular-by-construction rule
 stated under `factor` above — its thin-factor instances are what that rule
 governs — and the covariance representation `pyeki.gauss` returns from
-conditioning, where the posterior's rank is bounded by the ensemble size.
+conditioning, where the posterior's rank is bounded by the number of
+samples.
 
 - **One data field**, `F`, an `Array` of shape `(n, k)` with $n, k \ge 1$.
   **No relation is imposed between $n$ and $k$**: the factor may be thin,
@@ -934,10 +935,10 @@ right-hand side) and the batch convention. The reasoning:
   contract axis `-2`, treat leading axes as batches of *matrices*. So
   there is exactly one consistent array semantics available for `op @ X`,
   and it is `matmat`.
-- That semantics collides with this layer's canonical data layout. A
-  `vmap`-ed forward model produces ensembles as `(J, n)` row-batches, and
-  applying an operator to one is a *batch-of-vectors* operation. Given
-  `R` of side $n$, the natural-looking `R @ ensemble` is a confusing
+- That semantics collides with this layer's canonical data layout. A batched
+  caller supplies `(J, n)` row-batches, and applying an operator to one is a
+  *batch-of-vectors* operation. Given
+  `R` of side $n$, the natural-looking `R @ batch` is a confusing
   shape error when $J \ne n$ — and when $J = n$ it is shape-valid,
   contracts the wrong axis, and returns a wrong answer silently. The
   small-observation regime makes $J = n$ a case that actually occurs, not
@@ -983,9 +984,8 @@ Requirements:
 
 - The scalar is held as a **0-d array field** (pytree data), never a
   Python float, so a traced value flows through it. This is the point:
-  the consumer is tempering, where the per-step noise covariance is
-  $\Sigma / \Delta\beta_t$ with an increment chosen adaptively — and
-  therefore traced — inside the step. Scaling must not rebuild or
+  a consumer may rescale a fixed operator by a scalar computed inside the
+  trace, so the scale is itself traced. Scaling must not rebuild or
   re-factorize the base operator.
 - `supports()` delegates to the base operator: the scaled composite
   supports exactly what its base supports.

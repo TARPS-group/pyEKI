@@ -2,7 +2,7 @@
 
 The algorithmic top of the package. It turns the Gaussian conditioning of
 :mod:`pyeki.gauss` into a *run* — an initial ensemble, a ladder of tempered
-targets, an ensemble update per rung, and a record of what happened.
+targets, an ensemble update per step, and a record of what happened.
 
 For a prior :math:`\\pi_0` and the misfit
 :math:`\\Phi(v) = \\tfrac12\\lVert W(y - v)\\rVert^2`, the family of targets is
@@ -50,8 +50,8 @@ object                                is
 :class:`Inflation`
 :func:`run`, :func:`iterate`          the driver, as a function and as a
                                       generator
-:func:`evaluate`, :func:`apply`,      one rung, as its two phases and their
-:func:`advance`                       composition
+:func:`evaluate`, :func:`assimilate`, one step, as its two phases and
+:func:`advance`                       their composition
 :func:`misfits`,                      the array-level pieces schedules and
 :func:`effective_sample_size`,        custom drivers need
 :func:`repair_failed_members`
@@ -105,7 +105,7 @@ and however the schedule is chosen. :math:`J` therefore bounds what a run can
 :class:`AdditiveInflation` is the only shipped mechanism that leaves that
 subspace.
 """
-from .driver import advance, apply, evaluate, iterate, run
+from .driver import advance, assimilate, evaluate, iterate, run
 from .helpers import effective_sample_size, misfits, repair_failed_members
 from .policies import (
     AdaptiveESSSchedule,
@@ -155,11 +155,11 @@ __all__ = [
     # inflation
     "MultiplicativeInflation",
     "AdditiveInflation",
-    # the driver, and one rung
+    # the driver, and one step
     "run",
     "iterate",
     "evaluate",
-    "apply",
+    "assimilate",
     "advance",
     # helpers
     "misfits",

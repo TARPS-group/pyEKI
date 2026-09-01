@@ -91,17 +91,17 @@ def misfits(y, predictions, noise_cov) -> Array:
             f"misfits: noise_cov must be a pyeki.linalg.PSDLinOp, got "
             f"{type(noise_cov).__name__}"
         )
-    n_obs = noise_cov.shape[0]
+    v_dim = noise_cov.shape[0]
     y = jnp.asarray(y)
-    if y.ndim != 1 or y.shape[0] != n_obs:
+    if y.ndim != 1 or y.shape[0] != v_dim:
         raise ValueError(
-            f"misfits: expected y of shape ({n_obs},) to match {noise_cov!r}, "
+            f"misfits: expected y of shape ({v_dim},) to match {noise_cov!r}, "
             f"got shape {y.shape}"
         )
     predictions = jnp.asarray(predictions)
-    if predictions.ndim < 1 or predictions.shape[-1] != n_obs:
+    if predictions.ndim < 1 or predictions.shape[-1] != v_dim:
         raise ValueError(
-            f"misfits: expected predictions of core shape (..., {n_obs}), got "
+            f"misfits: expected predictions of core shape (..., {v_dim}), got "
             f"shape {predictions.shape}"
         )
     return _misfits_from_residuals(noise_cov.whiten(y - predictions))

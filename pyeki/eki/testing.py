@@ -37,7 +37,7 @@ Notes
 The behaviour these checks verify is specified by the "Ensemble Kalman
 Inversion contract" page of the documentation.
 
-Purity is the reason the harness exists. A policy holding iteration state
+Purity is the reason the harness exists. A policy holding state across steps
 silently breaks resumption, and that is a failure a test suite can catch in
 its own package's policies and cannot catch in a user's. Calling a policy
 twice on one evaluation and comparing is two lines.
@@ -228,11 +228,11 @@ def check_update(
         ensemble = jnp.asarray(rng.normal(size=(6, 3)))
     if predictions is None:
         predictions = jnp.asarray(rng.normal(size=(ensemble.shape[0], 4)))
-    n_obs = predictions.shape[-1]
+    v_dim = predictions.shape[-1]
     if noise_cov is None:
-        noise_cov = PSDDiagonal(jnp.full((n_obs,), 0.5))
+        noise_cov = PSDDiagonal(jnp.full((v_dim,), 0.5))
     if y is None:
-        y = jnp.asarray(rng.normal(size=(n_obs,)))
+        y = jnp.asarray(rng.normal(size=(v_dim,)))
     increment = jnp.asarray(increment, dtype=ensemble.dtype)
     beta = jnp.asarray(beta, dtype=ensemble.dtype)
     name = repr(update)
@@ -286,8 +286,8 @@ def check_update(
 def check_inflation(inflation, key=None, ensemble=None, *, step: int = 0, beta=0.25):
     """Check an :class:`~pyeki.eki.Inflation` against its protocol.
 
-    Verifies shape preservation; purity, by calling twice on the same
-    arguments and comparing bit-exactly; and that the ensemble mean is
+    Verifies shape and dtype preservation; purity, by calling twice on the
+    same arguments and comparing bit-exactly; and that the ensemble mean is
     preserved, unless the rule declares ``changes_mean = True``.
 
     Parameters
@@ -319,6 +319,11 @@ def check_inflation(inflation, key=None, ensemble=None, *, step: int = 0, beta=0
     assert inflated.shape == ensemble.shape, (
         f"{name}: returned shape {inflated.shape}, expected {ensemble.shape}. "
         f"An Inflation is shape preserving."
+    )
+    assert inflated.dtype == ensemble.dtype, (
+        f"{name}: returned dtype {inflated.dtype}, expected {ensemble.dtype}. "
+        f"These members are what the forward model is called on, so a driver "
+        f"rejects a narrower or non-floating one."
     )
     _identical(
         inflated,

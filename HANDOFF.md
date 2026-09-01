@@ -1,8 +1,10 @@
 # Handoff
 
 Written 2026-08-24, updated 2026-08-25 after the operator layer was reworked
-against the normative contract, and 2026-08-27 after `pyeki.eki` shipped. Read
-`CLAUDE.md` first for conventions, then this for state and next steps.
+against the normative contract, 2026-08-27 after `pyeki.eki` shipped, and
+2026-08-28 after the forward-model contract was specified and the layer
+vocabulary was fixed. Read `CLAUDE.md` first for conventions — including the
+layer-boundary rules, which are new — then this for state and next steps.
 
 ## Where things stand
 
@@ -20,18 +22,49 @@ quickstart, three user-guide pages plus a guide to writing an operator, the
 three normative contracts, design notes, and an API reference.
 
 `pyeki.gauss` is implemented to `docs/gaussian-contract.md`: `Gaussian`,
-`EnsembleJoint` and the two array-level conditioning primitives, all routed
+`EmpiricalJoint` and the two array-level conditioning primitives, all routed
 through the whitened-SVD kernel. `PSDLowRank`, the operator it needed, is in
 `pyeki.linalg`.
 
 `pyeki.eki` is implemented to `docs/eki-contract.md`: the four value classes,
 the three policy protocols with eight shipped implementations, the two public
-phases of a rung, `run` and `iterate`, the three array-level helpers, and the
-`pyeki.eki.testing` conformance harness for user-written policies. Its
+phases of a step, `run` and `iterate`, the three array-level helpers, and
+the `pyeki.eki.testing` conformance harness for user-written policies. Its
 user-guide page is `docs/user-guide/running-an-inversion.md`.
 
+The **forward-model contract** is specified in one place as of 2026-08-28, in
+the contract's *Forward models and failed members* and in the user-guide page
+`docs/user-guide/writing-a-forward-model.md`. Three properties the driver had
+been deciding on its own are now stated and tested (obligations 27-30): what
+the callable receives, what it may return, and what it must be. It landed on
+its own branch, deliberately ahead of the toy forward models and the first
+tutorial, both of which consume it — a session writing the contract *and* the
+models satisfying it is under pressure to bend the first toward the second.
+
+The **layer vocabulary** was unified at the same time, and the rules are now
+in `CLAUDE.md`. One word per concept: a *run* contains *steps*, each step has
+two *phases* (`evaluate` and `assimilate`) made of numbered *operations*, and
+each step is preceded by one *evaluation* of the forward model. "Rung" and
+"iteration" as a countable noun are retired. Vocabulary flows downward only:
+`pyeki.gauss` has samples, not members, and `pyeki.linalg` speaks of neither
+Gaussians nor conditioning. The renames that followed: `EnsembleJoint` ->
+`EmpiricalJoint`, its `n_members` -> `n_samples`, `apply` -> `assimilate`,
+`EKIResult.n_steps` -> `n_evaluations` plus a new `n_completed_steps`, and
+`n_obs` -> `v_dim`. `docs/user-guide/conditioning.md` was rewritten in the
+gauss layer's own vocabulary at the same time; it was the last prose describing
+that layer in EKI's words.
+
+Two things came out of the adversarial review of that branch. An **inflation's
+output dtype is now checked**, as an update's already was — the inflated
+members are what the forward model is called on, so an inflation returning
+`int64` used to hand the model an integer ensemble with nothing raised.
+And **a forward model returning a dtype *wider* than the run is not demoted**,
+so it fails at the update's dtype check with an error naming the update rule;
+that is deliberate for now and recorded as issue #19.
+
 **Not started.** `pyeki.localize`, and the Kronecker family of operators. The
-design background for both is in `docs/design.md`.
+design background for both is in `docs/design.md`. The toy forward-model module
+and the tutorial series are also unwritten; both are now unblocked.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -113,7 +146,7 @@ what shape it wants. Revisit when localization lands. The EKI contract's
 and whitening versus triangularity went to the operator contract: `supports()`
 is defined by hook presence with derived-dependency resolution, and
 `cholesky()` was removed in favour of `factor()` plus a primitive `whiten()`.
-`AdditiveInflation`'s supposed per-rung refactorization turned out not to
+`AdditiveInflation`'s supposed per-step refactorization turned out not to
 exist: every shipped PSD operator factorizes at construction, so `factor()`
 returns a stored factor and the update path contains no Cholesky at all.)
 
@@ -136,7 +169,7 @@ layer; this is the index.
 | Lazy factorization caches are discarded inside traces | silent ~10x slowdown |
 | Undeclared non-array dataclass fields become tracers | fails later, far from the declaration |
 | JAX has no generalized `eigh` | reformulate via Cholesky whitening |
-| Per-step noise is $\Sigma/\Delta\beta_t$, never $\Sigma/\beta_t$ | a plausible posterior, wrong by $(T+1)/2$ times the data precision on a uniform $T$-rung ladder, growing with ladder length |
+| Per-step noise is $\Sigma/\Delta\beta_t$, never $\Sigma/\beta_t$ | a plausible posterior, wrong by $(T+1)/2$ times the data precision on a uniform $T$-step ladder, growing with ladder length |
 | A single-`where` guard sends a `nan` misfit to the `inf` branch | `nan > 0` is `False`, so the schedule silently returns the *largest* allowed step |
 | A Python float passed as a `jit` **argument** does not retrace | the retrace-per-step bug is a *static field* on an object crossing the boundary, so never pass an `EKIState` or `Evaluation` whole |
 | `Evaluation.centre_misfit` is not the mean of `Evaluation.misfits` | they differ by exactly $\tfrac{J-1}{2J}\operatorname{tr}(W \widehat C_{vv} W^\top)$ |
@@ -146,6 +179,11 @@ layer; this is the index.
 | `cov.factor()` is free, because operators factorize at construction | "hoisting" it by storing a densified factor turns an $O(P)$ diagonal into a $P \times P$ array |
 | Every comparison against `nan` is `False` | a bisection on such a comparison silently returns its lower bracket, and a floor then makes that look like an ordinary step |
 | `jnp.mean(x, axis=-2)` without `keepdims` | the subtraction right-aligns against the batch axis, so an operand whose leading axis equals $J$ broadcasts and returns wrong anomalies without raising |
+| `np.asarray` on the forward model's argument returns a **read-only view**, not a copy | writing into it raises `assignment destination is read-only` from wherever you wrote, not at the conversion; copy with `np.array` |
+| A run's evaluations and its completed steps differ by one whenever it ends on a stopping rule or a `None` increment | a single `n_steps` naming both is how the ambiguity arose; the terminal record is the one with a zero increment, at most one, always last |
+| A policy's output needs its **dtype** checked, not only its shape | an inflation returning `int64` handed the forward model an integer ensemble and the run completed silently; the shape check passed |
+| A `float32` forward model is promoted and warned about, not rejected | it still costs ~$7\times10^{-5}$ relative in the posterior mean where the prediction mean exceeds the spread by $10^4$; promotion recovers only about half, since the digits are gone before the array arrives |
+| `ensemble @ G` instead of `ensemble @ G.T` is silent when $G$ is square | the transposed model's predictions, right shape, no error; `G @ ensemble` raises, so it is the harmless mistake |
 
 ## Working agreements
 
