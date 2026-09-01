@@ -732,8 +732,9 @@ class EKIResult:
         return len(self.history)
 
     @property
-    def n_updates(self) -> int:
-        """How many times this run moved the ensemble.
+    def n_completed_steps(self) -> int:
+        """How many steps this run completed: how many times it moved the
+        ensemble.
 
         Equal to :attr:`n_evaluations`, or one less when the run ended on a
         terminal evaluation — a stopping rule that fired, or a schedule whose

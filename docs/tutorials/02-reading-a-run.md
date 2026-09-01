@@ -19,7 +19,7 @@ Tutorial 1. Same forward model, carried forward.
 - Why the question needs asking: `run` returning `status='schedule_exhausted'`
   means the ladder finished, **not** that the answer is good. This framing is
   the point of the page.
-- `EKIResult`: `status`, `n_evaluations`, `n_updates`, `beta`,
+- `EKIResult`: `status`, `n_evaluations`, `n_completed_steps`, `beta`,
   `budget_complete`, `stop_fired`, `min_n_valid`.
 - `result.stacked` and the eleven fields of `HistoryRecord` — `step`,
   `n_valid`, `beta`, `increment`, `beta_next`, `misfit_mean`, `misfit_min`,

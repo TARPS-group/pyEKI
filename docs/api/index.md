@@ -140,8 +140,8 @@ and {doc}`../eki-contract` for the full behavioural contract.
    :members: batch_shape
 
 .. autoclass:: pyeki.eki.EKIResult
-   :members: ensemble, beta, mean, n_evaluations, n_updates, min_n_valid,
-             stacked, stop_fired, budget_complete
+   :members: ensemble, beta, mean, n_evaluations, n_completed_steps,
+             min_n_valid, stacked, stop_fired, budget_complete
 ```
 
 ### The three axes, as protocols

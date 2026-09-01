@@ -410,7 +410,7 @@ def test_4_both_adaptive_schedules_reach_their_budget_without_exceeding_it(
         schedule=schedule,
     )
     assert again.n_evaluations == 0
-    assert again.n_updates == 0
+    assert again.n_completed_steps == 0
 
 
 @pytest.mark.parametrize(
@@ -1913,7 +1913,7 @@ def test_23_a_finished_ladder_is_a_no_op_and_restart_gives_the_full_one():
         again = run(finished.state, problem.forward, y, noise, schedule=schedule)
         assert again.status == SCHEDULE_EXHAUSTED
         assert again.n_evaluations == 0
-        assert again.n_updates == 0
+        assert again.n_completed_steps == 0
         assert again.history == ()
         assert again.last_evaluation is None
         assert np.array_equal(
@@ -2490,9 +2490,11 @@ def test_30_the_evaluation_and_update_counts_hold_on_every_exit():
         model = _Counted()
         result = run(state, model, y, noise, **kwargs)
         assert result.n_evaluations == model.calls, label
-        assert result.n_updates == int(result.state.step) - int(state.step), label
+        moved = int(result.state.step) - int(state.step)
+        assert result.n_completed_steps == moved, label
         # The exact relationship, in both directions.
-        assert result.n_evaluations - result.n_updates == terminal, label
+        gap = result.n_evaluations - result.n_completed_steps
+        assert gap == terminal, label
         # A terminal record is the zero-increment one, at most one, always last.
         zeros = [i for i, r in enumerate(result.history)
                  if float(r.increment) == 0.0]

@@ -166,14 +166,14 @@ result.status              # "schedule_exhausted" or "stopping_rule" from run
 result.budget_complete     # did the ladder finish?
 result.stop_fired          # did the stopping rule fire?
 result.n_evaluations       # forward calls: one per record
-result.n_updates           # how many times the ensemble moved
+result.n_completed_steps   # steps taken: times the ensemble moved
 result.min_n_valid         # the worst step's valid-member count
 result.stacked             # the history, every field (T,)-shaped
 result.last_evaluation     # the final forward evaluation
 ```
 
-`n_updates` equals `n_evaluations`, or one less: a run that stops because a
-stopping rule fired, or because a schedule returned `None`, needed an
+`n_completed_steps` equals `n_evaluations`, or one less: a run that stops
+because a stopping rule fired, or because a schedule returned `None`, needed an
 evaluation to reach that decision and then discarded the update. Your cost in
 model calls is `n_evaluations`, and in member evaluations
 `n_evaluations * n_members`.

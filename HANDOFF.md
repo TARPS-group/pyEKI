@@ -49,8 +49,8 @@ each step is preceded by one *evaluation* of the forward model. "Rung" and
 `pyeki.gauss` has samples, not members, and `pyeki.linalg` speaks of neither
 Gaussians nor conditioning. The renames that followed: `EnsembleJoint` ->
 `EmpiricalJoint`, its `n_members` -> `n_samples`, `apply` -> `assimilate`,
-`EKIResult.n_steps` -> `n_evaluations` plus a new `n_updates`, and `n_obs` ->
-`v_dim`.
+`EKIResult.n_steps` -> `n_evaluations` plus a new `n_completed_steps`, and
+`n_obs` -> `v_dim`.
 
 **Not started.** `pyeki.localize`, and the Kronecker family of operators. The
 design background for both is in `docs/design.md`. The toy forward-model module

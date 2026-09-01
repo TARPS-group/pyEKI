@@ -99,7 +99,7 @@ because this layer accumulated three words for one of them once already.
 | term | means | counted by |
 | ---- | ----- | ---------- |
 | **run** | one call of `run` or `iterate`, or a chain of them over one state | — |
-| **step** | one ensemble update: it takes an increment, advances $\beta$, and advances `EKIState.step` | `EKIResult.n_updates`; declared by `Schedule.n_steps`; bounded by `max_steps` |
+| **step** | one ensemble update: it takes an increment, advances $\beta$, and advances `EKIState.step` | `EKIResult.n_completed_steps`; declared by `Schedule.n_steps`; bounded by `max_steps` |
 | **evaluation** | one call of the forward model, on the whole ensemble | `EKIResult.n_evaluations`, one per `HistoryRecord` |
 | **phase** | `evaluate` or `assimilate`, the two public halves of a step | — |
 | **operation** | one of the ten numbered actions inside a step ({ref}`eki-step`) | — |
@@ -554,7 +554,7 @@ One step, as **two public phases** and one convenience that composes them.
 | function | does | returns |
 | -------- | ---- | ------- |
 | `evaluate` | inflate, call the forward model, repair, summarize | an `Evaluation` |
-| `assimilate` | validate the increment, update, check finiteness, emit | `(EKIState, HistoryRecord)` |
+| `assimilate` | validate the increment, update, check finiteness, assemble the new state | `(EKIState, HistoryRecord)` |
 | `advance` | `evaluate` then `assimilate`, at a given increment | `(EKIState, HistoryRecord)` |
 
 ### `evaluate(state, forward, y, noise_cov, *, inflation=None, on_failure="repair")`
@@ -704,7 +704,7 @@ operations 0 and 6–9 are `assimilate`.
    naming the step and the level. Silent `nan` propagation through a long run
    is the worst outcome available to this layer, and the cost is one $O(JP)$
    reduction.
-9. **Emit.** Return
+9. **Assemble the new state.** Return
    `EKIState(u_new, state.beta + dbeta, state.step + 1, key_next)` and the
    step's `HistoryRecord`. All four state fields move together: the ensemble
    the update produced, the level raised by the increment, the index raised by
@@ -2056,15 +2056,15 @@ package: a generated `__eq__` would raise on array comparison, and a generated
 Properties: `ensemble` (`state.ensemble`), `beta` (`state.beta`), `mean` (the
 ensemble mean, `(P,)`), `n_evaluations` (the number of *forward calls*, one per
 record — not $J\,n_{\text{evaluations}}$, which counts member evaluations and
-is the caller's own multiplication), `n_updates` (how many times the ensemble
-moved), `min_n_valid` (the smallest `n_valid` over the history, or `None` on an
+is the caller's own multiplication), `n_completed_steps` (how many steps this
+run completed), `min_n_valid` (the smallest `n_valid` over the history, or `None` on an
 empty one), `stacked` and the two termination booleans (all below).
 
 **There is no `n_steps` on a result**, deliberately. The layer counts two
 different things — evaluations and updates — that differ by one whenever a run
 ends on a terminal evaluation ({ref}`eki-terminology`), and a single `n_steps`
-naming both is how the ambiguity arose. `n_updates` is derived rather than
-stored: a terminal record is the one whose `increment` is exactly zero, there
+naming both is how the ambiguity arose. `n_completed_steps` is derived
+rather than stored: a terminal record is the one whose `increment` is exactly zero, there
 is at most one, and it is always last. It cannot be derived from `status`,
 which does not distinguish a ladder exhausted declaratively from one exhausted
 by `next_increment` returning `None`, nor from `state.step`, which is
@@ -2887,12 +2887,12 @@ written independently of the code under test. The suite must verify at least:
 
 30. **The evaluation and update counts are pinned on every termination path.**
     An instrumented forward model asserts that `n_evaluations` equals its own
-    call count, and that `n_updates` equals the change in `state.step`, on all
-    four ways a run ends: a `FixedSchedule` reaching its length, a budgeted
+    call count, and that `n_completed_steps` equals the change in
+    `state.step`, on all four ways a run ends: a `FixedSchedule` reaching its length, a budgeted
     adaptive schedule reaching `beta_target`, a stopping rule firing, and a
-    schedule returning `None`. The first two must give `n_updates ==
-    n_evaluations` and the last two `n_updates == n_evaluations - 1`, asserted
-    as equalities in both directions — a test that only checked "at most one
+    schedule returning `None`. The first two must give `n_completed_steps ==
+    n_evaluations` and the last two `n_completed_steps == n_evaluations - 1`,
+    asserted as equalities in both directions — a test that only checked "at most one
     apart" would pass an implementation that spent a needless evaluation on the
     declarative paths, which is the regression this guards. Separately,
     `max_steps` is asserted to be an exact cap: an unbounded ladder with
