@@ -4,7 +4,7 @@
 function            does
 =================== =========================================================
 :func:`evaluate`    inflate, call the forward model, repair, summarize
-:func:`assimilate`  validate the increment, update, check finiteness, advance
+:func:`assimilate`  validate the increment, update, check finiteness, emit
 :func:`advance`     :func:`evaluate` then :func:`assimilate`, at an increment
 :func:`iterate`     the driver as a generator, yielding after every step
 :func:`run`         the driver as a function, returning an

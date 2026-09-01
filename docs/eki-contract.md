@@ -99,8 +99,8 @@ because this layer accumulated three words for one of them once already.
 | term | means | counted by |
 | ---- | ----- | ---------- |
 | **run** | one call of `run` or `iterate`, or a chain of them over one state | — |
-| **step** | one ensemble update: it takes an increment, advances $\beta$, and advances `EKIState.step` | `EKIResult.n_updates`; declared by `Schedule.n_steps` |
-| **evaluation** | one call of the forward model, on the whole ensemble | `EKIResult.n_evaluations`, one per `HistoryRecord`; bounded by `max_steps` |
+| **step** | one ensemble update: it takes an increment, advances $\beta$, and advances `EKIState.step` | `EKIResult.n_updates`; declared by `Schedule.n_steps`; bounded by `max_steps` |
+| **evaluation** | one call of the forward model, on the whole ensemble | `EKIResult.n_evaluations`, one per `HistoryRecord` |
 | **phase** | `evaluate` or `assimilate`, the two public halves of a step | — |
 | **operation** | one of the ten numbered actions inside a step ({ref}`eki-step`) | — |
 
@@ -121,9 +121,11 @@ n_{\text{evaluations}} \;=\; n_{\text{updates}} \;+\;
 $$
 
 and a run's cost in **member** evaluations is $J\,n_{\text{evaluations}}$.
-`max_steps` bounds the evaluations exactly — a run makes at most `max_steps`
-of them, hence at most $J\,\texttt{max\_steps}$ member evaluations, which is
-the hard budget a caller with an expensive model needs.
+`max_steps` bounds the steps of a call, and because it is checked *before*
+the forward model is called it bounds the evaluations by the same number: a
+run makes at most `max_steps` of them, hence at most
+$J\,\texttt{max\_steps}$ member evaluations, which is the hard budget a caller
+with an expensive model needs.
 
 Two words are **retired** and must not reappear: *rung*, and *iteration* as a
 countable noun. "Iterate" as a verb, and {func}`iterate` as a function, are
@@ -552,7 +554,7 @@ One step, as **two public phases** and one convenience that composes them.
 | function | does | returns |
 | -------- | ---- | ------- |
 | `evaluate` | inflate, call the forward model, repair, summarize | an `Evaluation` |
-| `assimilate` | validate the increment, update, check finiteness, advance | `(EKIState, HistoryRecord)` |
+| `assimilate` | validate the increment, update, check finiteness, emit | `(EKIState, HistoryRecord)` |
 | `advance` | `evaluate` then `assimilate`, at a given increment | `(EKIState, HistoryRecord)` |
 
 ### `evaluate(state, forward, y, noise_cov, *, inflation=None, on_failure="repair")`
@@ -702,9 +704,11 @@ operations 0 and 6–9 are `assimilate`.
    naming the step and the level. Silent `nan` propagation through a long run
    is the worst outcome available to this layer, and the cost is one $O(JP)$
    reduction.
-9. **Advance.** Return
+9. **Emit.** Return
    `EKIState(u_new, state.beta + dbeta, state.step + 1, key_next)` and the
-   step's `HistoryRecord`.
+   step's `HistoryRecord`. All four state fields move together: the ensemble
+   the update produced, the level raised by the increment, the index raised by
+   one, and the key the split reserved.
 
 Operations 4, 6 and 8 read concrete values, so one step **synchronizes with the
 device a small fixed number of times, bounded independently of every size in
