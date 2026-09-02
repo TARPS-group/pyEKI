@@ -210,10 +210,10 @@ Step $t$ carries the ensemble from level $\beta_t$ to
 $\beta_{t+1} = \beta_t + \Delta\beta_t$:
 
 1. evaluate the forward model on every member, $v_j = G(u_j)$;
-2. form the joint Gaussian of the pairs $(u_j, v_j)$ — an
+2. hold the pairs $(u_j, v_j)$ as an
    {class}`~pyeki.gauss.EmpiricalJoint`;
-3. condition it on $y$ with noise $R/\Delta\beta_t$, obtaining an updated
-   parameter ensemble.
+3. condition the joint Gaussian fitted to them on $y$ with noise
+   $R/\Delta\beta_t$, obtaining an updated parameter ensemble.
 
 Operation 3 is exact Gaussian conditioning of a Gaussian *fitted to* the
 ensemble. Two approximations are inherent to the step: the joint law of $(u,
@@ -1835,12 +1835,14 @@ class is otherwise an ordinary unbatched frozen pytree ({ref}`eki-jax`).
 :::{note}
 **The whitening is computed twice per step, and the layer accepts that.** The
 driver whitens $y - v_j$ against the base $R$ to build this array, and the
-update then whitens $A_v$ against $R/\Delta\beta$ inside
+update then whitens the fitted factor against $R/\Delta\beta$ inside
 {class}`~pyeki.gauss.EmpiricalJoint`. The two are the same computation up to a
 factor: centring the rows of `whitened_residuals` gives $-A_v W^\top$ in exact
 arithmetic, and the tempered whitener is $\sqrt{\Delta\beta}\,W$. The two
-routes are **not** interchangeable in floating point: `pyeki.gauss` centres and
-then whitens, precisely because centring already-whitened predictions cancels a
+routes are **not** interchangeable in floating point: `pyeki.gauss` centres
+before it whitens — structurally, since it whitens a factor that was centred
+when it was built — precisely because centring already-whitened predictions
+cancels a
 common $W\bar v$ and loses
 $O(\varepsilon\sqrt{\kappa(R)}\,\lVert W\bar v\rVert / \lVert W A_v\rVert)$
 — an error that grows as the ensemble collapses. The recovered matrix is a
@@ -2095,8 +2097,9 @@ formed and the rank ceiling of {ref}`eki-subspace` is visible in the type. The
 result therefore carries `mean` for convenience and stops there.
 
 Two things that line is **not**. It is not a further conditioning step:
-`EmpiricalJoint.condition` would apply another Kalman update and return an
-ensemble shrunk one extra step, which is the over-confident direction. And
+conditioning the fitted joint — `to_gaussian_joint().condition(...)` — would
+apply another Kalman update and return an ensemble shrunk one extra step,
+which is the over-confident direction. And
 it is not a posterior, whatever the run's configuration — it is the fit to the
 terminal ensemble, under every caveat of {ref}`eki-honesty`.
 
@@ -2461,9 +2464,10 @@ Not normative, but the design was shaped against these call sites.
 
 **`pyeki.gauss` is consumed only through `EmpiricalJoint`'s two update
 methods**, once per step, with the tempered operator `noise_cov / increment`.
-No other gauss surface is used by the shipped rules: not `condition`, not
-`Gaussian.log_density`, not the conditioning primitives. `Gaussian` is used
-once, by `EKIState.from_prior`, for its `sample`.
+No other gauss surface is used by the shipped rules: not `GaussianJoint`
+directly, not `Gaussian.log_density`, not the conditioning primitives.
+`Gaussian` is used twice — by `EKIState.from_prior` for its `sample`, and by
+`from_samples` for the terminal moment fit.
 
 **`pyeki.localize` will supply an `EnsembleUpdate`.** The driver needs no
 knowledge of localization and localization needs no change to the driver: the
