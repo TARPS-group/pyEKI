@@ -79,7 +79,7 @@ chosen independently — one of $C_{uu}$, one of $C_{vv}$ — carry no
 information about $C_{uv}$ at all; the pair has to come from one
 factorization.
 
-Two instances matter.
+The two that matter here:
 
 **From samples**, with $k = J$: the factor is the scaled anomalies,
 
@@ -208,7 +208,7 @@ $$
 
 Column $j$ of the conditioned factor is updated sample $j$.
 
-Two consequences shape the API.
+Two consequences for the API.
 
 **The projection from samples to a joint loses nothing.** Running the
 equivalence backwards, $u_j = \bar u + \sqrt{J-1}(F_u)_{\cdot j}$, so
@@ -297,12 +297,19 @@ $$
 F_u = C_{uv}\bigl(F_v^\top\bigr)^{+} = C_{uv}F_v\bigl(F_v^\top F_v\bigr)^{-1}.
 $$
 
-Forming the $k \times k$ Gram $F_v^\top F_v$ squares the condition number —
-the same defect that rules out the Woodbury route ({doc}`design`). It bites
-at ordinary conditioning: on a factor with $\kappa(F_v) = 7.7$ whose last
-column is scaled by $10^{-8}$, the Gram has $\kappa = 1.3\times10^{32}$ and
-the recovered $F_u$ is wrong by a relative factor of $1.5\times10^{8}$ — no
-correct digits.
+This fails outright when $k > N$: the Gram is then singular by construction,
+the solve is ill-posed, and there is no coherent $F_u$ to recover. Measured on
+a $(5, 6)$ factor, the recovered $F_u$ has relative error $1.4\times10^{9}$ —
+not an approximation but a different matrix. When $k \le N$ the recovery is
+well-posed but forms $F_v^\top F_v$, squaring the condition number, which is
+the defect that rules out the Woodbury route ({doc}`design`): at
+$\kappa(F_v) = 1.4\times10^{8}$ the Gram reaches $2\times10^{16}$ and the
+recovered $F_u$ keeps 8 of its 16 digits.
+
+Squaring is the lesser half of the objection, though, and worth being precise
+about: an SVD-based pseudo-inverse avoids forming the Gram and does no better
+here ($4.7\times10^{-8}$ on the same fixture), because the ill-conditioning
+is in $F_v$ itself. The decisive objections are the two below.
 
 **It needs a matrix of both dimensions.** $C_{uv}$ is $P \times N$. No code
 path in the package forms one; the point of the whitened-SVD kernel is that
@@ -345,7 +352,7 @@ holds.
 | `transform_update` | `EmpiricalJoint` | valid only for a centred factor |
 | `pathwise_update` | `EmpiricalJoint` | returns samples aligned with the ones held |
 
-Two placements are worth stating plainly.
+Two placements deserve comment.
 
 **`condition` is not on `EmpiricalJoint`.** Conditioning a set of samples
 means conditioning a Gaussian fitted to their moments. That fit is a
@@ -391,7 +398,7 @@ order as a dense solve, with the advantages of inverting nothing and
 remaining valid for a singular $C_0$; the real gain is at $k \ll P$, and in
 `diag()` and `sample()` on the low-rank posterior, both $O(Pk)$.
 
-One limitation is worth recording. {class}`~pyeki.linalg.PSDLowRank` holds a
+One limitation. {class}`~pyeki.linalg.PSDLowRank` holds a
 dense array, so the posterior covariance factor $F_uT$ is materialized at
 $(P, k)$ even when $F_u$ is structured. For EKI that costs nothing — a
 $(J, P)$ ensemble is already held and $k \le J$ — but a caller with $P$ too
@@ -415,9 +422,10 @@ $\varepsilon = 2.22\times10^{-16}$.
 | `transform_update` against `condition` plus the reading | $4.4\times10^{-16}$ |
 | Matheron on exact-moment realizations, against the closed-form posterior | mean $2.2\times10^{-16}$, covariance $3.3\times10^{-16}$ |
 | a sample-set argument: mean survives, covariance does not | mean $1.1\times10^{-16}$; covariance error $1.05$ on a scale of $1.77$ |
-| block recovery of $F_u$ through the Gram | $\kappa(F_v) = 7.7 \to \kappa(F_v^\top F_v) = 1.3\times10^{32}$; $F_u$ wrong by $1.5\times10^{8}$ |
+| block recovery of $F_u$, wide factor ($k > N$) | ill-posed; recovered $F_u$ off by $1.4\times10^{9}$ |
+| block recovery of $F_u$, Gram route at $\kappa(F_v) = 1.4\times10^{8}$ | $\kappa(F_v^\top F_v) = 2\times10^{16}$; $F_u$ to $1.8\times10^{-8}$, against $4.7\times10^{-8}$ for an SVD pseudo-inverse |
 
-All but the last are exercised by `tests/test_gauss.py` — most as
+All but the last two are exercised by `tests/test_gauss.py` — most as
 conformance obligations of {doc}`gaussian-contract`, the sample-set row as a
-targeted regression test. The Gram measurement is a property of the rejected
-design, so it is recorded here rather than tested.
+targeted regression test. The two block-recovery rows describe the rejected
+design, so they are recorded here rather than tested.

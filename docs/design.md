@@ -100,7 +100,7 @@ whitened SVD and selects nothing at runtime ({doc}`gaussian-contract`).
 | --- | --- | --- |
 | $k < N$, noise whitenable | whitened SVD — what pyEKI implements | $O(Nk^2)$ |
 | $N$ very large, noise block diagonal | same, whitening per block | $O(Nk^2)$ |
-| localized | per-block whitened SVD on local data | $O(n N_{\text{loc}} J^2)$ |
+| localized | per-block whitened SVD on local data | $O(n N_{\text{loc}} k^2)$ |
 | $N \le k$ | dense factorization of the predictive covariance — deferred as a possible internal optimization behind the same signatures | $O(N^3)$ |
 
 ## Localization

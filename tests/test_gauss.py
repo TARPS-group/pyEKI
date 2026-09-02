@@ -702,6 +702,17 @@ def test_7_from_samples_agrees_with_the_joint_it_is_the_one_block_case_of():
         fit.cov.to_dense(), want, rtol=0, atol=1e3 * EPS * np.abs(want).max()
     )
 
+    # and against the two-block fit's own u marginal, which is the object the
+    # one-block case is the counterpart of
+    marginal = joint.to_gaussian_joint().u_marginal
+    np.testing.assert_array_equal(fit.mean, marginal.mean)
+    np.testing.assert_allclose(
+        fit.cov.to_dense(),
+        marginal.cov.to_dense(),
+        rtol=0,
+        atol=1e3 * EPS * np.abs(want).max(),
+    )
+
 
 def test_7_from_samples_gives_identical_members_exactly_zero_spread():
     """The stable centring, not jnp.mean: a collapsed sample has no anomalies."""
@@ -997,9 +1008,20 @@ def test_10_value_checks_are_debug_only():
         "v_samples": jnp.asarray([[0.0], [jnp.nan], [0.0]]),
     }
 
+    nan_joint = {
+        "u_mean": jnp.asarray([0.0, jnp.nan]),
+        "v_mean": jnp.zeros(2),
+        "u_factor": Dense(jnp.zeros((2, 2))),
+        "v_factor": Dense(jnp.zeros((2, 2))),
+    }
+    nan_factor = {**nan_joint, "u_mean": jnp.zeros(2),
+                  "u_factor": Dense(jnp.full((2, 2), jnp.nan))}
+
     # off by default: no exception, just a nan-bearing object
     Gaussian(jnp.asarray([0.0, jnp.nan, 0.0]), cov)
     EmpiricalJoint(**joint_args)
+    GaussianJoint(**nan_joint)
+    GaussianJoint(**nan_factor)
     gain_weights(jnp.asarray([[jnp.nan, 0.0]]), jnp.zeros(2))
 
     with debug_checks(True):
@@ -1013,6 +1035,26 @@ def test_10_value_checks_are_debug_only():
             gain_weights(jnp.asarray([[1.0, 0.0]]), jnp.asarray([jnp.nan, 0.0]))
         with pytest.raises(ValueError, match="s must be finite"):
             sqrt_transform(jnp.asarray([[jnp.nan, 0.0]]))
+        with pytest.raises(ValueError, match="u_mean must be finite"):
+            GaussianJoint(**nan_joint)
+        with pytest.raises(ValueError, match="u_factor must be finite"):
+            GaussianJoint(**nan_factor)
+
+        # pathwise checks each of its three realization arguments by name
+        pw = GaussianJoint.from_samples(
+            u_samples=jnp.asarray(RNG.normal(size=(4, 2))),
+            v_samples=jnp.asarray(RNG.normal(size=(4, 3))),
+        )
+        pw_args = {
+            "u": jnp.zeros((4, 2)),
+            "v": jnp.zeros((4, 3)),
+            "whitened_noise": jnp.zeros((4, 3)),
+            "y": jnp.zeros(3),
+            "noise_cov": DensePSD.from_matrix(jnp.asarray(_psd(3))),
+        }
+        for name, shape in (("u", (4, 2)), ("v", (4, 3)), ("whitened_noise", (4, 3))):
+            with pytest.raises(ValueError, match=f"{name} must be finite"):
+                pw.pathwise(**{**pw_args, name: jnp.full(shape, jnp.nan)})
 
         good = EmpiricalJoint(
             u_samples=jnp.asarray(RNG.normal(size=(3, 2))),
@@ -1263,6 +1305,20 @@ def test_13_genuine_construction_rejects_a_family_covariance():
     with pytest.raises(ValueError, match="vmapped family"):
         Gaussian(jnp.zeros(3), cov_family)
 
+    # the factor half of the same rule, for GaussianJoint's row blocks
+    factor_family = _stacked(Dense(jnp.zeros((3, 2))), reps=4)
+    assert factor_family.batch_shape == (4,)
+    for field in ("u_factor", "v_factor"):
+        fields = {
+            "u_mean": jnp.zeros(3),
+            "v_mean": jnp.zeros(3),
+            "u_factor": Dense(jnp.zeros((3, 2))),
+            "v_factor": Dense(jnp.zeros((3, 2))),
+            field: factor_family,
+        }
+        with pytest.raises(ValueError, match="vmapped family"):
+            GaussianJoint(**fields)
+
 
 def test_13_a_family_noise_covariance_is_rejected_at_the_call():
     joint, noise_cov, y = _reference_problem()
@@ -1486,7 +1542,12 @@ def test_14_from_factors_accepts_arrays_and_operators_alike():
     assert isinstance(joint.u_factor, Dense)
     assert joint.v_factor is Fv
     assert joint.latent_dim == k
-    np.testing.assert_allclose(joint.u_marginal.cov.to_dense(), np.asarray(Fu @ Fu.T))
+    np.testing.assert_allclose(
+        joint.u_marginal.cov.to_dense(),
+        np.asarray(Fu @ Fu.T),
+        rtol=0,
+        atol=1e2 * EPS * float(np.abs(np.asarray(Fu @ Fu.T)).max()),
+    )
 
 
 def test_14_construction_and_constructor_validation():
@@ -1550,6 +1611,77 @@ def test_14_a_joint_family_is_legible_and_inert():
     for name in ("u_marginal", "v_marginal"):
         with pytest.raises(ValueError, match="vmapped family"):
             getattr(family, name)
+
+
+def test_14_a_joint_batch_shape_includes_both_factors():
+    """A family in the factors alone must report itself. ``_stacked`` batches
+    every leaf, so it cannot see a batch_shape that ignores the operator
+    fields: stack one factor's leaf and nothing else."""
+    joint = GaussianJoint.from_samples(
+        u_samples=jnp.zeros((6, 3)), v_samples=jnp.zeros((6, 4))
+    )
+    leaves, treedef = jax.tree_util.tree_flatten(joint)
+    names = [
+        jax.tree_util.keystr(k)
+        for k, _ in jax.tree_util.tree_flatten_with_path(joint)[0]
+    ]
+
+    for target in (".u_factor.A", ".v_factor.A"):
+        index = next(i for i, n in enumerate(names) if n.endswith(target))
+        stacked = list(leaves)
+        stacked[index] = jnp.stack([leaves[index]] * 5)
+        family = jax.tree_util.tree_unflatten(treedef, stacked)
+        assert family.batch_shape == (5,), target
+        # the static sizes still answer, and every method refuses
+        assert (family.u_dim, family.v_dim, family.latent_dim) == (3, 4, 6)
+        with pytest.raises(ValueError, match="vmapped family"):
+            family.condition(jnp.zeros(4), DensePSD.from_matrix(jnp.asarray(_psd(4))))
+
+
+def test_14_joint_fields_are_keyword_only():
+    """Four fields, two like-shaped pairs. At P == N a positional call is a
+    shape-valid mistake no check can catch, so the constructor forbids it."""
+    n, k = 3, 2
+    Fu = Dense(jnp.asarray(RNG.normal(size=(n, k))))
+    Fv = Dense(jnp.asarray(RNG.normal(size=(n, k))))
+    with pytest.raises(TypeError, match="positional"):
+        GaussianJoint(jnp.zeros(n), jnp.zeros(n), Fu, Fv)
+    with pytest.raises(TypeError, match="positional"):
+        GaussianJoint.from_factors(jnp.zeros(n), jnp.zeros(n), Fu, Fv)
+    with pytest.raises(TypeError, match="positional"):
+        GaussianJoint.from_samples(jnp.zeros((4, n)), jnp.zeros((4, n)))
+
+    # and the swap the keywords rule out is otherwise silent: same shapes,
+    # finite answer, different distribution
+    y = jnp.asarray(RNG.normal(size=n))
+    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(n)))
+    kw = {
+        "u_mean": jnp.asarray(RNG.normal(size=n)),
+        "v_mean": jnp.asarray(RNG.normal(size=n)),
+    }
+    right = GaussianJoint.from_factors(**kw, u_factor=Fu, v_factor=Fv)
+    swapped = GaussianJoint.from_factors(**kw, u_factor=Fv, v_factor=Fu)
+    a = np.asarray(right.condition(y, noise_cov).mean)
+    b = np.asarray(swapped.condition(y, noise_cov).mean)
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+    assert np.abs(a - b).max() > 1e-8
+
+
+def test_14_repr_never_raises_on_unreadable_leaves():
+    treedef = jax.tree_util.tree_structure(
+        GaussianJoint.from_samples(
+            u_samples=jnp.zeros((3, 2)), v_samples=jnp.zeros((3, 4))
+        )
+    )
+    broken = jax.tree_util.tree_unflatten(treedef, [object()] * treedef.num_leaves)
+    assert repr(broken) == "<GaussianJoint (unprintable leaves)>"
+
+
+def test_14_from_linear_map_rejects_a_family_map():
+    prior, _, _, _, _ = _linear_gaussian(4, 3)
+    family = _stacked(Dense(jnp.zeros((3, 4))), reps=5)
+    with pytest.raises(ValueError, match="vmapped family"):
+        GaussianJoint.from_linear_map(prior, family)
 
 
 def test_14_a_joint_round_trips_through_a_pytree_and_runs_under_jit():
@@ -1649,8 +1781,8 @@ def test_15_pathwise_carries_an_exact_moment_sample_set_to_the_posterior():
     )
     scale = max(np.abs(m_ref).max(), np.abs(C_ref).max())
     sample_mean, sample_cov = _sample_moments(transported)
-    np.testing.assert_allclose(sample_mean, m_ref, rtol=0, atol=1e4 * EPS * scale)
-    np.testing.assert_allclose(sample_cov, C_ref, rtol=0, atol=1e4 * EPS * scale)
+    np.testing.assert_allclose(sample_mean, m_ref, rtol=0, atol=1e2 * EPS * scale)
+    np.testing.assert_allclose(sample_cov, C_ref, rtol=0, atol=1e2 * EPS * scale)
 
 
 def test_15_pathwise_agrees_with_the_sample_update_on_the_joints_own_samples():
@@ -1966,8 +2098,15 @@ def test_regression_uncentered_transform_shifts_the_ensemble_mean():
     posterior mean.
     """
     J, P, N = 6, 3, 4
-    U, V, R, y = _problem(J, P, N)
-    V = V + 20.0  # a large mean makes the uncentered error unmistakable
+    # a local generator: the assertions below carry thresholds calibrated to a
+    # particular draw, so drawing from the shared RNG would make this test's
+    # outcome depend on how many draws the tests before it happened to take
+    rng = np.random.default_rng(23)
+    U = rng.normal(size=(J, P))
+    V = rng.normal(size=(J, N)) + 20.0  # a large mean makes the error unmistakable
+    M = rng.normal(size=(N, N))
+    R = M @ M.T + N * np.eye(N)
+    y = rng.normal(size=N)
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, _ = _dense_posterior(U, V, R, y)
@@ -2078,16 +2217,45 @@ def test_regression_all_three_methods_report_a_nan_result_in_debug_mode():
     singular = PSDDiagonal(jnp.asarray([1.0, 0.0, 2.0, 3.0]))
 
     with debug_checks(True):
+        # each message must name the method whose postcondition fired, not a
+        # constructor below it -- without that, deleting condition's own two
+        # checks leaves the suite green, because PSDLowRank's constructor
+        # raises "must be finite" from one line further down
+        for pattern, call in (
+            (
+                r"\.pathwise_update: the updated block must be finite",
+                lambda: joint.pathwise_update(
+                    jax.random.key(0), jnp.asarray(y), singular
+                ),
+            ),
+            (
+                r"\.transform_update: the updated block must be finite",
+                lambda: joint.transform_update(jnp.asarray(y), singular),
+            ),
+            (
+                r"\.condition: the posterior mean must be finite",
+                lambda: joint.to_gaussian_joint().condition(jnp.asarray(y), singular),
+            ),
+            (
+                r"\.pathwise: the transported realizations must be finite",
+                lambda: joint.to_gaussian_joint().pathwise(
+                    u=jnp.asarray(U),
+                    v=jnp.asarray(V),
+                    whitened_noise=jnp.zeros((J, N)),
+                    y=jnp.asarray(y),
+                    noise_cov=singular,
+                ),
+            ),
+        ):
+            with pytest.raises(ValueError, match=pattern):
+                call()
+        # the message points at the cause the check cannot itself detect
         for call in (
-            lambda: joint.pathwise_update(jax.random.key(0), jnp.asarray(y), singular),
             lambda: joint.transform_update(jnp.asarray(y), singular),
             lambda: joint.to_gaussian_joint().condition(jnp.asarray(y), singular),
         ):
-            with pytest.raises(ValueError, match="must be finite"):
+            with pytest.raises(ValueError, match="singular noise_cov"):
                 call()
-        # the message points at the cause the check cannot itself detect
-        with pytest.raises(ValueError, match="singular noise_cov"):
-            joint.transform_update(jnp.asarray(y), singular)
 
 
 def test_regression_result_checks_are_skipped_under_jit():

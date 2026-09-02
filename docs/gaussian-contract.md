@@ -9,7 +9,8 @@ account of Gaussian conditioning in pyEKI than the user guide gives.
 
 Throughout, *must* and *never* state requirements, *should* states a strong
 default that a documented reason may override, and *may* states a permission.
-{doc}`design` records *why* the load-bearing decisions were made; this page
+{doc}`design` records *why* the load-bearing decisions were made and
+{doc}`joint-factor` derives the representation they rest on; this page
 records *what* they require. The layer is built on the operator layer, and
 this contract freely references {doc}`linop-contract` rather than restating
 its rules.
@@ -22,11 +23,6 @@ reference for its behaviour. The conformance obligations of
 {ref}`gauss-conformance` are met by `tests/test_gauss.py`; the user guide's
 {doc}`user-guide/conditioning` page covers when to reach for each piece.
 :::
-
-Readers after precision rather than implementation want
-{ref}`gauss-notation`, {ref}`gauss-kernel`, and the method sections; the
-remainder — validation, JAX integration, conformance, exclusions — binds
-implementers.
 
 (gauss-scope)=
 ## Scope
@@ -61,10 +57,6 @@ this package uses the word to mean a covariance kernel. The algebraically
 equivalent alternatives — the Woodbury identity on the normal equations, and
 a dense factorization of the predictive covariance — are respectively
 rejected and deferred, with reasons, in {ref}`gauss-excluded`.
-
-The implementation PR must also add the layer's user-guide page, per the
-package rule that every user-facing feature has a user-guide home; this
-page remains the deeper reference.
 
 (gauss-notation)=
 ## Notation and conventions
@@ -111,9 +103,9 @@ Conventions, each normative:
   is a `(N,)` array, a mean a `(dim,)` array. The gauss classes do not
   accept batched operands the way operator methods do; a family of
   distributions or updates is expressed with `jax.vmap` over the pytree
-  ({ref}`gauss-jax`). There are three exceptions, each following the
-  operator layer's batch contract: the two conditioning *primitives*
-  ({ref}`gauss-primitives`), the evaluation-point argument of
+  ({ref}`gauss-jax`). Three arguments are exceptions, each following the
+  operator layer's batch contract: the residual argument `b` of
+  `gain_weights` ({ref}`gauss-primitives`), the evaluation point of
   `Gaussian.log_density`, and the three realization arguments of
   `GaussianJoint.pathwise` ({ref}`gauss-pathwise`).
 - **Noise covariances are `PSDLinOp`s.** Every `noise_cov` argument must be
@@ -132,7 +124,7 @@ The public surface is three classes and two functions.
 
 | object | represents | representation | where it is used |
 | ------ | ---------- | -------------- | ---------------- |
-| `Gaussian` | one Gaussian distribution | mean vector + `PSDLinOp` covariance | a prior or marginal; what `condition` returns |
+| `Gaussian` | one Gaussian distribution | mean vector + `PSDLinOp` covariance | a prior or marginal; what `condition` returns; a sample block's moments, via `from_samples` |
 | `GaussianJoint` | a joint Gaussian over the two blocks | mean pair + joint factor | every conditioning identity |
 | `EmpiricalJoint` | $J$ paired samples | two row-aligned sample blocks | the two sample-to-sample updates |
 | `gain_weights` | the latent weights for one whitened residual | pure array function | the shared conditioning core |
@@ -271,7 +263,7 @@ which exhibits two contract-level properties:
   routing.
 - **Unconditional boundedness.** $\sigma/(1+\sigma^2) \le 1/2$ for all
   $\sigma \ge 0$, so the gain cannot blow up however collapsed or
-  ill-conditioned $s$ becomes, with no regularization parameter to
+  ill-conditioned $S$ becomes, with no regularization parameter to
   tune.
 
 The SVD form is the normative implementation: it never forms
@@ -308,7 +300,7 @@ $S(I_N + S^\top S)^{-1}S^\top = I_k - (I_k + SS^\top)^{-1}$. So the whole of
 conditioning is the map
 $(\bar u, \bar v, F_u, F_v) \mapsto (\bar u + F_u w,\; F_u T)$, from one SVD.
 
-Two structural facts, both load-bearing and both conformance-checked:
+Two structural facts:
 
 - **The transform preserves centring**: $T\mathbf{1} = \mathbf{1}$
   (each $U_{\cdot i}$ with $\sigma_i > 0$ is orthogonal to $\mathbf{1}$, and
@@ -363,7 +355,7 @@ $J \le N$, plus the $J + 1$ whitener applications — which the total absorbs
 for structured whiteners applying in $O(N)$, and which dominate ($O(JN^2)$)
 for a dense $W$ whenever $P \lesssim N^2/J$; at larger $P$ the $O(PJ^2)$
 factor application dominates instead. Linear in both dimensions for structured
-whiteners, cubic only in the latent width. The conditioning that matters
+whiteners, cubic only in the latent width. Numerical conditioning
 degrades in the *small-noise* direction (large $\sigma_{\max}$, a large
 whitener), not the collapse direction ($\sigma \to 0$), which is numerically
 pristine.
@@ -448,9 +440,7 @@ The size properties across the layer follow one rule: an object with a
 single dimension names it `n`, matching {class}`~pyeki.linalg.SquareLinOp`
 one layer down; an object with several qualifies each one, as
 `EmpiricalJoint`'s `n_samples`, `u_dim` and `v_dim` do, and as
-`GaussianJoint`'s `u_dim`, `v_dim` and `latent_dim` do. So `Gaussian.n` and
-`GaussianJoint.u_dim` are the same convention applied to different arities,
-not an inconsistency.
+`GaussianJoint`'s `u_dim`, `v_dim` and `latent_dim` do.
 
 **Capabilities delegate to the covariance.** `Gaussian` defines no
 capability system of its own: each method requires specific operations of
@@ -482,7 +472,7 @@ withholds `solve`, `whiten` and `logdet`, so {meth}`log_density` raises
 density against a singular covariance is not defined.
 
 Anomalies are formed with the same centring the conditioning methods use
-({ref}`gauss-kernel`), so identical samples give exactly zero spread rather
+({ref}`gauss-empirical`), so identical samples give exactly zero spread rather
 than round-off.
 
 :::{note}
@@ -847,8 +837,11 @@ than computing a second one.
 **This reading is a method here, not a function of the posterior, and the
 reason is a precondition no type can carry.** It is valid exactly when the
 factor is centred. Applied to a joint built any other way — `from_linear_map`,
-say — it returns samples whose covariance is right and whose mean is shifted
-by $\sqrt{k-1}\,F\mathbf{1}_k/k$, silently. Held on the class that owns
+say — it returns, silently, a sample set whose mean is displaced by
+$\sqrt{k-1}\,F_uT\mathbf{1}_k/k$ and whose sample covariance falls short of
+the posterior's by the rank-one term
+$(F_uT\mathbf{1}_k)(F_uT\mathbf{1}_k)^\top/k$ — measured at 18% of the
+covariance's own scale. Held on the class that owns
 samples, centredness is structural: `from_samples` is the only constructor
 reachable from here, and it centres. Moved to `GaussianJoint`, it would be a
 value precondition detectable only in debug mode.
@@ -911,11 +904,15 @@ the conditioning primitives.
 $J-1$) that are *unbiased estimators* of the posterior moments
 `transform_update` represents exactly. The sample mean has variance exactly
 $K R K^\top / J$; the sample covariance fluctuates at the usual
-$O(J^{-1/2})$ rate, with entrywise standard deviation of order
-$\bigl(C^{\text{post}}_{ii}(KRK^\top)_{jj} +
-C^{\text{post}}_{jj}(KRK^\top)_{ii} +
-2(KRK^\top)_{ij}^2\bigr)^{1/2}\!/\sqrt{J}$ — in relative terms
-$\sqrt{J}$ times looser than the mean's. The unbiasedness of the covariance
+$O(J^{-1/2})$ rate. Writing $Q = KRK^\top$, its entrywise variance is
+
+$$
+\operatorname{Var}\bigl(\widehat{C}'_{ij}\bigr) =
+\frac{C^{\text{post}}_{ii}Q_{jj} + C^{\text{post}}_{jj}Q_{ii}
++ 2C^{\text{post}}_{ij}Q_{ij} - Q_{ii}Q_{jj} - Q_{ij}^2}{J-1},
+$$
+
+which in relative terms is $\sqrt{J}$ times looser than the mean's. The unbiasedness of the covariance
 is particular to the $J-1$ divisor, whose centring of the perturbations
 cancels exactly. Individual pathwise samples are not posterior draws —
 conditional on the sample block, sample $j$ is distributed
@@ -1070,7 +1067,7 @@ machinery as operators, and every rule of the operator contract's JAX section
   {ref}`gauss-joint` records why the SVD cannot live at construction either
   way.
 - **`pyeki.gauss` exports no class decorator.** The class set is closed
-  (rule 2 of {ref}`gauss-objects`), so there is nothing for users to
+  (rule 3 of {ref}`gauss-objects`), so there is nothing for users to
   declare; internally the classes may reuse the operator layer's
   registration machinery, generalized as needed, without exposing it.
 - Conditioning methods and primitives must be `jit`- and `vmap`-safe with
@@ -1288,7 +1285,7 @@ must verify at least:
 
 1. **Gain against dense**: `gain_weights` composed with `whiten` reproduces
    the dense $K r$ elementwise on small random problems, in all three shape
-   regimes $N > J$, $N = J$, $N < J$, with `b` at batch ranks 0, 1, and 2.
+   regimes $N > k$, $N = k$, $N < k$, with `b` at batch ranks 0, 1, and 2.
 2. **Whitener invariance**: two noise operators representing the same $R$
    with different whiteners yield the same weights to floating-point
    tolerance — the invariance is exact in exact arithmetic, but the two
@@ -1302,7 +1299,7 @@ must verify at least:
    ($\sigma_{\max} \lesssim 10^2$, where that reference is trustworthy —
    forming $I + ss^\top$ squares the conditioning, so at large
    $\sigma_{\max}$ the *reference* is the inaccurate side), including the
-   case $\rho < J$, i.e. $N < J$, that the naive thin-SVD formula gets wrong.
+   case $\rho < k$, i.e. $N < k$, that the naive thin-SVD formula gets wrong.
    At large $\sigma_{\max}$ it instead satisfies the invariant in its
    **stably formed** version,
    $T T^\top + (Ts)(Ts)^\top = I$, to a tolerance scaling as
@@ -1323,8 +1320,8 @@ must verify at least:
    It satisfies $T = T^\top$ for every
    `s`, and $T\mathbf{1} = \mathbf{1}$ **for `s` from a centred factor**
    ($s^\top\mathbf{1} = 0$) to a tolerance of
-   $c_1 J \varepsilon + c_2 (\varepsilon \sigma_{\max})^2$; for general
-   general `s` no such identity holds ({ref}`gauss-primitives`). Both terms are
+   $c_1 J \varepsilon + c_2 (\varepsilon \sigma_{\max})^2$; for general `s`
+   no such identity holds ({ref}`gauss-primitives`). Both terms are
    needed and **both scale**. The quadratic term is the modifier-induced
    mean shift of {ref}`gauss-kernel`, but the *computed* $T\mathbf{1}$
    carries ordinary round-off from its $J$-term dot products on top, and
@@ -1410,11 +1407,6 @@ must verify at least:
     the joint's own samples, and the two whitener counts differ as
     {ref}`gauss-empirical` states.
 
-Beyond the tests, the implementation PR owes two deliverables named
-earlier: the layer's user-guide page ({ref}`gauss-scope`) and the
-`PSDLowRank` operator with its operator-contract entry
-({ref}`gauss-condition`).
-
 Alongside conformance, targeted regression tests guard the layer's own
 silent-failure classes once found — the thin-SVD completion term (check 3),
 a mixed-representation perturbation, a mean shift from an uncentered
@@ -1441,14 +1433,12 @@ reasons the block form cannot answer.
 
 The kernel needs a shared latent, and recovering one from blocks means
 solving $F_u F_v^\top = C_{uv}$, that is
-$F_u = C_{uv}F_v(F_v^\top F_v)^{-1}$ — which forms the $k \times k$ Gram and
-squares the condition number, the very defect that rejected the Woodbury
-route below. Measured: a factor with $\kappa(F_v) = 7.7$ whose last column
-is scaled by $10^{-8}$ has $\kappa(F_v^\top F_v) = 1.3\times10^{32}$, and the
-recovered $F_u$ is wrong by a relative factor of $1.5\times10^{8}$ — no
-correct digits at all. It also requires $C_{uv}$, a matrix of *both* block
-dimensions, which no code path in the layer forms. And the joint's
-PSD-ness cannot be typed: a valid joint needs
+$F_u = C_{uv}F_v(F_v^\top F_v)^{-1}$. That is ill-posed whenever $k > N$,
+where the Gram is singular and no coherent $F_u$ exists to recover; and where
+it is well-posed it forms the Gram and squares the condition number
+({doc}`joint-factor` measures both). More decisively, it requires $C_{uv}$, a
+matrix of *both* block dimensions, which no code path in the layer forms. And
+the joint's PSD-ness cannot be typed: a valid joint needs
 $\operatorname{col}(C_{vu}) \subseteq \operatorname{col}(C_{vv})$,
 which three independently supplied operators do not satisfy in general and no
 operator type can assert — composition never proves PSD-ness.

@@ -122,9 +122,10 @@ whose sample mean *is* the posterior mean and whose sample covariance *is* the
 posterior covariance — exactly, not asymptotically in $J$. It perturbs nothing
 and needs no key. `pathwise_update` draws one perturbation per sample; its
 moments are unbiased estimators of the same posterior moments, but they
-fluctuate, the covariance at the usual $O(J^{-1/2})$ rate. In exchange it
-keeps the rows statistically independent given the samples, which the
-deterministic transform does not.
+fluctuate, the covariance at the usual $O(J^{-1/2})$ rate. In exchange each
+row gets its own independent perturbation, so given the sample block the rows
+are independent — which the deterministic transform's shared $T$ makes
+false.
 
 Neither is uniformly better, and choosing between them belongs to the
 algorithm you are building rather than to this layer.
@@ -219,7 +220,7 @@ observation carries no information about `u` through these samples, and the
 methods return exactly that: both updates return `u_samples` unchanged, and
 `condition` returns the `u` marginal's own moments. There is no `nan`, and no
 regularization parameter to tune. The gain multipliers are bounded by $1/2$
-however collapsed or ill-conditioned $s$ becomes.
+however collapsed the samples become.
 
 The direction that *does* degrade is small noise: a very large whitener, giving
 a large $\sigma_{\max}$. Collapse is the numerically pristine end.
@@ -263,9 +264,9 @@ operators: map it, do not pass it in directly.
 
 The vectors these classes take are correspondingly unbatched: `y` is one
 observation of shape `(N,)`. A family of updates over several observations is
-`vmap` over the method. Three arguments are exceptions, following the operator
-layer's batch contract instead: `Gaussian.log_density`'s evaluation point,
-`pathwise`'s three realization arguments, and the primitives' operands.
+`vmap` over the method. Three exceptions follow the operator layer's batch
+contract instead: `Gaussian.log_density`'s evaluation point, `pathwise`'s
+three realization arguments, and `gain_weights`'s residuals.
 
 ## Dropping to the primitives
 

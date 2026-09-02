@@ -198,7 +198,7 @@ def gain_weights(s: Array, b: Array) -> Array:
     analysis may produce — the SVD's gradient is ``nan`` even though this
     function is smooth there, equalling the rational form above. The
     float-generic degeneracy of mean-centering (:math:`\\sigma_{\\min} \\sim
-    10^{-16}` when :math:`N \\ge J`) is not an exact tie and differentiates
+    10^{-16}` when :math:`N \\ge k`) is not an exact tie and differentiates
     finitely.
     """
     s = jnp.asarray(s)
@@ -379,6 +379,8 @@ class Gaussian:
         ValueError
             If ``samples`` is not rank 2, or if :math:`J < 2` — a single
             sample has no anomalies. In debug mode, also if it is not finite.
+        TypeError
+            If ``samples`` has no shape to check.
 
         Notes
         -----
@@ -641,7 +643,8 @@ class GaussianJoint:
         own mean, if the two factors disagree on ``k``, or if any field is a
         vmapped family. In debug mode, also if either mean is not finite.
     TypeError
-        If either factor is not a :class:`~pyeki.linalg.LinOp`.
+        If either factor is not a :class:`~pyeki.linalg.LinOp`, or either mean
+        has no shape to check.
 
     Notes
     -----
@@ -719,11 +722,12 @@ class GaussianJoint:
         ValueError, TypeError
             As the class documents.
         """
+        where = "GaussianJoint.from_factors"
         return cls(
-            u_mean=jnp.asarray(u_mean),
-            v_mean=jnp.asarray(v_mean),
-            u_factor=_as_factor("from_factors", "u_factor", u_factor),
-            v_factor=_as_factor("from_factors", "v_factor", v_factor),
+            u_mean=_as_vector(where, "u_mean", u_mean),
+            v_mean=_as_vector(where, "v_mean", v_mean),
+            u_factor=_as_factor(where, "u_factor", u_factor),
+            v_factor=_as_factor(where, "v_factor", v_factor),
         )
 
     @classmethod
@@ -774,6 +778,8 @@ class GaussianJoint:
             If either array is not rank 2, if they disagree on :math:`J`, or
             if :math:`J < 2` — a single sample has no anomalies. In debug
             mode, also if either is not finite.
+        TypeError
+            If either argument has no shape to check.
 
         Notes
         -----
@@ -791,7 +797,7 @@ class GaussianJoint:
         once the samples are of order :math:`10^{23}`.
         """
         u_samples, v_samples = _check_sample_pair(
-            "GaussianJoint.from_samples", u_samples, v_samples
+            "GaussianJoint", u_samples, v_samples
         )
         scale = math.sqrt(u_samples.shape[0] - 1)
         return cls(
@@ -853,10 +859,10 @@ class GaussianJoint:
         Notes
         -----
         **The observation noise is not part of this joint.** It is supplied
-        per call, as ``condition(y, noise_cov)``, which is what lets a
-        caller conditioning at a sequence of noise levels pass a scaled
-        operator such as ``noise_cov / dbeta`` with a traced scale, and
-        never re-factorize anything.
+        per call, as ``condition(y, noise_cov)``, so one joint can be
+        conditioned against a succession of noise operators — including
+        scalings of a single operator whose scale is itself traced — while
+        re-factorizing nothing.
 
         :math:`F_v = GL` is materialized here, as an ``(N, k)`` array built
         from ``k`` applications of ``linear_map``. That is the factorization
@@ -996,8 +1002,8 @@ class GaussianJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` or the
-            returned value is not finite.
+            this or ``noise_cov`` is a vmapped family, or — in debug mode —
+            if ``y`` or the returned value is not finite.
 
         Notes
         -----
@@ -1021,7 +1027,7 @@ class GaussianJoint:
         """
         _check_not_vmap_family(self, "condition")
         where = f"{self!r}.condition"
-        y = self._validate_call(where, y, noise_cov)
+        y = _validate_conditioning_call(where, y, noise_cov, self.v_dim)
         mean, factor = self._posterior_mean_and_factor(y, noise_cov)
         # Both halves, checked before the covariance and the distribution are
         # built, so the diagnosis names this call rather than a constructor
@@ -1128,16 +1134,26 @@ class GaussianJoint:
         """
         _check_not_vmap_family(self, "pathwise")
         where = f"{self!r}.pathwise"
-        y = self._validate_call(where, y, noise_cov)
+        y = _validate_conditioning_call(where, y, noise_cov, self.v_dim)
         u = _check_batched_operand(where, "u", u, self.u_dim)
         v = _check_batched_operand(where, "v", v, self.v_dim)
         eps = _check_batched_operand(where, "whitened_noise", whitened_noise, self.v_dim)
+        _check_operands_broadcast(
+            where,
+            ("u", u.shape[:-1]),
+            ("v", v.shape[:-1]),
+            ("whitened_noise", eps.shape[:-1]),
+        )
         _check_finite(where, "u", u)
         _check_finite(where, "v", v)
         _check_finite(where, "whitened_noise", eps)
         s = self._whitened_factor(noise_cov)
         b = noise_cov.whiten(y - v) - eps
-        transported = u + self._apply_u_factor(gain_weights(s, b))
+        # the private kernel rather than gain_weights, so that a non-finite
+        # result is diagnosed against this call rather than against a
+        # primitive the caller never invoked
+        U, sigma, Vt = _thin_svd(s)
+        transported = u + self.u_factor.matvec(_weights_from_svd(U, sigma, Vt, b))
         _check_finite(
             where, "the transported realizations", transported, cause=_SINGULAR_NOISE
         )
@@ -1155,44 +1171,15 @@ class GaussianJoint:
             return "<GaussianJoint (unprintable leaves)>"
         return f"vmapped({base}, batch={batch})" if batch != () else base
 
-    # -- private: call validation, and the whitened-SVD assembly --
-    def _validate_call(self, where: str, y, noise_cov) -> Array:
-        """Run the shared checks of a conditioning call; return the validated ``y``.
-
-        ``where`` describes the call, and is supplied by the caller rather
-        than built here so that a method of :class:`EmpiricalJoint`
-        delegating to this class still names itself in the diagnosis.
-
-        In the operator layer's order, with one departure the type system
-        forces: ``noise_cov``'s type and family — which must precede the
-        capability check, since ``supports`` cannot be consulted on an
-        object not known to be an operator — then the capability check, then
-        the remaining operand shapes, then, in debug mode, operand value
-        checks. The family guard on the object itself runs before this, in
-        the calling method. Result checks run last, once there is a result.
-        """
-        if not isinstance(noise_cov, PSDLinOp):
-            raise TypeError(
-                f"{where}: noise_cov must be a pyeki.linalg.PSDLinOp, got "
-                f"{type(noise_cov).__name__}"
-            )
-        if noise_cov.batch_shape != ():
-            raise ValueError(
-                f"{where}: noise_cov is a vmapped family with batch shape "
-                f"{noise_cov.batch_shape}; apply a family of noise operators "
-                f"with jax.vmap over the method, not directly."
-            )
-        _require_cov_ops(noise_cov, "whiten")
-        _check_noise_cov_dim(where, noise_cov, self.v_dim)
-        y = _check_unbatched_operand(where, "y", y, self.v_dim)
-        _check_finite(where, "y", y)
-        return y
-
+    # -- private: the whitened-SVD assembly --
     def _whitened_factor(self, noise_cov) -> Array:
         """The whitened factor :math:`S = (W F_v)^\\top`, a ``(k, N)`` array.
 
-        One ``whiten_mat`` call on the ``(N, k)`` factor: :math:`k`
-        applications of :math:`W`, whatever the latent width means.
+        One ``whiten_mat`` call on the ``(N, k)`` factor, for :math:`k`
+        applications of :math:`W`. :meth:`pathwise` wants exactly this and
+        no mean residual, so taking it from
+        :meth:`_whitened_factor_and_residual` would whiten one vector more
+        than the call needs.
         """
         return noise_cov.whiten_mat(self.v_factor.to_dense()).swapaxes(-1, -2)
 
@@ -1231,41 +1218,12 @@ class GaussianJoint:
         """
         s, whitened_residual = self._whitened_factor_and_residual(y, noise_cov)
         U, sigma, Vt = _thin_svd(s)
-        mean = self.u_mean + self._apply_u_factor(
+        mean = self.u_mean + self.u_factor.matvec(
             _weights_from_svd(U, sigma, Vt, whitened_residual)
         )
         transform = _transform_from_svd(U, sigma, self.latent_dim)
         return mean, self.u_factor.matmat(transform)
 
-    def _pathwise_from_own_factor(self, u, whitened_noise, y, noise_cov) -> Array:
-        """Matheron's rule on the realizations the joint's own factor holds.
-
-        The realizations are :math:`u_j` and :math:`v_j = \\bar v +
-        \\sqrt{k-1}\\,(F_v)_{\\cdot j}`, so the per-realization whitened
-        residual follows from quantities already computed,
-
-        .. math::
-
-            W(y - v_j) = W(y - \\bar v) - \\sqrt{k-1}\\, S_{j\\cdot},
-
-        and the whole update costs :math:`k + 1` applications of :math:`W`
-        rather than the :math:`k` plus one-per-realization that
-        :meth:`pathwise` spends on arbitrary realizations. ``u`` is passed
-        in rather than reconstructed from :math:`F_u`, so the samples a
-        caller holds are added to unchanged.
-        """
-        s, whitened_residual = self._whitened_factor_and_residual(y, noise_cov)
-        U, sigma, Vt = _thin_svd(s)
-        b = whitened_residual - math.sqrt(self.latent_dim - 1) * s - whitened_noise
-        return u + self._apply_u_factor(_weights_from_svd(U, sigma, Vt, b))
-
-    def _apply_u_factor(self, weights: Array) -> Array:
-        """Apply :math:`F_u` to latent weights, carrying their batch axes.
-
-        One batched ``matvec``, so a single weight vector and the batch a
-        pathwise update produces are the same call.
-        """
-        return self.u_factor.matvec(weights)
 
 
 # ---------------------------------------------------------------------------
@@ -1307,6 +1265,8 @@ class EmpiricalJoint:
         If either array is not rank 2, if they disagree on :math:`J`, or if
         :math:`J < 2` — a single sample has no anomalies. In debug mode,
         also if either is not finite.
+    TypeError
+        If either field has no shape to check — a list, a tuple, a scalar.
 
     Notes
     -----
@@ -1324,8 +1284,11 @@ class EmpiricalJoint:
     matrices — raise ``ValueError`` on a vmapped family, as the methods do.
 
     Both updates degrade gracefully when the :math:`v` anomalies are zero:
-    they return ``u_samples`` unchanged. A collapsed sample block is a
-    no-op, not ``nan``, for finite inputs.
+    they return ``u_samples`` unchanged — bit-exactly for
+    :meth:`pathwise_update`, which adds to the samples themselves, and to
+    within a unit in the last place for :meth:`transform_update`, which
+    rebuilds them from the mean and the anomalies. A collapsed sample block
+    is a no-op, not ``nan``, for finite inputs.
     """
 
     u_samples: Array = field(kw_only=True)
@@ -1429,7 +1392,7 @@ class EmpiricalJoint:
 
         .. math::
 
-            u_j' \;=\; m_{\\text{post}}
+            u_j' = m_{\\text{post}}
             + \\sqrt{J-1}\\,\\bigl(F_u T\\bigr)_{\\cdot j},
             \\qquad
             m_{\\text{post}} = \\bar u + F_u\\,
@@ -1465,8 +1428,8 @@ class EmpiricalJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` or the
-            returned value is not finite.
+            this or ``noise_cov`` is a vmapped family, or — in debug mode —
+            if ``y`` or the returned value is not finite.
 
         Notes
         -----
@@ -1474,10 +1437,13 @@ class EmpiricalJoint:
         followed by the reading above, sharing that method's single
         decomposition. It is a method here, rather than a function of the
         returned posterior, because the reading is valid only for a centred
-        factor: applied to a joint built any other way it would return
-        samples with the right covariance and a shifted mean, silently.
-        Holding it here makes centredness structural instead of a
-        precondition.
+        factor. On a joint built any other way it returns, silently, a
+        sample set whose mean is displaced by :math:`\\sqrt{k-1}\\,F_uT
+        \\mathbf{1}_k/k` and whose sample covariance falls short of the
+        posterior's by the rank-one term
+        :math:`(F_uT\\mathbf{1}_k)(F_uT\\mathbf{1}_k)^\\top/k` — measured at
+        18% of the covariance's own scale on a
+        :meth:`~GaussianJoint.from_linear_map` joint.
 
         Which update to use is the caller's decision, not this layer's.
         This one replaces sampling noise with an exact transform;
@@ -1486,8 +1452,8 @@ class EmpiricalJoint:
         """
         _check_not_vmap_family(self, "transform_update")
         where = f"{self!r}.transform_update"
+        y = _validate_conditioning_call(where, y, noise_cov, self.v_dim)
         joint = self.to_gaussian_joint()
-        y = joint._validate_call(where, y, noise_cov)
         mean, factor = joint._posterior_mean_and_factor(y, noise_cov)
         updated = mean + math.sqrt(self.n_samples - 1) * factor.swapaxes(-1, -2)
         _check_finite(where, "the updated block", updated, cause=_SINGULAR_NOISE)
@@ -1536,8 +1502,8 @@ class EmpiricalJoint:
             If ``noise_cov`` is not a :class:`~pyeki.linalg.PSDLinOp`.
         ValueError
             If ``y`` is not ``(N,)``, ``noise_cov``'s side is not ``N``,
-            either is a vmapped family, or — in debug mode — ``y`` or the
-            returned value is not finite.
+            this or ``noise_cov`` is a vmapped family, or — in debug mode —
+            if ``y`` or the returned value is not finite.
 
         Notes
         -----
@@ -1573,10 +1539,17 @@ class EmpiricalJoint:
         """
         _check_not_vmap_family(self, "pathwise_update")
         where = f"{self!r}.pathwise_update"
+        y = _validate_conditioning_call(where, y, noise_cov, self.v_dim)
         joint = self.to_gaussian_joint()
-        y = joint._validate_call(where, y, noise_cov)
         eps = jax.random.normal(key, (self.n_samples, self.v_dim))
-        updated = joint._pathwise_from_own_factor(self.u_samples, eps, y, noise_cov)
+        s, whitened_residual = joint._whitened_factor_and_residual(y, noise_cov)
+        U, sigma, Vt = _thin_svd(s)
+        # W(y - v_j) = W(y - v_bar) - sqrt(J-1) S_j., because these samples are
+        # the factor: v_j - v_bar is exactly sqrt(J-1) times column j of F_v.
+        b = whitened_residual - math.sqrt(self.n_samples - 1) * s - eps
+        updated = self.u_samples + joint.u_factor.matvec(
+            _weights_from_svd(U, sigma, Vt, b)
+        )
         _check_finite(where, "the updated block", updated, cause=_SINGULAR_NOISE)
         return updated
 
@@ -1671,6 +1644,22 @@ def _check_factor_field(
             f"{value.shape[0]}, which disagrees with {mean_name} of length "
             f"{size}"
         )
+    # As PSDLowRank checks its own factor: a non-finite factor makes every
+    # result nan with no exception, and the conditioning result check would
+    # then name a singular noise_cov, which is not the cause. The check reads
+    # the operator's own array leaves rather than its dense form, which would
+    # allocate O(P k) on every construction whether or not checks are enabled.
+    for leaf in jax.tree_util.tree_leaves(value):
+        _check_finite(cls_name, field_name, leaf)
+
+
+def _as_vector(where: str, name: str, value) -> Array:
+    """Convert a mean field to an array, naming the call if it cannot be."""
+    try:
+        return jnp.asarray(value)
+    except (TypeError, ValueError) as e:
+        kind = ValueError if isinstance(e, ValueError) else TypeError
+        raise kind(f"{where}: {name} must be an array of shape (n,)") from e
 
 
 def _as_factor(where: str, name: str, value) -> LinOp:
@@ -1680,9 +1669,13 @@ def _as_factor(where: str, name: str, value) -> LinOp:
     try:
         return Dense(jnp.asarray(value))
     except (TypeError, ValueError) as e:
-        raise type(e)(
-            f"GaussianJoint.{where}: {name} must be a pyeki.linalg.LinOp of "
-            f"shape (n, k), or an array of that shape. {e}"
+        # Never reconstruct the caught type: an exception class whose __init__
+        # takes more than one argument raises from the re-raise itself, losing
+        # the diagnosis. The base class of the category always accepts a string.
+        kind = ValueError if isinstance(e, ValueError) else TypeError
+        raise kind(
+            f"{where}: {name} must be a pyeki.linalg.LinOp of shape (n, k), "
+            f"or an array of that shape"
         ) from e
 
 
@@ -1709,6 +1702,56 @@ def _check_sample_pair(cls_name: str, u_samples, v_samples) -> tuple[Array, Arra
     _check_finite(cls_name, "u_samples", u_samples)
     _check_finite(cls_name, "v_samples", v_samples)
     return jnp.asarray(u_samples), jnp.asarray(v_samples)
+
+
+def _validate_conditioning_call(where: str, y, noise_cov, v_dim: int) -> Array:
+    """Run the shared checks of a conditioning call; return the validated ``y``.
+
+    ``where`` describes the call, so a method of :class:`EmpiricalJoint` that
+    delegates to :class:`GaussianJoint` still names itself in the diagnosis.
+
+    In the operator layer's order, with one departure the type system forces:
+    ``noise_cov``'s type and family — which must precede the capability
+    check, since ``supports`` cannot be consulted on an object not known to
+    be an operator — then the capability check, then the remaining operand
+    shapes, then, in debug mode, operand value checks. The family guard on
+    the object itself runs before this, in the calling method, and result
+    checks run last, once there is a result.
+    """
+    if not isinstance(noise_cov, PSDLinOp):
+        raise TypeError(
+            f"{where}: noise_cov must be a pyeki.linalg.PSDLinOp, got "
+            f"{type(noise_cov).__name__}"
+        )
+    if noise_cov.batch_shape != ():
+        raise ValueError(
+            f"{where}: noise_cov is a vmapped family with batch shape "
+            f"{noise_cov.batch_shape}; apply a family of noise operators with "
+            f"jax.vmap over the method, not directly."
+        )
+    _require_cov_ops(noise_cov, "whiten")
+    _check_noise_cov_dim(where, noise_cov, v_dim)
+    y = _check_unbatched_operand(where, "y", y, v_dim)
+    _check_finite(where, "y", y)
+    return y
+
+
+def _check_operands_broadcast(where: str, *named_batches) -> None:
+    """Require operands whose batch axes broadcast against one another.
+
+    The trailing-size checks pass independently, so without this a batch-shape
+    disagreement surfaces from inside JAX as an unattributed broadcasting
+    error rather than as a diagnosis naming the arguments.
+    """
+    try:
+        jnp.broadcast_shapes(*(batch for _, batch in named_batches))
+    except ValueError:
+        described = ", ".join(
+            f"{name} {tuple(batch)}" for name, batch in named_batches
+        )
+        raise ValueError(
+            f"{where}: the batch axes of {described} do not broadcast"
+        ) from None
 
 
 def _check_batched_operand(where: str, name: str, x, size: int) -> Array:
@@ -1863,7 +1906,7 @@ def _transform_from_svd(U: Array, sigma: Array, latent_dim: int) -> Array:
     resolution of ``1.0``, which is the same bound reached the short way.
     """
     modifier = 1.0 / jnp.sqrt(1.0 + sigma**2) - 1.0
-    # (J, rho) @ (rho, J): both operands are exactly 2-D, so this is the
+    # (k, rho) @ (rho, k): both operands are exactly 2-D, so this is the
     # plain matrix product, not a batch of vectors.
     return jnp.eye(latent_dim, dtype=U.dtype) + (U * modifier) @ U.swapaxes(-1, -2)
 

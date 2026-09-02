@@ -370,16 +370,17 @@ class Evaluation:
 
     so the misfits, the misfit of the mean prediction, and the whitened
     prediction anomalies are all recoverable from this one array — the last
-    being, up to a sign and a :math:`\\sqrt{J-1}`, the scaled whitened
-    anomaly matrix the conditioning kernel of :mod:`pyeki.gauss` is built on.
+    being, up to a sign and a :math:`\\sqrt{J-1}`, the whitened factor the
+    conditioning kernel of :mod:`pyeki.gauss` is built on.
     It costs nothing: the driver must whiten the residuals to compute the
     misfits at all. :math:`N` is likewise recoverable from the trailing axis,
     so a criterion may be calibrated to the observation dimension without
     storing it.
 
     The recovered anomaly matrix is a diagnostic and never a substitute for
-    the update's own: :mod:`pyeki.gauss` centres and then whitens, precisely
-    because centring already-whitened predictions cancels a common
+    the update's own: :mod:`pyeki.gauss` centres before it whitens — the
+    factor it whitens was centred when it was built — precisely because
+    centring already-whitened predictions cancels a common
     :math:`W\\bar v` and loses accuracy as the ensemble collapses.
 
     ``rms_parameter_spread`` is scale-dependent, and the name says so: it

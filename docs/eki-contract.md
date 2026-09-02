@@ -2466,8 +2466,9 @@ Not normative, but the design was shaped against these call sites.
 methods**, once per step, with the tempered operator `noise_cov / increment`.
 No other gauss surface is used by the shipped rules: not `GaussianJoint`
 directly, not `Gaussian.log_density`, not the conditioning primitives.
-`Gaussian` is used twice — by `EKIState.from_prior` for its `sample`, and by
-`from_samples` for the terminal moment fit.
+`Gaussian` is used by `EKIState.from_prior` and by `AdditiveInflation`, both
+for `sample`. `Gaussian.from_samples` is *offered* to the caller for the
+terminal moment fit ({ref}`eki-honesty`), not called by this layer.
 
 **`pyeki.localize` will supply an `EnsembleUpdate`.** The driver needs no
 knowledge of localization and localization needs no change to the driver: the
