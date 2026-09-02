@@ -424,8 +424,8 @@ def test_2_weights_are_invariant_to_the_choice_of_whitener():
         atol=1e4 * EPS,
     )
     np.testing.assert_allclose(
-        joint.condition(jnp.asarray(y), plain).mean,
-        joint.condition(jnp.asarray(y), rotated).mean,
+        joint.to_gaussian_joint().condition(jnp.asarray(y), plain).mean,
+        joint.to_gaussian_joint().condition(jnp.asarray(y), rotated).mean,
         rtol=0,
         atol=1e4 * EPS,
     )
@@ -526,7 +526,7 @@ def test_4_posterior_moments_match_the_dense_posterior(J, P, N):
     np.testing.assert_allclose(sample_mean, m_post, rtol=0, atol=1e3 * EPS * scale)
     np.testing.assert_allclose(sample_cov, C_post, rtol=0, atol=1e3 * EPS * scale)
 
-    posterior = joint.condition(jnp.asarray(y), noise_cov)
+    posterior = joint.to_gaussian_joint().condition(jnp.asarray(y), noise_cov)
     assert isinstance(posterior, Gaussian)
     assert isinstance(posterior.cov, PSDLowRank)
     assert posterior.cov.F.shape == (P, J)
@@ -550,7 +550,7 @@ def test_4_posterior_covariance_rank_is_bounded_by_the_ensemble():
     U, V, R, y = _problem(J, P, N)
     posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
-    ).condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
+    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
     singular = np.linalg.svd(np.asarray(posterior.cov.to_dense()), compute_uv=False)
     assert np.sum(singular > 1e-10 * singular[0]) <= J - 1
 
@@ -623,7 +623,7 @@ def test_6_exact_moment_ensemble_reaches_the_analytic_posterior():
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     noise_cov = DensePSD.from_matrix(jnp.asarray(R))
 
-    posterior = joint.condition(jnp.asarray(y), noise_cov)
+    posterior = joint.to_gaussian_joint().condition(jnp.asarray(y), noise_cov)
     np.testing.assert_allclose(posterior.mean, m_post, rtol=0, atol=1e4 * EPS * scale)
     np.testing.assert_allclose(
         posterior.cov.to_dense(), C_post, rtol=0, atol=1e4 * EPS * scale
@@ -802,7 +802,7 @@ def test_8_zero_prediction_anomalies_make_both_updates_the_identity(J, P, N):
         transform, U, rtol=0, atol=1e3 * EPS * max(1.0, np.abs(U).max())
     )
 
-    posterior = joint.condition(y, noise_cov)
+    posterior = joint.to_gaussian_joint().condition(y, noise_cov)
     moments = _dense_moments(U, V)
     np.testing.assert_allclose(
         posterior.mean, moments["u_mean"], rtol=0, atol=1e3 * EPS
@@ -843,7 +843,7 @@ def test_9_noise_covariance_without_whiten_raises_from_the_conditioning_methods(
     for call in (
         lambda: joint.pathwise_update(jax.random.key(0), y, noise_cov),
         lambda: joint.transform_update(y, noise_cov),
-        lambda: joint.condition(y, noise_cov),
+        lambda: joint.to_gaussian_joint().condition(y, noise_cov),
     ):
         with pytest.raises(UnsupportedOpError, match="whiten"):
             call()
@@ -879,7 +879,7 @@ def test_9_posterior_log_density_raises_at_any_ensemble_size(J, P):
     U, V, R, y = _problem(J, P, N)
     posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
-    ).condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
+    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
     assert posterior.cov.supports("factor")
     with pytest.raises(UnsupportedOpError, match="whiten"):
         posterior.log_density(jnp.zeros(P))
@@ -932,7 +932,7 @@ def test_10_conditioning_call_validation():
         return (
             lambda: joint.pathwise_update(jax.random.key(0), y_arg, cov_arg),
             lambda: joint.transform_update(y_arg, cov_arg),
-            lambda: joint.condition(y_arg, cov_arg),
+            lambda: joint.to_gaussian_joint().condition(y_arg, cov_arg),
         )
 
     for bad_y in (jnp.zeros(N + 1), jnp.zeros((1, N)), jnp.asarray(0.0)):
@@ -1062,8 +1062,10 @@ def test_11_conditioning_methods_run_under_jit():
             jax.jit(lambda j, y: j.transform_update(y, noise_cov))(joint, y),
         ),
         (
-            joint.condition(y, noise_cov).mean,
-            jax.jit(lambda j, y: j.condition(y, noise_cov).mean)(joint, y),
+            joint.to_gaussian_joint().condition(y, noise_cov).mean,
+            jax.jit(lambda j, y: j.to_gaussian_joint().condition(y, noise_cov).mean)(
+                joint, y
+            ),
         ),
     ):
         np.testing.assert_allclose(eager, jitted, rtol=0, atol=1e3 * EPS)
@@ -1239,7 +1241,7 @@ def test_13_empirical_joint_family_is_legible_and_inert():
     with pytest.raises(ValueError, match="vmapped family"):
         family.transform_update(y, noise_cov)
     with pytest.raises(ValueError, match="vmapped family"):
-        family.condition(y, noise_cov)
+        family.to_gaussian_joint()
     for name in ("u_mean", "v_mean", "u_anomalies", "v_anomalies"):
         with pytest.raises(ValueError, match="vmapped family"):
             getattr(family, name)
@@ -1258,7 +1260,7 @@ def test_13_a_family_noise_covariance_is_rejected_at_the_call():
     with pytest.raises(ValueError, match="vmapped family"):
         joint.transform_update(y, cov_family)
     with pytest.raises(ValueError, match="vmapped family"):
-        joint.condition(y, cov_family)
+        joint.to_gaussian_joint().condition(y, cov_family)
     with pytest.raises(ValueError, match="vmapped family"):
         joint.pathwise_update(jax.random.key(0), y, cov_family)
 
@@ -1287,8 +1289,11 @@ def test_class_methods_compute_exactly_one_svd():
     for name, fn in (
         ("pathwise_update", lambda j, y: j.pathwise_update(key, y, noise_cov)),
         ("transform_update", lambda j, y: j.transform_update(y, noise_cov)),
-        ("condition", lambda j, y: j.condition(y, noise_cov).mean),
-        ("condition-cov", lambda j, y: j.condition(y, noise_cov).cov.F),
+        ("condition", lambda j, y: j.to_gaussian_joint().condition(y, noise_cov).mean),
+        (
+            "condition-cov",
+            lambda j, y: j.to_gaussian_joint().condition(y, noise_cov).cov.F,
+        ),
     ):
         count = _count_svd(jax.make_jaxpr(fn)(joint, y).jaxpr)
         assert count == 1, f"{name} computed {count} SVDs"
@@ -1494,7 +1499,7 @@ def test_regression_singular_noise_covariance_yields_nan_without_raising():
     for result in (
         joint.pathwise_update(jax.random.key(0), jnp.asarray(y), singular),
         joint.transform_update(jnp.asarray(y), singular),
-        joint.condition(jnp.asarray(y), singular).mean,
+        joint.to_gaussian_joint().condition(jnp.asarray(y), singular).mean,
     ):
         assert bool(jnp.isnan(result).all())
 
@@ -1526,7 +1531,7 @@ def test_regression_all_three_methods_report_a_nan_result_in_debug_mode():
         for call in (
             lambda: joint.pathwise_update(jax.random.key(0), jnp.asarray(y), singular),
             lambda: joint.transform_update(jnp.asarray(y), singular),
-            lambda: joint.condition(jnp.asarray(y), singular),
+            lambda: joint.to_gaussian_joint().condition(jnp.asarray(y), singular),
         ):
             with pytest.raises(ValueError, match="must be finite"):
                 call()
@@ -1587,8 +1592,9 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
     applications of W in the stochastic update, twice what is needed.
 
     Whitening is linear, so it commutes with centering and with subtracting y:
-    one call on the J + 1 stacked rows [V; y] yields every whitened quantity
-    the kernel needs. For a dense whitener those applications are the dominant
+    one call on the k + 1 stacked columns [F_v | y - v_bar] yields every
+    whitened quantity the kernel needs, and at k = J that is J + 1. For a
+    dense whitener those applications are the dominant
     O(J N^2) term, so a second call is a silent 2x — it produces correct
     numbers, which is why only a count catches it.
     """
@@ -1600,15 +1606,19 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
         ("pathwise_update", lambda cov: joint.pathwise_update(
             jax.random.key(0), jnp.asarray(y), cov)),
         ("transform_update", lambda cov: joint.transform_update(jnp.asarray(y), cov)),
-        ("condition", lambda cov: joint.condition(jnp.asarray(y), cov)),
+        (
+            "condition",
+            lambda cov: joint.to_gaussian_joint().condition(jnp.asarray(y), cov),
+        ),
     ):
         noise_cov = CountingWhitenPSD.counting(R)
         call(noise_cov)
         applied = sum(object.__getattribute__(noise_cov, "log"))
         assert applied == J + 1, f"{name} whitened {applied} vectors, expected {J + 1}"
 
-    # and the numbers are unchanged by the grouping: the dense reference
-    # centers before whitening, the implementation whitens before centering
+    # and the numbers are unchanged by the grouping: both the dense reference
+    # and the implementation center before whitening -- the implementation
+    # structurally, since the joint factor is centered at construction
     plain = DensePSD.from_matrix(jnp.asarray(R))
     m_post, _ = _dense_posterior(U, V, R, y)
     np.testing.assert_allclose(
@@ -1649,7 +1659,7 @@ def test_regression_anomalies_are_centered_before_whitening():
     scale = max(1.0, np.abs(exact).max())
 
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
-    shipped = np.asarray(joint.condition(y, noise_cov).mean)
+    shipped = np.asarray(joint.to_gaussian_joint().condition(y, noise_cov).mean)
 
     # the same kernel, whitening before centering -- the reverted grouping
     whitened_v = np.asarray(noise_cov.whiten(jnp.asarray(V)))
@@ -1721,8 +1731,8 @@ def test_regression_debug_checks_survive_a_trace_over_closed_over_arrays():
             jax.jit(lambda: joint.transform_update(y, noise_cov))(), eager
         )
         np.testing.assert_allclose(
-            jax.jit(lambda: joint.condition(y, noise_cov).mean)(),
-            np.asarray(joint.condition(y, noise_cov).mean),
+            jax.jit(lambda: joint.to_gaussian_joint().condition(y, noise_cov).mean)(),
+            np.asarray(joint.to_gaussian_joint().condition(y, noise_cov).mean),
         )
         jax.jit(lambda: joint.pathwise_update(jax.random.key(0), y, noise_cov))()
         # and a scan, which is how a tempering driver runs
@@ -1929,7 +1939,7 @@ def test_the_transform_does_not_promote_the_dtype():
     assert sqrt_transform(s).dtype == jnp.float32
     joint = EmpiricalJoint(u_samples=U, v_samples=V)
     assert joint.transform_update(y, noise_cov).dtype == jnp.float32
-    posterior = joint.condition(y, noise_cov)
+    posterior = joint.to_gaussian_joint().condition(y, noise_cov)
     assert posterior.mean.dtype == posterior.cov.F.dtype == jnp.float32
 
     # float64 stays float64, which is what the package actually runs on
