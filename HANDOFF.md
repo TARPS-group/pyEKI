@@ -1,9 +1,10 @@
 # Handoff
 
 Written 2026-08-24, updated 2026-08-25 after the operator layer was reworked
-against the normative contract, 2026-08-27 after `pyeki.eki` shipped, and
+against the normative contract, 2026-08-27 after `pyeki.eki` shipped,
 2026-08-28 after the forward-model contract was specified and the layer
-vocabulary was fixed. Read `CLAUDE.md` first for conventions — including the
+vocabulary was fixed, and 2026-09-02 after the joint was split into a
+Gaussian and a sample container. Read `CLAUDE.md` first for conventions — including the
 layer-boundary rules, which are new — then this for state and next steps.
 
 ## Where things stand
@@ -22,9 +23,29 @@ quickstart, three user-guide pages plus a guide to writing an operator, the
 three normative contracts, design notes, and an API reference.
 
 `pyeki.gauss` is implemented to `docs/gaussian-contract.md`: `Gaussian`,
-`EmpiricalJoint` and the two array-level conditioning primitives, all routed
-through the whitened-SVD kernel. `PSDLowRank`, the operator it needed, is in
-`pyeki.linalg`.
+`GaussianJoint`, `EmpiricalJoint` and the two array-level conditioning
+primitives, all routed through the whitened-SVD kernel. `PSDLowRank`, the
+operator it needed, is in `pyeki.linalg`.
+
+As of 2026-09-02 the joint is **two** classes. `GaussianJoint` holds a joint
+Gaussian as a *joint factor* — one factor of the block covariance, cut into
+the row blocks that drive both blocks from a shared latent vector — and owns
+`condition` and the pathwise (Matheron) map. `EmpiricalJoint` holds paired
+samples, offers `to_gaussian_joint()`, and keeps the two updates that return
+samples. `condition` is gone from it: conditioning samples means conditioning
+a Gaussian fitted to them, and that fit is now written at the call site.
+
+The point of the split is `GaussianJoint.from_linear_map`, which builds the
+joint of $u$ and $Gu$ and so gives closed-form linear-Gaussian posteriors —
+previously unreachable, since the only entrance to conditioning was to
+present samples. `docs/joint-factor.md` derives the representation and records
+why it is a factor rather than three covariance blocks. The square-root update
+stayed on `EmpiricalJoint` because its reading of the conditioned factor is
+valid only for a centred one, which holding samples makes structural; the
+contract and that page both give the measured failure it avoids.
+
+`pyeki.eki` was not touched: both update policies call the same two methods
+with the same signatures.
 
 `pyeki.eki` is implemented to `docs/eki-contract.md`: the four value classes,
 the three policy protocols with eight shipped implementations, the two public
