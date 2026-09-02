@@ -40,27 +40,30 @@ something callers assemble from `cholesky`.
 
 ## The conditioning kernel
 
-Let $\Theta'$ and $G'$ be mean-centered parameter and prediction anomalies, $J$
-the ensemble size, and define the **whitened anomaly matrix**. (This page
-writes members as *columns*, $G' \in \mathbb{R}^{N \times J}$; the
-normative {doc}`gaussian-contract` writes them as rows — its $U$ and $V$
-are this page's $V$ and $U$.)
+A joint Gaussian is held as a **joint factor**: one factor of the joint
+covariance, cut into the row blocks $F_u$ and $F_v$ that drive the two blocks
+from a single shared latent vector. With $W$ a whitener of the noise
+covariance $R$, the kernel decomposes the whitened factor of the observed
+block,
 
 $$
-S := \frac{1}{\sqrt{J-1}}\,R^{-1/2}G', \qquad S = U\Sigma V^\top \ \text{(thin SVD)}.
+S := \bigl(W F_v\bigr)^\top, \qquad S = U\Sigma V^\top \ \text{(thin SVD)},
 $$
 
-Then the Kalman gain applies as
+and the Kalman gain applies as $K r = F_u\, U
+\operatorname{diag}\bigl(\sigma_i/(1+\sigma_i^{2})\bigr) V^\top (Wr)$, while
+the posterior covariance is $(F_uT)(F_uT)^\top$ for
+$T = (I + SS^\top)^{-1/2}$ from the same decomposition. A set of $J$ samples
+is the case $F = A^\top/\sqrt{J-1}$ for the anomaly matrix $A$.
+{doc}`joint-factor` derives all of this and explains why the representation is
+a factor rather than three covariance blocks; {doc}`gaussian-contract` states
+the rules normatively.
 
-$$
-K r = \frac{1}{\sqrt{J-1}}\;\Theta'\,V \operatorname{diag}\!\Bigl(\frac{\sigma_i}{1+\sigma_i^{2}}\Bigr) U^\top \bigl(R^{-1/2}r\bigr).
-$$
-
-This is the form pyEKI will implement, in preference to the algebraically
+This is the form pyEKI implements, in preference to the algebraically
 equivalent Woodbury identity applied to the normal equations. Four reasons:
 
 - **Nothing is squared.** The competing route forms
-  $(J-1)I + G'^\top R^{-1} G'$ and factorizes it. *Forming* that Gram
+  $(J-1)I + A_v R^{-1} A_v^\top$ and factorizes it. *Forming* that Gram
   rounds away every singular value of $S$ below
   $\sqrt{\varepsilon}\,\sigma_{\max}$ — and those are the ones carrying
   the largest gain multipliers. The loss is governed by $\sigma_{\max}$
@@ -71,20 +74,22 @@ equivalent Woodbury identity applied to the normal equations. Four reasons:
   for all $\sigma \ge 0$, so the gain cannot blow up however ill-conditioned
   the ensemble becomes, and no regularization parameter needs tuning.
 - **It is one object away from the deterministic variant.** The square-root
-  transform is $T = I_J + V\bigl((I+\Sigma^2)^{-1/2} - I\bigr)V^\top$,
-  reusing the same decomposition. The identity completion matters: the
-  naive $V(I+\Sigma^2)^{-1/2}V^\top$ omits the identity on the orthogonal
-  complement and is wrong whenever the thin SVD's rank is below $J$ — see
+  transform is $T = I_k + U\bigl((I+\Sigma^2)^{-1/2} - I\bigr)U^\top$,
+  reusing the same decomposition, and conditioning is then a right
+  multiplication of the factor by it. The identity completion matters: the
+  naive $U(I+\Sigma^2)^{-1/2}U^\top$ omits the identity on the orthogonal
+  complement and is wrong whenever the thin SVD's rank is below $k$ — see
   the {doc}`gaussian-contract` for the normative form.
-- **The update stays in the ensemble span**, $\theta^{(j)} \mapsto \theta^{(j)}
-  + \Theta' w^{(j)}$ with $w^{(j)} \in \mathbb{R}^J$, so no matrix of parameter
-  or observation dimension is ever formed.
+- **The update stays in the factor's span**, $u_j \mapsto u_j + F_u w_j$ with
+  $w_j \in \mathbb{R}^k$, so no matrix of parameter or observation dimension
+  is ever formed.
 
-Cost is $O(NJ)$ to whiten (for a whitener applying in $O(N)$ per vector;
-a dense whitener costs $O(N^2)$ each), $O(NJ^2)$ for the thin SVD and $O(PJ)$ to apply
-$\Theta'$ — linear in both the observation dimension $N$ and parameter
-dimension $P$ for a structured whitener, cubic only in the ensemble size;
-a dense whitener adds its own $O(N^2J)$.
+Cost is $O(Nk)$ to whiten the factor (for a whitener applying in $O(N)$ per
+vector; a dense whitener costs $O(N^2)$ each), $O(Nk^2)$ for the thin SVD and
+$O(Pk)$ to apply $F_u$ — linear in both the observation dimension $N$ and
+parameter dimension $P$ for a structured whitener, cubic only in the latent
+width, which for a sample update is the ensemble size; a dense whitener adds
+its own $O(N^2k)$.
 
 ### The algorithm space
 
@@ -93,10 +98,10 @@ whitened SVD and selects nothing at runtime ({doc}`gaussian-contract`).
 
 | regime | method | cost |
 | --- | --- | --- |
-| $J < N$, noise whitenable | whitened SVD — what pyEKI implements | $O(NJ^2)$ |
-| $N$ very large, noise block diagonal | same, whitening per block | $O(NJ^2)$ |
+| $k < N$, noise whitenable | whitened SVD — what pyEKI implements | $O(Nk^2)$ |
+| $N$ very large, noise block diagonal | same, whitening per block | $O(Nk^2)$ |
 | localized | per-block whitened SVD on local data | $O(n N_{\text{loc}} J^2)$ |
-| $N \le J$ | dense factorization of the predictive covariance — deferred as a possible internal optimization behind the same signatures | $O(N^3)$ |
+| $N \le k$ | dense factorization of the predictive covariance — deferred as a possible internal optimization behind the same signatures | $O(N^3)$ |
 
 ## Localization
 

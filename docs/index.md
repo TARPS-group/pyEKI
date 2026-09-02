@@ -174,6 +174,7 @@ examples/index
 linop-contract
 gaussian-contract
 eki-contract
+joint-factor
 design
 api/index
 ```
