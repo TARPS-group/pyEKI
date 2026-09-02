@@ -348,9 +348,18 @@ class Gaussian:
         """The Gaussian fit to a set of samples: their empirical moments.
 
         The one-block counterpart of :meth:`GaussianJoint.from_samples`,
-        which fits a joint to two row-aligned blocks. Use it to read a block of samples'
-        moments as a distribution — per-coordinate variances through
-        ``cov.diag()``, fresh draws through :meth:`sample`.
+        which fits a joint to two row-aligned blocks. Use it to read a block
+        of samples' moments as a distribution — per-coordinate variances
+        through ``cov.diag()``, fresh draws through :meth:`sample`.
+
+        With :math:`\\mathsf{X}` the ``(J, n)`` sample matrix and
+        :math:`A = \\mathsf{X} - \\mathbf{1}_J\\bar x^\\top` its anomalies,
+
+        .. math::
+
+            \\bar x = \\frac{1}{J}\\sum_j x_j, \\qquad
+            \\widehat{C} = \\frac{A^\\top A}{J-1} = FF^\\top,
+            \\qquad F = \\frac{A^\\top}{\\sqrt{J-1}} .
 
         Parameters
         ----------
