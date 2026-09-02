@@ -51,7 +51,7 @@ Conventions shared by everything in the module:
   through ``whiten``, so a noise operator with no factorization at all
   drives every update.
 
-Both classes are frozen-dataclass pytrees whose fields are their whole
+All three classes are frozen-dataclass pytrees whose fields are their whole
 state, exactly like operators: they compare by identity, they are never
 valid ``static_argnums``, and a pytree reconstruction with batched leaves
 produces a *vmapped family*, which reports its ``batch_shape`` and refuses
@@ -295,7 +295,7 @@ class Gaussian:
     """A Gaussian distribution :math:`\\mathcal{N}(m, C)`.
 
     The prior a caller supplies, and the posterior
-    :meth:`EmpiricalJoint.condition` returns.
+    :meth:`GaussianJoint.condition` returns.
 
     Each method requires specific operations of the covariance, and an
     unsupported one raises the operator layer's
@@ -347,8 +347,8 @@ class Gaussian:
     def from_samples(cls, samples) -> Gaussian:
         """The Gaussian fit to a set of samples: their empirical moments.
 
-        The one-block counterpart of :class:`EmpiricalJoint`, which fits a
-        joint to two row-aligned blocks. Use it to read a block of samples'
+        The one-block counterpart of :meth:`GaussianJoint.from_samples`,
+        which fits a joint to two row-aligned blocks. Use it to read a block of samples'
         moments as a distribution — per-coordinate variances through
         ``cov.diag()``, fresh draws through :meth:`sample`.
 

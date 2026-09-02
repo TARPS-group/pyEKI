@@ -1,6 +1,6 @@
 """Conformance and regression tests for the joint Gaussian layer.
 
-The file has two sections. The first works through the thirteen numbered
+The file has two sections. The first works through the fifteen numbered
 conformance obligations of the "Joint Gaussian contract"; the second holds one
 targeted regression test per class of silent failure the contract names, under
 the same do-not-delete rule as the operator layer's — each documents why a rule
@@ -367,7 +367,7 @@ def _count_svd(jaxpr) -> int:
 
 
 # ===========================================================================
-# Section 1 -- the thirteen conformance obligations
+# Section 1 -- the fifteen conformance obligations
 # ===========================================================================
 
 # --- 1. gain against dense ---------------------------------------------------
