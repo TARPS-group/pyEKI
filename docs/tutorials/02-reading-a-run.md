@@ -130,14 +130,16 @@ The last step is the exception, at 57.4, because by then only 0.4486 of budget
 remained and the step could not be as long as the floor would have permitted.
 Its spread falls smoothly, by a factor between 1.3 and 2.7 per step.
 
-The three-step run reaches the same place and is worse in every panel. Its
-effective sample size at the first step is **1.0**: at an increment of $1/3$,
-a single member out of 64 carries essentially the entire weight of the
-reweighting, and the step conditions on that member's opinion. Its spread then
-falls by a factor of 5.2 in one step, which is the same event seen from
-another angle. The two runs end up with different answers — the three-step
-run's spread is 35% larger in the amplitude and 47% larger in the rate — and
-nothing in `status` distinguishes them.
+The three-step run reaches the same level, and each panel gives a reason not
+to trust it. Its effective sample size at the first step is **1.0**: at an
+increment of $1/3$, a single member out of 64 carries essentially the entire
+weight of the reweighting, and the step conditions on that member's opinion.
+Its spread then falls by a factor of 5.2 in one step, which is the same event
+seen from another angle. Its last recorded misfit is 25.5, four times the
+reference of 6, so the members it was still working with did not fit the data
+well. The two runs end up with different answers — the three-step run's spread
+is 35% larger in the amplitude and 47% larger in the rate — and nothing in
+`status` distinguishes them.
 
 Which of those answers is nearer the truth is not a question the diagnostics
 can settle, and {doc}`04-tempering-schedules` settles it by measuring both

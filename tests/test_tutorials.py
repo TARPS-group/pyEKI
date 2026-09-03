@@ -214,6 +214,15 @@ def test_1_tutorial_2_blocks_run():
     prints_as(evaluation.misfits.mean(), 6.7961)
     prints_as(evaluation.misfits.mean() - evaluation.centre_misfit, 2.1896)
 
+    # The page's plotting block. matplotlib is on the Agg backend, since
+    # importing `figures` above set it.
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure()
+    plt.plot(history.step, history.misfit_mean)
+    plt.yscale("log")
+    plt.close(figure)
+
     fitted = Gaussian.from_samples(result.ensemble)
     prints_as(fitted.mean, [1.9802, 1.4741])
     prints_as(fitted.cov.diag() ** 0.5, [0.0396, 0.0363])
@@ -455,6 +464,8 @@ def test_4_the_trajectories_figure_plots_what_tutorial_2_says():
     coarse_ess = data["three_equal_steps_ess"]
     prints_as(coarse_ess[0], 1.0002)
     assert coarse_ess[0] < 1.001
+    # "its last recorded misfit is 25.5, four times the reference of 6".
+    prints_as(data["three_equal_steps_misfit_mean"][-1], 25.5143)
 
     # "its spread falls smoothly, by a factor between 1.3 and 2.7 per step"
     # against "a factor of 5.2 in one step".
