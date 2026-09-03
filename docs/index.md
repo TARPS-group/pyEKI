@@ -94,8 +94,8 @@ result.mean            # posterior mean estimate
 result.stacked.ess     # effective sample size at each step of the ladder
 ```
 
-{doc}`tutorials/index` builds this up from the beginning and explains every
-choice in it.
+{doc}`tutorials/01-first-inversion` builds this up from the beginning and explains
+every choice in it.
 
 ## How this documentation is organized
 

@@ -48,11 +48,14 @@ flaky or vacuous, and it would not catch a wrong number in a legible plot.
 **A grid, not a closed form.** :func:`pyeki.toy.exponential_decay` has no
 closed-form posterior, but it has two parameters, so its tempered densities
 can be evaluated on a grid up to a constant, which is all a contour plot
-needs. Grid quadrature is used for contours everywhere here, and for reference
-moments only at :math:`\\beta = 1`, where it is converged: the mean and
-standard deviation agree to five digits across two boxes and three
-resolutions. A box that holds the posterior comfortably still truncates the
-prior, so grid moments at small :math:`\\beta` are not reported.
+needs. Grid quadrature also gives the reference moments the tutorials compare
+against, through :func:`_tempered_moments`, which refines its box because no
+single grid serves every level: one wide enough for the prior spans eight
+units per parameter and resolves a target of standard deviation 0.037 with
+about five points, while one sized for the target truncates the prior. After
+two refinements the moments agree to six digits across three resolutions, and
+at :math:`\\beta = 0` they recover the prior's own moments exactly, which is
+the one level where the quadrature can be checked against a closed form.
 """
 
 from __future__ import annotations
@@ -172,15 +175,28 @@ def _moments(grid, log_pi):
     return mean, sd
 
 
-#: A box wide enough for the prior, used to find where a level's mass sits.
+#: A box wide enough for the prior, where every level's mass search starts.
 _WIDE_BOX = (-3.0, 5.0, -3.0, 5.0)
 
 
-def _tempered_moments(beta, n=200):
-    """Mean and standard deviation of the tempered density at ``beta``."""
-    _, _, grid = _grid(_WIDE_BOX, n)
-    log_prior, phi = _log_terms(grid)
-    return _moments(grid, log_prior - beta * phi)
+def _tempered_moments(beta, n=200, refinements=2):
+    """Mean and standard deviation of the tempered density at ``beta``.
+
+    A single grid cannot serve every level: the target at ``beta = 1`` is
+    thirty times narrower than the prior, so a box wide enough for the prior
+    resolves it with about five points across its width and reports a mean
+    wrong in the fourth decimal. So the box is refined — a pass on a box wide
+    enough for the prior locates the mass, and each further pass re-grids
+    ``mean +/- 6 sd``. Two refinements converge at every level used here;
+    ``tests/test_tutorials.py`` asserts that against three resolutions.
+    """
+    box = _WIDE_BOX
+    for _ in range(refinements):
+        _, _, grid = _grid(box, n)
+        log_prior, phi = _log_terms(grid)
+        mean, sd = _moments(grid, log_prior - beta * phi)
+        box = _box_around(mean, sd, 6.0)
+    return mean, sd
 
 
 def _tempered_contours(beta, box, n=160):
