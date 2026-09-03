@@ -80,10 +80,10 @@ reader will carry to their own problem:
 ## A model that fails
 
 `restricted_decay()` is the decay model restricted to positive rates, so a
-member whose rate is negative gets a wholly non-finite prediction row — which
-is how a forward model signals a failed member. The prior puts about 16% of
-its mass below the floor, so the first step loses several members and later
-steps almost none:
+member whose rate is not positive gets a wholly non-finite prediction row —
+which is how a forward model signals a failed member. The prior puts about 16%
+of its mass below the floor, so the first step loses nine of the sixty-four
+members and no later step loses any:
 
 ```python
 problem = toy.restricted_decay()
@@ -99,7 +99,9 @@ result.mean                   # [1.9801  1.474 ]  against a truth of [2. 1.5]
 Which members fail is a deterministic function of the ensemble, so this is
 reproducible; the *fraction* is a property of the problem rather than an
 injected rate, and `rate_floor=` moves it. Raise the floor toward the prior
-mean to fail more members and see where repair stops being adequate.
+mean to fail more members and see where repair stops being adequate; it must
+stay below the true rate of 1.5, or the observation would have been generated
+where the model does not evaluate.
 
 The failure here is signalled with `jnp.where`, which is the cheap version.
 The realistic one is a wrapper that catches its own subprocess failures and
@@ -122,16 +124,17 @@ result.ensemble.std(axis=0, ddof=1).mean()          # 0.0140
 ```
 
 The ensemble reports an average posterior standard deviation seventy times
-smaller than the truth. Forty observations cannot constrain two thousand
+smaller than the exact posterior's. Forty observations cannot constrain two thousand
 parameters, and the exact posterior says so; the run fits them with 39 degrees
 of freedom and collapses. Nothing raises, and no field of `HistoryRecord`
 flags it.
 
 `posterior()` builds a `(P, k)` factor for a prior covariance factor of width
-`k`, so it raises above a documented element budget rather than allocating —
-at a full-rank prior in 2000 dimensions that factor is 32 MB, and above a few
-thousand dimensions the closed form is simply unavailable while the run is
-not.
+`k`, and a `(k, k)` transform on the way, so it raises above a budget of 20
+million elements rather than allocating. At a full-rank prior in 2000
+dimensions the returned factor is 32 MB and the peak is nearer 180 MB; above
+about four thousand dimensions the closed form is simply unavailable, while
+the run is not.
 
 ## What these models are, and are not, an example of
 
@@ -151,7 +154,9 @@ What they *are* an example of is the batched convention and row independence:
 - **Row `j` of the return depends only on row `j` of the argument.** That is
   the one requirement nothing inside a run detects, and both idioms above make
   it structural rather than a claim. From outside a run it *is* detectable:
-  `pyeki.eki.testing.check_forward_model` permutes the ensemble and compares.
+  `pyeki.eki.testing.check_forward_model` permutes the ensemble and
+  re-evaluates a subset of it, which between them catch an order-dependent
+  coupling and a symmetric one. Neither is sufficient alone.
 
 ```python
 from pyeki.eki.testing import check_forward_model
@@ -160,7 +165,8 @@ check_forward_model(my_forward, u_dim=12, v_dim=40)
 ```
 
 It calls the model five times, so check a cheap configuration of an expensive
-one.
+one. Pass `stochastic=True` for a model that is legitimately not
+deterministic; a run permits one.
 
 ## Modifying a problem
 
@@ -170,7 +176,13 @@ error, for instance, changes nothing else about the run:
 
 ```python
 import dataclasses
+import numpy as np
+import jax.numpy as jnp
 from pyeki.linalg import DensePSD
+
+rng = np.random.default_rng(1)
+M = rng.normal(size=(8, 8))
+R = jnp.asarray(M @ M.T / 8 + 0.01 * np.eye(8))
 
 problem = toy.linear_gaussian(u_dim=4, v_dim=8)
 correlated = dataclasses.replace(problem, noise_cov=DensePSD.from_matrix(R))
@@ -178,8 +190,10 @@ correlated = dataclasses.replace(problem, noise_cov=DensePSD.from_matrix(R))
 correlated.posterior().mean       # [-1.4093  0.8248  0.4646  0.0692]
 ```
 
-for a symmetric positive-definite `R` of side 8 — here the one drawn as
-`M @ M.T / 8 + 0.01 * I` from `numpy.random.default_rng(1)`.
+Replacing `noise_cov` is the safe case. Replacing `G` or `prior` leaves `y`
+as the old map generated it, so `truth` is no longer the parameters behind the
+observation and `posterior()` answers a problem nobody posed — build a fresh
+one from the factory instead.
 
 The closed form follows the new covariance, since `posterior()` reads the
 field.

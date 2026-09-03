@@ -63,6 +63,8 @@ Tutorials 1 to 4.
 ## Notes for the writer
 
 The measured numbers above are from the shipped driver and the shipped toy
-problem, and are pinned by `tests/test_toy.py`; do not re-derive them, but do
-re-run them, since a schedule change would move the step count and a change to
-`linear_gaussian`'s construction would move all of them.
+problem, and all five — the status, the step count, the rank and the two
+standard deviations — are pinned by `tests/test_toy.py`. Do not re-derive
+them; a schedule change would move the step count and a change to
+`linear_gaussian`'s construction would move all of them, and in either case
+that test is what tells you.

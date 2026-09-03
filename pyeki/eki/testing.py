@@ -1,7 +1,8 @@
-"""Conformance checks for schedules, updates, inflations and stopping rules.
+"""Conformance checks for policies, and for a forward model of your own.
 
-Call the check matching your policy's axis on an instance of it, to verify
-the policy against the requirements :mod:`pyeki.eki` places on that axis.
+Call the check matching your policy's axis on an instance of it, or
+:func:`check_forward_model` on a model, to verify it against the requirements
+:mod:`pyeki.eki` places on that axis.
 
 ============================= ==============================================
 function                      checks
@@ -34,18 +35,24 @@ attribute            set it on          suppresses
 Both default to ``False`` when absent, so a rule that satisfies the property
 declares nothing.
 
-:func:`check_forward_model` is the exception to "your policy": a forward model
-is not a policy and has no protocol to conform to — the layer defines no base
-class for one. It is here because the obligations of the
-:mod:`pyeki.eki` layer's one external callable are this layer's, and because
-one of them, row independence, is invisible from inside a run and visible from
-outside it. It takes a ``stochastic`` argument rather than reading a
-declaration off the callable, since a bare function has nowhere to put one.
+The two declarations above are attributes on the policy.
+:func:`check_forward_model` instead takes ``stochastic`` as an argument, since
+a bare function has nowhere to put an attribute.
 
 Notes
 -----
 The behaviour these checks verify is specified by the "Ensemble Kalman
 Inversion contract" page of the documentation.
+
+The four policy checks each take a policy and a small
+:class:`~pyeki.eki.Evaluation`, which :func:`synthetic_evaluation` builds, so
+testing a schedule never means running a forward model.
+:func:`check_forward_model` is the exception, and is here for two reasons. A
+forward model is not a policy and has no protocol to conform to — the layer
+defines no base class for one, and this check constructs no type and registers
+nothing. But the obligations on the layer's one external callable are the
+layer's own, and one of them, row independence, is invisible from inside a run
+and visible from outside it.
 
 Purity is the reason the harness exists. A policy holding state across steps
 silently breaks resumption, and that is a failure a test suite can catch in
@@ -389,13 +396,15 @@ def check_forward_model(
     seed: int = 0,
     stochastic: bool = False,
 ) -> None:
-    """Check a forward model of your own against what a run requires of one.
+    """Check a forward model of your own from outside a run.
 
     A forward model is any callable from a ``(J, P)`` ensemble to ``(J, N)``
     predictions; there is no base class and nothing to register. This checks
     the obligations that can be checked from outside — including **row
-    independence**, which nothing inside a run detects — on an ensemble of
-    pseudo-random parameters.
+    independence**, which no run detects — on an ensemble of pseudo-random
+    parameters, plus determinism, which a run *permits* but does not require:
+    pass ``stochastic=True`` for a model that is legitimately not
+    deterministic.
 
     ============================================ ============================
     checked                                      not checked
@@ -408,10 +417,6 @@ def check_forward_model(
     row independence, by permuting the members   placement
     and by re-evaluating a subset of them
     ============================================ ============================
-
-    A model that is legitimately stochastic breaks the last two by design;
-    pass ``stochastic=True`` to skip them. Nothing else here depends on
-    determinism.
 
     **This calls the model five times** — twice when ``stochastic=True`` —
     which for a real forward model is five evaluations of the expensive thing.
@@ -475,11 +480,27 @@ def check_forward_model(
     check evaluates two members together, never one, since a run never calls
     a model with fewer than two.
     """
+    if n_members < 3:
+        raise ValueError(
+            f"check_forward_model: n_members must be at least 3, got "
+            f"{n_members}. Both row-independence comparisons need a subset "
+            f"that is smaller than the ensemble and a permutation that is not "
+            f"the identity, and at n_members < 3 neither exists — the checks "
+            f"would pass a coupled model."
+        )
+    if u_dim < 1 or v_dim < 1:
+        raise ValueError(
+            f"check_forward_model: u_dim and v_dim must be at least 1, got "
+            f"u_dim={u_dim}, v_dim={v_dim}"
+        )
     name = getattr(forward, "__name__", None) or repr(forward)
     rng = np.random.default_rng(seed)
     ensemble = jnp.asarray(rng.normal(size=(n_members, u_dim)))
 
     predictions = _forward_call(forward, ensemble, name, u_dim, v_dim)
+    # This assertion must precede the width check below: jnp.finfo raises
+    # ValueError on a non-inexact dtype, so an integer return would surface as
+    # that rather than as the diagnosis it deserves.
     assert jnp.issubdtype(predictions.dtype, jnp.floating), (
         f"{name}: returned dtype {predictions.dtype}, which is not a real "
         f"floating type; an integer or complex return is a ValueError in a run"
@@ -505,7 +526,13 @@ def check_forward_model(
         f"stochastic forward model is legal — declare it with "
         f"stochastic=True — but it damps the gain and costs extra evaluations",
     )
-    permutation = jnp.asarray(rng.permutation(n_members))
+    # Never the identity: an identity permutation would make the comparison
+    # below compare a result with itself, which asserts nothing. At small
+    # n_members a fair draw returns it often.
+    permutation = np.asarray(rng.permutation(n_members))
+    while np.array_equal(permutation, np.arange(n_members)):
+        permutation = np.asarray(rng.permutation(n_members))
+    permutation = jnp.asarray(permutation)
     _identical_allowing_nan(
         _forward_call(forward, ensemble[permutation, :], name, u_dim, v_dim),
         predictions[permutation, :],
@@ -532,7 +559,7 @@ def _forward_call(forward, ensemble, name: str, u_dim: int, v_dim: int):
     returned = forward(ensemble)
     try:
         predictions = jnp.asarray(returned)
-    except (TypeError, ValueError) as exc:  # pragma: no cover - exotic returns
+    except (TypeError, ValueError) as exc:
         raise AssertionError(
             f"{name}: returned {type(returned).__name__}, which is not "
             f"array-like; the return may be a jax.Array, a NumPy array or a "
@@ -559,6 +586,11 @@ def _close_allowing_nan(got, want, what: str, rtol: float = 1e-8) -> None:
 
     For comparisons across differently shaped batches, where the last bits
     legitimately differ and a genuine coupling differs by ``O(1)``.
+
+    The tolerance is **per element**, not against a global maximum. A single
+    global scale would be set by the largest prediction, so a model whose
+    observables span orders of magnitude — a pressure beside a mass fraction,
+    say — could couple its small observables freely and still pass.
     """
     got, want = np.asarray(got), np.asarray(want)
     assert got.shape == want.shape, f"{what}: shape {got.shape} != {want.shape}"
@@ -566,9 +598,14 @@ def _close_allowing_nan(got, want, what: str, rtol: float = 1e-8) -> None:
     assert np.array_equal(finite, np.isfinite(got)), (
         f"{what} (the non-finite entries are in different places)"
     )
-    scale = max(1.0, float(np.abs(want[finite]).max()) if finite.any() else 0.0)
-    err = float(np.abs(got[finite] - want[finite]).max()) if finite.any() else 0.0
-    assert err <= rtol * scale, f"{what} (max abs difference {err:.3e})"
+    if not finite.any():
+        return
+    tolerance = rtol * np.maximum(1.0, np.abs(want[finite]))
+    excess = np.abs(got[finite] - want[finite]) - tolerance
+    assert excess.max() <= 0.0, (
+        f"{what} (worst element exceeds its tolerance by "
+        f"{float(excess.max()):.3e})"
+    )
 
 
 def _is_pytree(obj) -> bool:

@@ -57,7 +57,9 @@ driver loop, in both the approximate-sampling and the optimization form.
 
 ## What pyEKI is not
 
-pyEKI does not implement forward models, priors, or Gaussian process kernels.
+pyEKI does not implement production forward models, priors, or Gaussian
+process kernels. It ships three toy problems, in `pyeki.toy`, for its own
+tests and this documentation.
 The forward model is any callable from parameters to predicted observations,
 and a prior is any operator meeting the covariance interface. Building those
 belongs to the caller, which keeps pyEKI independent of the domain being
@@ -155,8 +157,8 @@ user-guide/operators
 user-guide/conditioning
 user-guide/running-an-inversion
 user-guide/writing-a-forward-model
-user-guide/writing-an-operator
 user-guide/toy-models
+user-guide/writing-an-operator
 ```
 
 ```{toctree}

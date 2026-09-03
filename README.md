@@ -30,7 +30,9 @@ common variants, built on:
 
 ## What it is not
 
-pyEKI does not implement forward models, priors, or Gaussian process kernels.
+pyEKI does not implement production forward models, priors, or Gaussian
+process kernels. It ships three toy problems, in `pyeki.toy`, for its own
+tests and its documentation.
 The forward model is any callable mapping parameters to predicted observations,
 and a prior is any operator satisfying the covariance interface. Building those
 is the caller's job, which keeps pyEKI independent of the domain being

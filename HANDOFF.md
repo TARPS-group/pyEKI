@@ -52,10 +52,10 @@ promising: three toy problems, each a forward model bundled with a prior, a
 noise covariance, synthetic data and the parameters that generated it.
 `linear_gaussian` at any pair of dimensions, whose `posterior(level)`
 delegates to `GaussianJoint.from_linear_map(...).condition(y, R / level)` —
-three lines, and the reason the split above had to land first; the
+two lines, and the reason the split above had to land first; the
 `exponential_decay` problem, tuned until a unit step and an adaptive ladder
 differ reliably rather than coincidentally; and `restricted_decay`, the same
-model with a valid domain, so a member whose rate is negative returns a
+model with a valid domain, so a member whose rate is not positive returns a
 non-finite row. Its user-guide page is `docs/user-guide/toy-models.md`.
 
 The problems are frozen dataclasses of plain values and are deliberately
