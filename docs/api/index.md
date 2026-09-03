@@ -101,12 +101,17 @@ Joint Gaussian distributions and conditioning. See
 
 ```{eval-rst}
 .. autoclass:: pyeki.gauss.Gaussian
-   :members: n, batch_shape, sample, log_density
+   :members: from_samples, dim, batch_shape, sample, log_density
+
+.. autoclass:: pyeki.gauss.GaussianJoint
+   :members: from_linear_map, from_samples, from_factors, u_dim, v_dim,
+             latent_dim, batch_shape, u_marginal, v_marginal, condition,
+             pathwise
 
 .. autoclass:: pyeki.gauss.EmpiricalJoint
    :members: n_samples, u_dim, v_dim, batch_shape, u_mean, v_mean,
-             u_anomalies, v_anomalies, pathwise_update, transform_update,
-             condition
+             u_anomalies, v_anomalies, to_gaussian_joint, transform_update,
+             pathwise_update
 ```
 
 ### Conditioning primitives

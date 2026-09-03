@@ -17,7 +17,8 @@ and increasingly concentrated on the minimizers of :math:`\\Phi \\circ G` as
 :math:`\\beta \\to \\infty`. Moving one increment up that ladder is an
 identity, not an approximation: it is conditioning on the same observation
 with the noise covariance divided by that increment. That is why this layer
-needs nothing from :mod:`pyeki.gauss` beyond its two update methods.
+needs nothing from :mod:`pyeki.gauss` beyond its two update methods and
+:meth:`~pyeki.gauss.Gaussian.sample`.
 
 Two well-known modes of EKI fall out of the same driver, and neither is
 privileged — they are two schedules, not two drivers and not a flag::
