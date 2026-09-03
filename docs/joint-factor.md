@@ -224,9 +224,11 @@ $A_u'^\top(I_J + SS^\top)^{-1}A_u'/(J-1)$, which equals $C_{\text{post}}$ only
 when $A_u'^\top/\sqrt{J-1} = F_u$ — that is, only when the sample set is the
 one the joint was fitted to. Worse, the *mean* survives regardless, since
 $\mathbf{1}^\top A_u' = 0$ and $T\mathbf{1} = \mathbf{1}$ hold for any
-centred set. On an unrelated sample set of the same shape the measured
-outcome is a posterior mean correct to $1.1\times10^{-16}$ and a covariance
-wrong by 59% of its own scale, finite, with nothing raised.
+centred set. On an unrelated sample set of the same shape the mean is correct
+to round-off and the covariance is wrong by a large fraction of its own scale
+— 62% on the conformance fixture, though the exact figure depends on the
+draw, so the test asserts only that it exceeds a tenth. Finite, with nothing
+raised.
 
 ## The pathwise map
 
@@ -382,9 +384,14 @@ question structurally. The two orders agree in exact arithmetic but not in
 stability: centring already-whitened vectors makes the cancellation ratio
 $\lVert W\bar v\rVert / \lVert WF_v\rVert$ in place of $\lVert \bar v\rVert /
 \lVert F_v\rVert$, so the error grows with $\kappa(W) = \sqrt{\kappa(R)}$
-whenever $\bar v$ is aligned with a precise direction of the noise. Because
-the factor is centred at construction, there is no ordering left to get wrong
-inside a conditioning call.
+whenever $\bar v$ is aligned with a precise direction of the noise. Measured
+against an exact rational reference at $\kappa(R) = 10^{10}$, with the
+observed block's mean of magnitude $10^{10}$ along $R$'s most precise
+direction: whitening first gives a posterior-mean relative error of
+$9.0\times10^{-6}$ where centring first gives $1.0\times10^{-12}$, six orders
+apart. Because the factor is centred at construction, there is no ordering
+left to get wrong inside a conditioning call — only the mean residual, which
+is differenced before whitening.
 
 The thin SVD is $O(kN\min(k,N))$, forming weights $O((N+k)\rho)$ per
 residual, applying $F_u$ is $O(Pk)$ per weight vector for a dense factor and
@@ -421,7 +428,8 @@ $\varepsilon = 2.22\times10^{-16}$.
 | $T\mathbf{1} = \mathbf{1}$, and $F_uT$ still centred | $1.1\times10^{-16}$, $4.7\times10^{-16}$ |
 | `transform_update` against `condition` plus the reading | $4.4\times10^{-16}$ |
 | Matheron on exact-moment realizations, against the closed-form posterior | mean $2.2\times10^{-16}$, covariance $3.3\times10^{-16}$ |
-| a sample-set argument: mean survives, covariance does not | mean $1.1\times10^{-16}$; covariance error $1.05$ on a scale of $1.77$ |
+| a sample-set argument: mean survives, covariance does not | mean $5.6\times10^{-17}$; covariance error $1.17$ on a scale of $1.88$ |
+| centring before whitening, $\kappa(R) = 10^{10}$ | $1.0\times10^{-12}$, against $9.0\times10^{-6}$ for the reverted grouping |
 | block recovery of $F_u$, wide factor ($k > N$) | ill-posed; recovered $F_u$ off by $1.4\times10^{9}$ |
 | block recovery of $F_u$, Gram route at $\kappa(F_v) = 1.4\times10^{8}$ | $\kappa(F_v^\top F_v) = 2\times10^{16}$; $F_u$ to $1.8\times10^{-8}$, against $4.7\times10^{-8}$ for an SVD pseudo-inverse |
 

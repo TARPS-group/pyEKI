@@ -18,10 +18,14 @@ its rules.
 :::{admonition} Status: implemented
 :class: note
 
-`pyeki.gauss` implements this specification, and this page is the normative
-reference for its behaviour. The conformance obligations of
-{ref}`gauss-conformance` are met by `tests/test_gauss.py`; the user guide's
-{doc}`user-guide/conditioning` page covers when to reach for each piece.
+This page is normative and the implementation conforms to it. Where the two
+are ever found to disagree, this page wins and the implementation is
+defective; substantive changes to the layer change this page first.
+
+The conformance obligations of {ref}`gauss-conformance` are met by
+`tests/test_gauss.py`; {doc}`joint-factor` derives the representation this
+page specifies, and the user guide's {doc}`user-guide/conditioning` page
+covers when to reach for each piece.
 :::
 
 (gauss-scope)=
@@ -323,20 +327,13 @@ residual — from one `whiten_mat` call on the stacked columns
 $[F_v \mid y - \bar v]$. At $k = J$ that is the $J + 1$ a sample update
 spends.
 
-Whitening is a fixed linear map applied column-wise, so it commutes with
-subtraction and with the centring that built the factor. The grouping is
-**not** free, however: centring and differencing must happen *before* the
-whitener is applied. The two orders agree in exact arithmetic but are not
-equally stable — centring *whitened* vectors makes the cancellation ratio
-$\lVert W\bar v\rVert / \lVert W F_v\rVert$ in place of
-$\lVert \bar v\rVert / \lVert F_v\rVert$, so the error grows with
-$\kappa(W) = \sqrt{\kappa(R)}$ whenever $\bar v$ is aligned with a precise
-direction of the noise. Measured against an exact reference at
-$\kappa(R) = 10^4$ with $\bar v$ of magnitude $10^8$ along $R$'s most precise
-direction, whitening first gives a posterior-mean error of $4.9$ where
-centring first gives $2\times10^{-6}$. Holding a factor rather than samples
-settles this structurally: the factor is centred at construction, so there is
-no ordering left to get wrong inside a conditioning call.
+Centring and differencing **must** happen before the whitener is applied. The
+two orders agree in exact arithmetic and not in stability, the error growing
+with $\kappa(W) = \sqrt{\kappa(R)}$ when $\bar v$ lies along a precise
+direction of the noise ({doc}`joint-factor` derives the ratio and measures
+it). Holding a factor rather than samples settles the first half
+structurally — the factor is centred at construction — leaving only the mean
+residual, which is differenced before whitening.
 
 Two pathwise routes have deliberately different costs. Transporting the
 realizations a centred factor already holds
@@ -434,13 +431,15 @@ supplies, and the posterior that `GaussianJoint.condition` returns
 **Fields.** `mean`, a `(n,)` array, and `cov`, a
 {class}`~pyeki.linalg.PSDLinOp` of side `n`. Construction validates the rank
 of `mean`, the operator type of `cov`, and their agreement
-(tier 2, shape-only — {ref}`gauss-validation`). `n` is a property computed from `mean`.
+(tier 2, shape-only — {ref}`gauss-validation`). `dim` is a property computed from `mean`.
 
-The size properties across the layer follow one rule: an object with a
-single dimension names it `n`, matching {class}`~pyeki.linalg.SquareLinOp`
-one layer down; an object with several qualifies each one, as
-`EmpiricalJoint`'s `n_samples`, `u_dim` and `v_dim` do, and as
-`GaussianJoint`'s `u_dim`, `v_dim` and `latent_dim` do.
+The size properties across the layer follow one rule: a dimension is named
+`dim`, qualified by its block where there is more than one — `Gaussian.dim`,
+against `EmpiricalJoint`'s `u_dim` and `v_dim` and `GaussianJoint`'s `u_dim`,
+`v_dim` and `latent_dim`. Counts keep the `n_` prefix, as `n_samples` does.
+The operator layer one level down names a single dimension `n`
+({class}`~pyeki.linalg.SquareLinOp`); this layer does not follow it, because
+`dim` is the name its multi-block objects already needed.
 
 **Capabilities delegate to the covariance.** `Gaussian` defines no
 capability system of its own: each method requires specific operations of
@@ -589,7 +588,7 @@ applications of $G$, which is the factorization this constructor owes the
 kernel and the reason $G$'s shape never enters a conditioning call.
 `UnsupportedOpError` if the covariance has no `factor`; `TypeError` on a
 non-`Gaussian` or non-`LinOp`; `ValueError` if $G$'s input size is not
-`u_marginal.n`, or either argument is a family.
+`u_marginal.dim`, or either argument is a family.
 
 `from_samples` matches moments to two row-aligned sample blocks: the means
 are the sample means and the covariance blocks the empirical covariances with
@@ -846,14 +845,11 @@ samples, centredness is structural: `from_samples` is the only constructor
 reachable from here, and it centres. Moved to `GaussianJoint`, it would be a
 value precondition detectable only in debug mode.
 
-The failure it prevents is not hypothetical in the other direction either.
-Were `transform_update` to take a sample set as an *argument*, applying $T$
-to any set other than the joint's own would leave the posterior mean intact —
-$\mathbf{1}^\top A' = 0$ and $T\mathbf{1} = \mathbf{1}$ both still hold — and
-get the covariance wrong, finitely and without an exception. Measured on an
-unrelated sample set of the same shape: mean correct to $1.1\times10^{-16}$,
-covariance wrong by 59% of its own scale. The argument is already inside the
-joint, so it is not offered.
+Nor may `transform_update` take a sample set as an *argument*. Applying $T$
+to any set other than the joint's own leaves the posterior mean intact and
+gets the covariance wrong, finitely and without an exception
+({doc}`joint-factor` has the arithmetic and the measured error). The argument
+is already inside the joint, so it is not offered.
 :::
 
 ### `pathwise_update(key, y, noise_cov)`
@@ -1099,11 +1095,11 @@ per-class; here is its gauss instantiation:
   `pathwise`, the two updates, `to_gaussian_joint`, the marginals, the means
   and the anomalies) raises `ValueError` naming the object, the operation,
   the batch shape, and the remedy — apply the family under `jax.vmap` —
-  before any capability or operand check. The static `int` properties (`n`,
+  before any capability or operand check. The static `int` properties (`dim`,
   `n_samples`, `u_dim`, `v_dim`, `latent_dim`), `batch_shape` itself, and
   `repr` still answer — and the size properties report **core** (trailing)
   sizes, never batch sizes, exactly as an operator's `shape` does:
-  `Gaussian.n` is `mean.shape[-1]`, `EmpiricalJoint`'s three are
+  `Gaussian.dim` is `mean.shape[-1]`, `EmpiricalJoint`'s three are
   `u_samples.shape[-2]`, `u_samples.shape[-1]` and `v_samples.shape[-1]`,
   and `GaussianJoint.latent_dim` is `u_factor.shape[1]`.
 - **Family repr** wraps the ordinary form, as for operators; the form and
@@ -1248,7 +1244,7 @@ layer's test; the per-step exactness it composes from lives here.
 ## `repr`
 
 Type name and static sizes, never array contents, matching the operator
-rule ({ref}`contract-repr`): `Gaussian(n=12)`,
+rule ({ref}`contract-repr`): `Gaussian(dim=12)`,
 `GaussianJoint(u_dim=12, v_dim=40, latent_dim=100)`,
 `EmpiricalJoint(n_samples=100, u_dim=12, v_dim=40)`. A vmapped family wraps
 that form and names its batch —
@@ -1431,25 +1427,13 @@ independent operators. `GaussianJoint` is the re-entry that draft's own notes
 pointed to, and it is a *factor* joint rather than a block one, for three
 reasons the block form cannot answer.
 
-The kernel needs a shared latent, and recovering one from blocks means
-solving $F_u F_v^\top = C_{uv}$, that is
-$F_u = C_{uv}F_v(F_v^\top F_v)^{-1}$. That is ill-posed whenever $k > N$,
-where the Gram is singular and no coherent $F_u$ exists to recover; and where
-it is well-posed it forms the Gram and squares the condition number
-({doc}`joint-factor` measures both). More decisively, it requires $C_{uv}$, a
-matrix of *both* block dimensions, which no code path in the layer forms. And
-the joint's PSD-ness cannot be typed: a valid joint needs
-$\operatorname{col}(C_{vu}) \subseteq \operatorname{col}(C_{vv})$,
-which three independently supplied operators do not satisfy in general and no
-operator type can assert — composition never proves PSD-ness.
-
-A joint factor has none of these problems: coherence is structural, nothing
-is squared, no matrix of both dimensions appears, and $C = FF^\top$ is PSD by
-construction. It also avoids the block form's second dead end, a downdate
-operator (`PSDDowndate(base, F)` for $\mathrm{base} - FF^\top$) whose
-`factor` and `whiten` require solving against the base's own factor, which
-only some base types can do — the posterior is $(F_uT)(F_uT)^\top$ instead,
-a `PSDLowRank` and nothing more.
+Three properties of the block form rule it out, none of which a joint factor
+has: recovering a shared latent from the blocks is ill-posed or
+ill-conditioned, it requires $C_{uv}$ — a matrix of *both* block dimensions,
+which no code path here forms — and the joint's PSD-ness cannot be typed,
+since composition never proves it. {doc}`joint-factor` gives the argument and
+the measurements. The block form also needs a downdate operator for the
+posterior, where a joint factor needs only `PSDLowRank`.
 
 What remains excluded is a **dense reference implementation**: the oracle
 stays hand-written in the tests, precisely so that no package code is

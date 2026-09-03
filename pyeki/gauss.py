@@ -407,12 +407,19 @@ class Gaussian:
         is assumed beyond their shape, and a Gaussian fit to a non-Gaussian
         sample describes only its first two moments.
         """
-        samples = jnp.asarray(samples)
-        if samples.ndim != 2:
+        ndim = getattr(samples, "ndim", None)
+        if ndim is None:
+            raise TypeError(
+                f"Gaussian.from_samples: samples must be an array of rank 2, got "
+                f"{type(samples).__name__}, which has no shape to check. Pass a "
+                f"JAX array — jnp.asarray() on a nested list."
+            )
+        if ndim != 2:
             raise ValueError(
                 f"Gaussian.from_samples: samples must be rank 2, got shape "
                 f"{samples.shape}"
             )
+        samples = jnp.asarray(samples)
         n_samples = samples.shape[0]
         if n_samples < 2:
             raise ValueError(
@@ -424,7 +431,7 @@ class Gaussian:
         return cls(jnp.mean(samples, axis=-2), PSDLowRank(factor))
 
     @property
-    def n(self) -> int:
+    def dim(self) -> int:
         """The dimension, the trailing core size of ``mean``."""
         return int(self.mean.shape[-1])
 
@@ -540,18 +547,18 @@ class Gaussian:
         _check_not_vmap_family(self, "log_density")
         _require_cov_ops(self.cov, "whiten", "logdet")
         where = f"{self!r}.log_density"
-        x = _check_batched_operand(where, "x", x, self.n)
+        x = _check_batched_operand(where, "x", x, self.dim)
         _check_finite(where, "x", x)
         whitened = self.cov.whiten(x - self.mean)
         quadratic = jnp.sum(whitened * whitened, axis=-1)
         return -0.5 * (
-            self.n * math.log(2.0 * math.pi) + self.cov.logdet() + quadratic
+            self.dim * math.log(2.0 * math.pi) + self.cov.logdet() + quadratic
         )
 
     def __repr__(self) -> str:
-        """The type name and dimension, as ``Gaussian(n=12)``; never raises."""
+        """The type name and dimension, as ``Gaussian(dim=12)``; never raises."""
         try:
-            base = f"Gaussian(n={self.n})"
+            base = f"Gaussian(dim={self.dim})"
             batch = self.batch_shape
         except Exception:
             return "<Gaussian (unprintable leaves)>"
@@ -853,7 +860,7 @@ class GaussianJoint:
             If ``u_marginal`` is not a :class:`Gaussian`, or ``linear_map``
             is not a :class:`~pyeki.linalg.LinOp`.
         ValueError
-            If ``linear_map``'s input size is not ``u_marginal.n``, or if
+            If ``linear_map``'s input size is not ``u_marginal.dim``, or if
             either argument is a vmapped family.
 
         Notes
@@ -886,11 +893,11 @@ class GaussianJoint:
                 f"with batch shape {linear_map.batch_shape}; build a family of "
                 f"joints with jax.vmap over this constructor."
             )
-        if linear_map.shape[1] != u_marginal.n:
+        if linear_map.shape[1] != u_marginal.dim:
             raise ValueError(
                 f"GaussianJoint.from_linear_map: {linear_map!r} takes vectors of "
                 f"length {linear_map.shape[1]}, but u_marginal has dimension "
-                f"{u_marginal.n}"
+                f"{u_marginal.dim}"
             )
         _require_cov_ops(u_marginal.cov, "factor")
         u_factor = u_marginal.cov.factor()

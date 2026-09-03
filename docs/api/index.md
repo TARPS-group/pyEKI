@@ -101,7 +101,7 @@ Joint Gaussian distributions and conditioning. See
 
 ```{eval-rst}
 .. autoclass:: pyeki.gauss.Gaussian
-   :members: from_samples, n, batch_shape, sample, log_density
+   :members: from_samples, dim, batch_shape, sample, log_density
 
 .. autoclass:: pyeki.gauss.GaussianJoint
    :members: from_linear_map, from_samples, from_factors, u_dim, v_dim,

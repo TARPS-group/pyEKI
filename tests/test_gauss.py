@@ -15,9 +15,14 @@ Two rules govern the reference throughout:
 - **Exactness tests compare against closed forms**, at a tolerance of a few
   machine epsilons times the natural scale of the quantity, never a tolerance
   chosen to make the test pass.
+- **Every test draws from its own deterministic stream.** The shared ``RNG``
+  is reseeded from the test's id before each test, so a test's numbers are
+  the same in isolation as in a full run, and inserting a test does not
+  change the fixtures of the tests after it.
 """
 from __future__ import annotations
 
+import zlib
 from fractions import Fraction
 
 import jax
@@ -52,6 +57,21 @@ from pyeki.linalg.testing import check_operator
 
 RNG = np.random.default_rng(0)
 EPS = float(np.finfo(np.float64).eps)
+
+
+@pytest.fixture(autouse=True)
+def _reseed_rng(request):
+    """Give every test its own deterministic draw from the shared generator.
+
+    ``RNG`` is module-level, so without this each test's fixture depends on how
+    many draws the tests before it happened to take: inserting a test anywhere
+    changes the numbers in every test after it, and an assertion calibrated to
+    one draw can fail on another purely from ordering. Seeding from the test's
+    own id makes each one reproducible in isolation and under any ordering,
+    while keeping different tests on different streams.
+    """
+    global RNG
+    RNG = np.random.default_rng(zlib.crc32(request.node.nodeid.encode()))
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1222,7 @@ def test_12_stochastic_calls_are_reproducible():
 
 def test_12_repr_names_static_sizes_and_no_array_data():
     gaussian = Gaussian(jnp.zeros(12), DensePSD.from_matrix(jnp.asarray(_psd(12))))
-    assert repr(gaussian) == "Gaussian(n=12)"
+    assert repr(gaussian) == "Gaussian(dim=12)"
 
     joint = EmpiricalJoint(u_samples=jnp.zeros((100, 12)), v_samples=jnp.zeros((100, 40)))
     assert repr(joint) == "EmpiricalJoint(n_samples=100, u_dim=12, v_dim=40)"
@@ -1270,8 +1290,8 @@ def test_13_gaussian_family_is_legible_and_inert():
         Gaussian(jnp.zeros(12), DensePSD.from_matrix(jnp.asarray(_psd(12))))
     )
     assert family.batch_shape == (8,)
-    assert family.n == 12  # core sizes, never batch sizes
-    assert repr(family) == "vmapped(Gaussian(n=12), batch=(8,))"
+    assert family.dim == 12  # core sizes, never batch sizes
+    assert repr(family) == "vmapped(Gaussian(dim=12), batch=(8,))"
 
     with pytest.raises(ValueError, match="vmapped family"):
         family.sample(jax.random.key(0), 2)
@@ -2098,9 +2118,8 @@ def test_regression_uncentered_transform_shifts_the_ensemble_mean():
     posterior mean.
     """
     J, P, N = 6, 3, 4
-    # a local generator: the assertions below carry thresholds calibrated to a
-    # particular draw, so drawing from the shared RNG would make this test's
-    # outcome depend on how many draws the tests before it happened to take
+    # an explicit seed, because the assertions below carry thresholds
+    # calibrated to a particular draw
     rng = np.random.default_rng(23)
     U = rng.normal(size=(J, P))
     V = rng.normal(size=(J, N)) + 20.0  # a large mean makes the error unmistakable
@@ -2585,7 +2604,7 @@ def test_gaussian_batch_shape_includes_its_covariance_contribution():
         treedef, [mean_leaf, jnp.stack([cov_leaf] * 4)]
     )
     assert cov_only.batch_shape == (4,)
-    assert cov_only.n == n
+    assert cov_only.dim == n
     with pytest.raises(ValueError, match="vmapped family"):
         cov_only.log_density(jnp.zeros(n))
 
