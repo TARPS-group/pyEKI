@@ -54,13 +54,20 @@ that layer's concepts to define its own behaviour.
 | `pyeki.linalg` | operators, batches, rows, factors, whiteners | Gaussians, conditioning, priors, posteriors, samples, ensembles, members, steps |
 | `pyeki.gauss` | Gaussians, conditioning, samples, the `u` and `v` blocks | ensembles, members, steps, tempering, forward models, EKI |
 | `pyeki.eki` | runs, steps, ensembles, members, tempering, forward models | — |
-| `pyeki.toy` | forward models, ensembles, members, predictions, priors, observations, true parameters, the closed-form posterior at a tempering level | runs, steps, phases, schedules, updates, inflation, failure policy, stopping rules |
+| `pyeki.toy` | forward models, ensembles, members, predictions, priors, observations, true parameters, the closed-form posterior at a tempering level | — but it may not *define* a schedule, an update, an inflation or a stopping rule, and no layer may import it |
 
 `pyeki.toy` is the one module that sits at `pyeki.eki`'s vocabulary level
-while importing nothing from it: it defines *problems*, not *runs*, which is
-why *steps* and *schedules* are on its forbidden list even though *members* is
-not. The one word it borrows upward is **level**, for $\beta$, because the
-tempered posterior is the object its closed form exists to expose.
+while importing nothing from it, and its row is deliberately the loose one. It
+defines *problems*, not *runs* — but its problems exist to be driven by runs
+and to be the subject of the documentation about them, so naming a step, a
+ladder or a tempering level to justify a default is legitimate rather than
+leakage. The boundary that carries the weight here is the **import
+direction**, not the vocabulary: nothing in the three layers may import
+`pyeki.toy`, and `tests/test_toy.py` asserts it in a fresh interpreter.
+
+The one constraint on its vocabulary is that it must not *define* the things
+the layer below owns. A toy module that shipped a schedule, an update rule, an
+inflation or a stopping rule would be `pyeki.eki` with a different name.
 
 The one permitted upward reference is **naming a consumer to justify scope**:
 "a square variant will be added when an EKI consumer needs `solve`" is fine,

@@ -24,8 +24,9 @@ Tutorials 1 to 4.
 - A demonstration rather than an assertion, and one that can be checked
   against a closed form. `toy.linear_gaussian(u_dim=2000, v_dim=40)` with
   $J = 40$ and `AdaptiveESSSchedule` to $\beta = 1$: the run reports
-  `schedule_exhausted` in 5 steps, the answer occupies 39 of 2000 directions,
-  and the ensemble's average posterior standard deviation is **0.014** where
+  `schedule_exhausted` in a handful of steps, the answer occupies at most
+  $J - 1 = 39$ of 2000 directions — and does occupy 39 — and the ensemble's
+  average posterior standard deviation is **0.014** where
   the exact posterior's — `problem.posterior()`, available because the model
   is linear — is **0.990**. Forty observations cannot constrain two thousand
   parameters; the run fits them with 39 degrees of freedom and collapses,
@@ -62,9 +63,10 @@ Tutorials 1 to 4.
 
 ## Notes for the writer
 
-The measured numbers above are from the shipped driver and the shipped toy
-problem, and all five — the status, the step count, the rank and the two
-standard deviations — are pinned by `tests/test_toy.py`. Do not re-derive
-them; a schedule change would move the step count and a change to
-`linear_gaussian`'s construction would move all of them, and in either case
-that test is what tells you.
+The two standard deviations and the terminating status are pinned by
+`tests/test_toy.py`, which also asserts the rank *bound*. The step count and
+the realized rank are deliberately **not** pinned: a schedule change moves the
+step count legitimately, and a test that failed for it would read as a
+regression. Re-run them when writing this page rather than trusting the
+numbers above, and state them as measurements of one configuration rather than
+as properties.

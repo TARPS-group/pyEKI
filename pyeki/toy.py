@@ -34,7 +34,7 @@ Using one::
     result = run(state, problem.forward, problem.y, problem.noise_cov,
                  schedule=AdaptiveESSSchedule())
 
-    result.mean, problem.truth
+    result.mean, problem.u_true      # the answer, and what generated the data
 
 Conventions shared by all three:
 
@@ -162,7 +162,7 @@ def _check_problem(
     prior: Gaussian,
     noise_cov: PSDLinOp,
     y: Array,
-    truth: Array,
+    u_true: Array,
 ) -> None:
     """Validate the four fields every problem carries against its sizes."""
     if not isinstance(prior, Gaussian):
@@ -190,7 +190,7 @@ def _check_problem(
             f"model returns {v_dim} predictions"
         )
     _check_array_field(cls_name, "y", y, (v_dim,))
-    _check_array_field(cls_name, "truth", truth, (u_dim,))
+    _check_array_field(cls_name, "u_true", u_true, (u_dim,))
 
 
 def _check_dim(where: str, name: str, value) -> None:
@@ -220,6 +220,33 @@ def _check_scale(where: str, name: str, value) -> None:
         raise ValueError(
             f"{where}: {name} must be positive and finite, got {value}"
         )
+
+
+def _check_ensemble(cls_name: str, ensemble, u_dim: int):
+    """Require exactly ``(J, u_dim)``: the whole ensemble, one member per row.
+
+    The generalized-ufunc convention would carry any leading batch rank
+    through, so a single parameter vector returns a plausible ``(N,)`` and a
+    stack of ensembles a plausible ``(B, J, N)``. Neither is what a run passes
+    — a run binds one ensemble — and the first is the mistake the forward-model
+    guide calls the most common one, so the models say so rather than
+    answering. ``jax.vmap`` over the method still works: it passes each slice
+    as a two-dimensional ensemble.
+    """
+    shape = getattr(ensemble, "shape", None)
+    if shape is None:
+        raise TypeError(
+            f"{cls_name}.forward: expected a (J, {u_dim}) array, got "
+            f"{type(ensemble).__name__}, which has no shape"
+        )
+    if len(shape) != 2 or shape[1] != u_dim:
+        raise ValueError(
+            f"{cls_name}.forward: expected a (J, {u_dim}) ensemble, got shape "
+            f"{tuple(shape)}. The model is called once with the whole "
+            f"ensemble, one member per row — not with a single parameter "
+            f"vector, and never with a further leading axis."
+        )
+    return ensemble
 
 
 def _decay(member: Array, times: Array) -> Array:
@@ -276,7 +303,7 @@ class LinearGaussian:
         :class:`~pyeki.linalg.PSDLinOp` of side ``N``.
     y
         The observation, a ``(N,)`` array.
-    truth
+    u_true
         The parameters the observation was generated from, a ``(P,)`` array.
 
     Raises
@@ -293,7 +320,7 @@ class LinearGaussian:
     prior: Gaussian = field(kw_only=True)
     noise_cov: PSDLinOp = field(kw_only=True)
     y: Array = field(kw_only=True)
-    truth: Array = field(kw_only=True)
+    u_true: Array = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.G, LinOp):
@@ -311,7 +338,7 @@ class LinearGaussian:
             prior=self.prior,
             noise_cov=self.noise_cov,
             y=self.y,
-            truth=self.truth,
+            u_true=self.u_true,
         )
 
     @property
@@ -338,6 +365,11 @@ class LinearGaussian:
         Array
             The predictions, ``(J, N)``, row :math:`j` from row :math:`j`.
 
+        Raises
+        ------
+        ValueError
+            If ``ensemble`` is not exactly two-dimensional with ``P`` columns.
+
         Notes
         -----
         ``G.matvec`` contracts the *trailing* axis, so the leading axis is
@@ -349,7 +381,7 @@ class LinearGaussian:
         ``jit``-able and ``vmap``-pable, as a convenience of these models
         rather than a requirement on yours — see :mod:`pyeki.toy`.
         """
-        return self.G.matvec(ensemble)
+        return self.G.matvec(_check_ensemble("LinearGaussian", ensemble, self.u_dim))
 
     def __repr__(self) -> str:
         """As ``LinearGaussian(u_dim=4, v_dim=8)``; never raises."""
@@ -358,18 +390,18 @@ class LinearGaussian:
         except Exception:
             return "<LinearGaussian (unprintable fields)>"
 
-    def posterior(self, level: float = 1.0) -> Gaussian:
+    def posterior(self, beta: float = 1.0) -> Gaussian:
         """The exact posterior at tempering level :math:`\\beta`: a closed form.
 
         The posterior of the linear-Gaussian problem, conditioning on
-        :math:`y` with the noise covariance :math:`R/\\beta` — so ``level=1.0``
-        is the Bayesian posterior and a smaller level is the intermediate
+        :math:`y` with the noise covariance :math:`R/\\beta` — so ``beta=1.0``
+        is the Bayesian posterior and a smaller value is the intermediate
         target a run passes through on the way to it.
 
         Two lines, both in :mod:`pyeki.gauss`::
 
             joint = GaussianJoint.from_linear_map(self.prior, self.G)
-            return joint.condition(self.y, self.noise_cov / level)
+            return joint.condition(self.y, self.noise_cov / beta)
 
         Copy them to reach the rest of that object: its ``v_marginal`` is the
         prior predictive distribution, and its ``pathwise`` map transports
@@ -377,9 +409,10 @@ class LinearGaussian:
 
         Parameters
         ----------
-        level
+        beta
             The tempering level :math:`\\beta`, a positive finite scalar.
-            Defaults to 1.0.
+            Defaults to 1.0. Named as the state and every policy name it, so
+            ``problem.posterior(result.beta)`` reads directly.
 
         Returns
         -------
@@ -395,7 +428,7 @@ class LinearGaussian:
         Raises
         ------
         ValueError
-            If ``level`` is not positive and finite, or if the posterior
+            If ``beta`` is not positive and finite, or if the posterior
             factor would exceed this module's element budget.
         UnsupportedOpError
             If the prior covariance does not support ``factor``, or the noise
@@ -422,11 +455,11 @@ class LinearGaussian:
         above bypass the guard, deliberately: it is a guard on a toy
         convenience, not a limit in :mod:`pyeki.gauss`.
         """
-        level = float(level)
-        if not (level > 0.0) or level == float("inf"):
+        beta = float(beta)
+        if not (beta > 0.0) or not math.isfinite(beta):
             raise ValueError(
-                f"LinearGaussian.posterior: level must be positive and finite, "
-                f"got {level}. The target at level 0 is the prior itself, which "
+                f"LinearGaussian.posterior: beta must be positive and finite, "
+                f"got {beta}. The target at beta 0 is the prior itself, which "
                 f"is the `prior` field."
             )
         latent_dim = self.prior.cov.factor().shape[1]
@@ -443,7 +476,7 @@ class LinearGaussian:
                 f"at this size; the run is."
             )
         joint = GaussianJoint.from_linear_map(self.prior, self.G)
-        return joint.condition(self.y, self.noise_cov / level)
+        return joint.condition(self.y, self.noise_cov / beta)
 
 
 def linear_gaussian(
@@ -462,7 +495,7 @@ def linear_gaussian(
     parameters are a draw from the prior, and the observation is
     :math:`G u_\\star` plus a draw from the observation error — so the problem
     is well specified, and the posterior really does concentrate near
-    ``truth`` where the data can see it.
+    ``u_true`` where the data can see it.
 
     Parameters
     ----------
@@ -503,14 +536,14 @@ def linear_gaussian(
     prior = Gaussian(
         jnp.zeros(u_dim), PSDDiagonal(jnp.full(u_dim, float(prior_std) ** 2))
     )
-    truth = prior.sample(key_truth, 1)[0]
+    u_true = prior.sample(key_truth, 1)[0]
     error = noise_std * jax.random.normal(key_noise, (v_dim,))
     return LinearGaussian(
         G=G,
         prior=prior,
         noise_cov=PSDDiagonal(jnp.full(v_dim, float(noise_std) ** 2)),
-        y=G.matvec(truth) + error,
-        truth=truth,
+        y=G.matvec(u_true) + error,
+        u_true=u_true,
     )
 
 
@@ -547,7 +580,7 @@ class ExponentialDecay:
         :class:`~pyeki.linalg.PSDLinOp` of side ``N``.
     y
         The observation, a ``(N,)`` array.
-    truth
+    u_true
         The parameters the observation was generated from, a ``(2,)`` array.
 
     Raises
@@ -564,7 +597,7 @@ class ExponentialDecay:
     prior: Gaussian = field(kw_only=True)
     noise_cov: PSDLinOp = field(kw_only=True)
     y: Array = field(kw_only=True)
-    truth: Array = field(kw_only=True)
+    u_true: Array = field(kw_only=True)
 
     def __post_init__(self) -> None:
         _check_times("ExponentialDecay", self.times)
@@ -575,7 +608,7 @@ class ExponentialDecay:
             prior=self.prior,
             noise_cov=self.noise_cov,
             y=self.y,
-            truth=self.truth,
+            u_true=self.u_true,
         )
 
     @property
@@ -602,6 +635,11 @@ class ExponentialDecay:
         Array
             The predictions, ``(J, N)``, row :math:`j` from row :math:`j`.
 
+        Raises
+        ------
+        ValueError
+            If ``ensemble`` is not exactly two-dimensional with 2 columns.
+
         Notes
         -----
         This is :func:`jax.vmap` of a function of one member, which is the
@@ -611,6 +649,7 @@ class ExponentialDecay:
         ``jit``-able and ``vmap``-pable, as a convenience of these models
         rather than a requirement on yours — see :mod:`pyeki.toy`.
         """
+        _check_ensemble("ExponentialDecay", ensemble, 2)
         return jax.vmap(_decay, in_axes=(0, None))(ensemble, self.times)
 
     def __repr__(self) -> str:
@@ -646,7 +685,7 @@ class RestrictedDecay:
 
     Parameters
     ----------
-    times, prior, noise_cov, y, truth
+    times, prior, noise_cov, y, u_true
         As :class:`ExponentialDecay`.
     rate_floor
         The domain boundary: the model is defined where the rate, the second
@@ -656,7 +695,7 @@ class RestrictedDecay:
     ------
     ValueError
         As :class:`ExponentialDecay`, and if ``rate_floor`` is not finite, or
-        if ``truth`` is outside the valid domain — a problem whose own true
+        if ``u_true`` is outside the valid domain — a problem whose own true
         parameters fail is a mistake rather than a test case.
     TypeError
         As :class:`ExponentialDecay`.
@@ -681,7 +720,7 @@ class RestrictedDecay:
     prior: Gaussian = field(kw_only=True)
     noise_cov: PSDLinOp = field(kw_only=True)
     y: Array = field(kw_only=True)
-    truth: Array = field(kw_only=True)
+    u_true: Array = field(kw_only=True)
     rate_floor: float = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -693,7 +732,7 @@ class RestrictedDecay:
             prior=self.prior,
             noise_cov=self.noise_cov,
             y=self.y,
-            truth=self.truth,
+            u_true=self.u_true,
         )
         if isinstance(self.rate_floor, bool) or not isinstance(
             self.rate_floor, (int, float)
@@ -712,9 +751,9 @@ class RestrictedDecay:
         # Store the coerced value, so the field is the Python float the class
         # documents rather than whatever numeric type was passed.
         object.__setattr__(self, "rate_floor", floor)
-        if not float(self.truth[1]) > floor:
+        if not float(self.u_true[1]) > floor:
             raise ValueError(
-                f"RestrictedDecay: truth has rate {float(self.truth[1])}, which "
+                f"RestrictedDecay: u_true has rate {float(self.u_true[1])}, which "
                 f"is outside the valid domain rate > {floor}, so the "
                 f"observation was generated where the model does not evaluate"
             )
@@ -745,6 +784,11 @@ class RestrictedDecay:
             ``rate_floor`` gets a wholly non-finite row, which a run reads as
             a failed member.
 
+        Raises
+        ------
+        ValueError
+            If ``ensemble`` is not exactly two-dimensional with 2 columns.
+
         Notes
         -----
         The rows are built by :func:`jax.vmap` of a function of one member, as
@@ -765,6 +809,7 @@ class RestrictedDecay:
         real failing model, which is not pure JAX, meets the same obligation
         this one meets with :func:`jax.numpy.where`.
         """
+        _check_ensemble("RestrictedDecay", ensemble, 2)
         return jax.vmap(_restricted_decay, in_axes=(0, None, None))(
             ensemble, self.times, self.rate_floor
         )
@@ -819,11 +864,11 @@ def _decay_problem(
     _check_scale(where, "t_max", t_max)
     _check_scale(where, "noise_std", noise_std)
     times = jnp.linspace(t_max / n_times, t_max, n_times)
-    truth = jnp.array([2.0, 1.5])
+    u_true = jnp.array([2.0, 1.5])
     prior = Gaussian(jnp.array([1.0, 1.0]), PSDDiagonal(jnp.array([1.0, 1.0])))
     noise_cov = PSDDiagonal(jnp.full(n_times, float(noise_std) ** 2))
     error = noise_std * jax.random.normal(jax.random.key(seed), (n_times,))
-    return times, prior, noise_cov, _decay(truth, times) + error, truth
+    return times, prior, noise_cov, _decay(u_true, times) + error, u_true
 
 
 def exponential_decay(
@@ -874,10 +919,10 @@ def exponential_decay(
     observation seeds 0 to 7, against
     :class:`~pyeki.eki.AdaptiveESSSchedule` at 64 members: the two posterior
     means differ by between 0.10 and 0.25 in the rate, and the gradual answer
-    is nearer ``truth`` at every seed, by a factor between 2.7 and 41.
+    is nearer ``u_true`` at every seed, by a factor between 2.7 and 41.
     ``tests/test_toy.py`` asserts both over all eight.
     """
-    times, prior, noise_cov, y, truth = _decay_problem(
+    times, prior, noise_cov, y, u_true = _decay_problem(
         n_times=n_times,
         t_max=t_max,
         noise_std=noise_std,
@@ -885,7 +930,7 @@ def exponential_decay(
         where="exponential_decay",
     )
     return ExponentialDecay(
-        times=times, prior=prior, noise_cov=noise_cov, y=y, truth=truth
+        times=times, prior=prior, noise_cov=noise_cov, y=y, u_true=u_true
     )
 
 
@@ -925,7 +970,7 @@ def restricted_decay(
         As :func:`exponential_decay`, and if ``rate_floor`` is at or above the
         true rate.
     """
-    times, prior, noise_cov, y, truth = _decay_problem(
+    times, prior, noise_cov, y, u_true = _decay_problem(
         n_times=n_times,
         t_max=t_max,
         noise_std=noise_std,
@@ -937,6 +982,6 @@ def restricted_decay(
         prior=prior,
         noise_cov=noise_cov,
         y=y,
-        truth=truth,
+        u_true=u_true,
         rate_floor=float(rate_floor),
     )

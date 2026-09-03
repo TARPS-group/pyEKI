@@ -2,7 +2,7 @@
 
 `pyeki.toy` ships three small calibration problems, each bundling a forward
 model with a prior, an observation error covariance, a synthetic observation
-and the parameters that generated it. They exist so that the package's own
+and the parameters that generated it, `u_true`. They exist so that the package's own
 tests, this documentation and the tutorials all work the same problems, and so
 that trying pyEKI needs no data and no model of your own.
 
@@ -50,11 +50,11 @@ fitted = Gaussian.from_samples(result.ensemble)
 
 result.mean      # [-1.3289  1.362   0.6229  0.1361]
 exact.mean       # [-1.3303  1.3749  0.6281  0.1409]
-problem.truth    # [-1.4009  1.4321  0.6248  0.2005]
+problem.u_true   # [-1.4009  1.4321  0.6248  0.2005]
 ```
 
 The run's mean is within `0.013` of the exact posterior mean, and the two sit
-about the same distance from `truth` — the remaining gap is what eight noisy
+about the same distance from `u_true` — the remaining gap is what eight noisy
 observations can support, not error in the run. The spreads agree to three
 digits as well:
 
@@ -71,11 +71,13 @@ reader will carry to their own problem:
   convenience for setting one up, and the EKI contract deliberately excludes
   one being accepted in their place.
 - **`posterior()` is not new mathematics.** It is
-  `GaussianJoint.from_linear_map(prior, G).condition(y, noise_cov / level)`,
+  `GaussianJoint.from_linear_map(prior, G).condition(y, noise_cov / beta)`,
   two lines of {doc}`conditioning`. Copy them to reach the rest of that
   object — `v_marginal` is the prior predictive distribution.
-- **`posterior(level=β)` is the tempered target** a run passes through on the
-  way to `level=1.0`, which is what makes an intermediate step checkable too.
+- **`posterior(beta=…)` is the tempered target** a run passes through on the
+  way to `beta=1.0`, which is what makes an intermediate step checkable too —
+  and it is named as `EKIState.beta` is, so `problem.posterior(result.beta)`
+  reads directly.
 
 ## A model that fails
 
@@ -93,7 +95,7 @@ result = run(state, problem.forward, problem.y, problem.noise_cov,
 
 result.min_n_valid            # 55
 result.stacked.n_valid        # [55 64 64 64 64]
-result.mean                   # [1.9801  1.474 ]  against a truth of [2. 1.5]
+result.mean                   # [1.9801  1.474 ]  true values [2. 1.5]
 ```
 
 Which members fail is a deterministic function of the ensemble, so this is
@@ -191,7 +193,7 @@ correlated.posterior().mean       # [-1.4093  0.8248  0.4646  0.0692]
 ```
 
 Replacing `noise_cov` is the safe case. Replacing `G` or `prior` leaves `y`
-as the old map generated it, so `truth` is no longer the parameters behind the
+as the old map generated it, so `u_true` is no longer the parameters behind the
 observation and `posterior()` answers a problem nobody posed — build a fresh
 one from the factory instead.
 
