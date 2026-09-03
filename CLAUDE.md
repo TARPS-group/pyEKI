@@ -19,12 +19,21 @@ Four layers, each building on the one below:
 4. `pyeki.eki` — tempering schedules, ensemble updates, inflation, the driver
    loop, and variants. *(planned)*
 
+Beside them, `pyeki.toy` holds three toy problems — a forward model with a
+prior, a noise covariance and synthetic data — for this package's own tests
+and its documentation. It depends on the layers below; **nothing in
+`pyeki.linalg`, `pyeki.gauss` or `pyeki.eki` may import it**, which is what
+keeps toy problems from becoming load-bearing.
+
 ## What this project is NOT
 
 Out of scope, deliberately and permanently:
 
 - **Forward models.** The forward model is any callable from parameters to
-  predicted observations. pyEKI ships toy models for testing only.
+  predicted observations. pyEKI ships toy models for testing and documentation
+  only, in `pyeki.toy`, and defines no base class, protocol or registry for
+  one. A toy model that wants a domain-specific name belongs in a calling
+  repository.
 - **Priors, Gaussian process kernels, coregionalization.** A prior is any
   operator satisfying the covariance interface. Constructing covariances from
   kernels belongs to the caller.
@@ -45,6 +54,20 @@ that layer's concepts to define its own behaviour.
 | `pyeki.linalg` | operators, batches, rows, factors, whiteners | Gaussians, conditioning, priors, posteriors, samples, ensembles, members, steps |
 | `pyeki.gauss` | Gaussians, conditioning, samples, the `u` and `v` blocks | ensembles, members, steps, tempering, forward models, EKI |
 | `pyeki.eki` | runs, steps, ensembles, members, tempering, forward models | — |
+| `pyeki.toy` | forward models, ensembles, members, predictions, priors, observations, true parameters, the closed-form posterior at a tempering level | — but it may not *define* a schedule, an update, an inflation or a stopping rule, and no layer may import it |
+
+`pyeki.toy` is the one module that sits at `pyeki.eki`'s vocabulary level
+while importing nothing from it, and its row is deliberately the loose one. It
+defines *problems*, not *runs* — but its problems exist to be driven by runs
+and to be the subject of the documentation about them, so naming a step, a
+ladder or a tempering level to justify a default is legitimate rather than
+leakage. The boundary that carries the weight here is the **import
+direction**, not the vocabulary: nothing in the three layers may import
+`pyeki.toy`, and `tests/test_toy.py` asserts it in a fresh interpreter.
+
+The one constraint on its vocabulary is that it must not *define* the things
+the layer below owns. A toy module that shipped a schedule, an update rule, an
+inflation or a stopping rule would be `pyeki.eki` with a different name.
 
 The one permitted upward reference is **naming a consumer to justify scope**:
 "a square variant will be added when an EKI consumer needs `solve`" is fine,

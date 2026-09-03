@@ -8,6 +8,11 @@ familiarity with EKI, and no knowledge of anything else in pyEKI. Structured
 operators, tempering ladders and ensemble diagnostics are each introduced at the
 point where the problem needs them, not before.
 
+The series works the problems in {doc}`../user-guide/toy-models`, so a
+tutorial can be followed with nothing of your own to hand and the same problem
+can be carried from one page to the next. Those models are for learning and
+for tests, not for production.
+
 If you already know what you are looking for, the {doc}`../user-guide/quickstart`
 and the rest of the user guide are organized by question rather than by
 sequence, and the three contracts in the reference section specify behaviour

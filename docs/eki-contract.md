@@ -1448,7 +1448,11 @@ Composing two inflations is a three-line callable and is not packaged
 
 **The forward model is any callable** `(J, P) -> (J, N)`. That is the whole
 interface, and it is fixed by the package's permanent scope boundary: pyEKI
-ships no forward models and defines no forward-model base class. The callable
+ships no forward models for real use and defines no forward-model base class,
+protocol or registry. (`pyeki.toy` holds a few toy problems, for this
+package's tests and its documentation; nothing in this layer imports it, and
+they exemplify the callable rather than constituting an interface for one.)
+The callable
 may be `jit`-ed by the caller, may fan out over processes, may block on a job
 scheduler; the driver never traces it and never inspects it.
 
@@ -1544,8 +1548,13 @@ caller's decision rather than the model's accident.
 layer fits a Gaussian to the pairs $(u_j, v_j)$ and conditions with the
 resulting cross-covariance; a model that couples members — normalizing across
 the ensemble, or sharing a mutable accumulator between rows — returns
-something that is not a sample of the joint law of $(u, G(u))$ at all. Nothing
-detects this. It is also what `repair_failed_members` presumes when it moves a
+something that is not a sample of the joint law of $(u, G(u))$ at all. **No
+run detects this**: from inside a step the shapes are right and the numbers
+are finite, and the layer never sees a second evaluation of the same members
+to compare against. From outside a run it is detectable, and
+`pyeki.eki.testing.check_forward_model` ({ref}`eki-testing`) does so, by
+permuting the ensemble and by re-evaluating a subset of it. It is also what
+`repair_failed_members` presumes when it moves a
 member's pair as a unit, and what {ref}`eki-diagnostics` means by a pair being
 forward-model-consistent.
 
@@ -2570,6 +2579,7 @@ asymmetry that gives `pyeki.linalg` a `check_operator` applies here.
 | `check_update(update, key, **operands)` | the result is `(J, P)` with the incoming dtype; determinism given the key; the subspace property of {ref}`eki-subspace`, unless the rule declares it leaves the span; `jit`-safety with static shapes |
 | `check_inflation(inflation, key, ensemble)` | shape and dtype preservation; purity; that the mean is preserved, unless the rule declares otherwise |
 | `check_stopping_rule(stop, evaluation)` | a Python `bool` is returned; purity |
+| `check_forward_model(forward, u_dim, v_dim)` | the return's shape at two ensemble sizes and its dtype; determinism and **row independence** — the latter by permuting the members and by re-evaluating a subset of them — all three skipped when the model is declared stochastic |
 
 The two conditional checks read a declaration off the policy: an update
 setting `leaves_span = True` is exempt from the subspace check, and an
@@ -2577,9 +2587,30 @@ inflation setting `changes_mean = True` from the mean-preservation check. Both
 default to `False` when absent, so a rule that satisfies the property declares
 nothing.
 
-Each takes a policy and a small synthetic `Evaluation`, which the module also
-provides a constructor for, since a user testing their own schedule should not
-have to run a forward model to get one.
+`check_forward_model` is the exception to the two sentences above, in two
+ways, and both are deliberate. A forward model is **not a policy**: it has no
+protocol to conform to, this layer defines no base class for one, and nothing
+here is weakened by the check existing — it constructs no type, registers
+nothing, and takes no `Evaluation`. It is here because the obligations of
+{ref}`eki-failures` are this layer's, and because one of them is invisible
+from inside a run and visible from outside it. And it takes `stochastic=` as
+an argument rather than reading a declaration off the callable, since a bare
+function has nowhere to put one.
+
+Two comparisons check row independence, because the two ways of breaking it
+are caught by different ones. Permuting the members is **bit-exact**, the rows
+being the same set either way, and catches a model that is order-dependent
+across them. A *symmetric* coupling — normalizing by the ensemble mean —
+survives a permutation, so the second comparison re-evaluates two members
+without the others, to a **tolerance** rather than bit-exactly: a differently
+shaped batch legitimately takes a different matmul kernel, while a coupling
+changes the answer by $O(1)$. Both are necessary conditions, not sufficient
+ones, and the check calls the model five times — which for a real forward
+model is five evaluations of the expensive thing.
+
+Each of the four policy checks takes a policy and a small synthetic
+`Evaluation`, which the module also provides a constructor for, since a user
+testing their own schedule should not have to run a forward model to get one.
 
 **Purity is the reason the harness exists.** {ref}`eki-updates` records that a
 policy holding state across steps silently breaks resumption, and concedes that
@@ -2856,9 +2887,11 @@ written independently of the code under test. The suite must verify at least:
     double-counting hazard is asserted as an over-concentration so that a later
     change cannot quietly "fix" it.
 
-    One recipe from outside this page is covered here too: the
+    Two recipes from outside this page are covered too. The
     external-executable wrapper of {doc}`user-guide/writing-a-forward-model`,
-    run against real subprocesses. The wrapper obligation above is the one
+    run against real subprocesses; and every runnable block of
+    {doc}`user-guide/toy-models`, with the values it prints pinned, in
+    `tests/test_toy.py`. The wrapper obligation above is the one
     thing this layer needs from a forward model beyond its shape, and nothing
     else in the suite exercises it against a process that can actually exit
     non-zero.
@@ -2897,6 +2930,25 @@ written independently of the code under test. The suite must verify at least:
     `max_steps` is asserted to be an exact cap: an unbounded ladder with
     `max_steps=k` makes exactly `k` forward calls before raising, so a caller's
     hard budget is $J k$ member evaluations.
+31. **`check_forward_model` accepts a conforming model and rejects each
+    defect it claims to catch.** The shipped toy problems of `pyeki.toy` pass
+    it; a model that is order-dependent across rows fails the permutation
+    comparison, one that normalizes across the ensemble fails the subset
+    comparison, one written for a single member fails the shape check, and a
+    `float32`, an integer and a genuinely stochastic model each fail the check
+    named for them — while a model returning non-finite rows, and one
+    returning a nested Python list, both pass, since neither is a defect. The
+    negative cases *are* the obligation: a checker with no failing case
+    asserts nothing, and the two row-independence comparisons catch
+    *different* couplings, so one case for each is the minimum. Its own
+    surface is covered too: that the second ensemble size is required, that
+    the non-finite *pattern* is compared and not only the finite values, that
+    `stochastic=True` suppresses exactly two checks and not a third, that the
+    argument is a read-only `jax.Array`, and that an ensemble too small for
+    either comparison to mean anything is refused rather than passed.
+
+    These cases live in `tests/test_toy.py`, with the toy problems as the
+    conforming fixtures; no test under `pyeki.eki` imports `pyeki.toy`.
 
 Alongside conformance, targeted regression tests guard this layer's
 silent-failure classes under the same do-not-delete rule as the layers below.

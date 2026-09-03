@@ -3,7 +3,7 @@
 pyEKI supplies everything in a run except the forward model. This page is what
 that callable must satisfy; {ref}`eki-failures` is the normative statement.
 There is nothing to subclass and nothing to register: pyEKI ships no forward
-models and defines no base class or protocol for one.
+models for real use and defines no base class, protocol or registry for one.
 
 ## The interface
 
@@ -17,7 +17,9 @@ def forward(ensemble):                    # (J, 2) in
     return ensemble[:, 0:1] * jnp.exp(-ensemble[:, 1:2] * times)   # (J, 3) out
 ```
 
-That is a complete forward model.
+That is a complete forward model. {doc}`toy-models` ships this model — at
+twelve observation points, with its own prior and data — and two others
+ready-made, for trying the library before wrapping your own code.
 
 :::{important}
 **`forward` receives the whole ensemble, not one member.** It is called once
@@ -138,10 +140,24 @@ those to non-finite rows in your wrapper, where the information exists.
 layer fits a Gaussian to the pairs and conditions with the resulting
 cross-covariance, so a model that normalizes across the ensemble, or shares a
 mutable accumulator between rows, returns something that is not a sample of
-the joint law at all. Nothing detects it: the shapes are right and the numbers
-are finite.
+the joint law at all. **No run detects it**: the shapes are right and the
+numbers are finite.
 
-This is the only requirement beyond the shapes and the failure signal.
+This is the only requirement beyond the shapes and the failure signal. From
+*outside* a run it is detectable, and worth checking once:
+
+```python
+from pyeki.eki.testing import check_forward_model
+
+check_forward_model(forward, u_dim=2, v_dim=3)
+```
+
+It permutes the ensemble and re-evaluates a subset of it, which between them
+catch a model that is order-dependent across rows and one that normalizes
+across the ensemble. Neither is sufficient alone: a symmetric coupling
+survives a permutation, and only the subset comparison sees it. It also checks the shape at two ensemble sizes, the
+dtype, and — unless you pass `stochastic=True` — determinism. It calls the
+model five times, so point it at a cheap configuration of an expensive one.
 
 (what-is-not-required)=
 ## What is not required
@@ -254,7 +270,7 @@ row the driver repaired.
 | a `UserWarning` about `float32` | the model reports in single precision |
 | the run stops with a traceback from your solver | an exception escaped the callable; catch it, return a non-finite row |
 | the run stalls at tiny increments, every member valid | a sentinel fill value such as `-9999`; map it to `nan` |
-| a wrong answer with nothing raised | rows coupled across members, or the return's row order not matching the argument's |
+| a wrong answer with nothing raised | rows coupled across members, or the return's row order not matching the argument's — `check_forward_model` catches both |
 
 The last row's other cause is a missing transpose. With members in rows the
 contraction is `ensemble @ G.T`; writing `ensemble @ G` raises for a

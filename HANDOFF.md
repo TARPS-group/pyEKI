@@ -47,6 +47,34 @@ contract and that page both give the measured failure it avoids.
 `pyeki.eki` was not touched: both update policies call the same two methods
 with the same signatures.
 
+**`pyeki.toy`** shipped on 2026-09-02, and is the module `CLAUDE.md` had been
+promising: three toy problems, each a forward model bundled with a prior, a
+noise covariance, synthetic data and the parameters that generated it.
+`linear_gaussian` at any pair of dimensions, whose `posterior(level)`
+delegates to `GaussianJoint.from_linear_map(...).condition(y, R / level)` —
+two lines, and the reason the split above had to land first; the
+`exponential_decay` problem, tuned until a unit step and an adaptive ladder
+differ reliably rather than coincidentally; and `restricted_decay`, the same
+model with a valid domain, so a member whose rate is not positive returns a
+non-finite row. Its user-guide page is `docs/user-guide/toy-models.md`.
+
+The problems are frozen dataclasses of plain values and are deliberately
+**not callable**: `run` takes the triple, and the contract excludes a
+container accepted in its place. They are not pytrees, hold no mutable state
+and count no calls — the recorder in `tests/test_eki.py`'s `_AffineProblem` is
+a test instrument and stays there. The existing local closures in `tests/`
+were **not** migrated: several are instrumented and several write their
+reference locally on purpose, which is what makes them regression tests for
+the layer.
+
+`pyeki.eki.testing` gained **`check_forward_model`**, which checks a user's
+own model from outside a run: shape at two ensemble sizes, dtype, determinism,
+and row independence — twice, because permuting the members is bit-exact and
+catches order-dependent coupling while a symmetric coupling survives it and
+needs a subset re-evaluation, to a tolerance. The contract's "nothing detects
+this" about row coupling is now "no *run* detects this", in both the contract
+and the guide.
+
 `pyeki.eki` is implemented to `docs/eki-contract.md`: the four value classes,
 the three policy protocols with eight shipped implementations, the two public
 phases of a step, `run` and `iterate`, the three array-level helpers, and
@@ -84,8 +112,11 @@ so it fails at the update's dtype check with an error naming the update rule;
 that is deliberate for now and recorded as issue #19.
 
 **Not started.** `pyeki.localize`, and the Kronecker family of operators. The
-design background for both is in `docs/design.md`. The toy forward-model module
-and the tutorial series are also unwritten; both are now unblocked.
+design background for both is in `docs/design.md`. The tutorial series and the
+example notebooks are also unwritten, and are now unblocked in both of the
+ways they were waiting on: the forward-model contract and the toy problems
+they were to be written against. Tutorial 5's stub carries re-measured numbers
+from the shipped problem; the other six stubs were left alone.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -205,6 +236,10 @@ layer; this is the index.
 | A policy's output needs its **dtype** checked, not only its shape | an inflation returning `int64` handed the forward model an integer ensemble and the run completed silently; the shape check passed |
 | A `float32` forward model is promoted and warned about, not rejected | it still costs ~$7\times10^{-5}$ relative in the posterior mean where the prediction mean exceeds the spread by $10^4$; promotion recovers only about half, since the digits are gone before the array arrives |
 | `ensemble @ G` instead of `ensemble @ G.T` is silent when $G$ is square | the transposed model's predictions, right shape, no error; `G @ ensemble` raises, so it is the harmless mistake |
+| A **symmetric** coupling across ensemble members survives a permutation of them | mean-centring is permutation-equivariant, so a permutation test alone passes a model that normalizes across the ensemble; it takes re-evaluating a *subset* to catch, and that comparison cannot be bit-exact |
+| The same members in a differently *sized* batch round differently | a dense contraction picks a different kernel per batch shape, so a subset comparison holds only to round-off while a permutation one is bit-exact |
+| The closed form's cost is set by the prior factor's width $k$, not by $P$ | a full-rank prior at $P = 2000$ means a $(2000, 2000)$ posterior factor — 32 MB, 0.07 s — so `LinearGaussian.posterior` guards on $Pk$ and the *run* has no such limit |
+| A run at $P \gg J$ reports a spread the exact posterior contradicts | at $P = 2000$, $N = 40$, $J = 40$ the ensemble's mean posterior sd is 0.014 against an exact 0.990, a factor of seventy, with nothing raised and no history field flagging it |
 
 ## Working agreements
 

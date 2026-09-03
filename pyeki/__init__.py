@@ -12,6 +12,8 @@ forward evaluations. pyEKI provides the pieces that requires:
   updates, inflation, and the driver loop.
 - :mod:`pyeki.localize` — distance-based localization for high-dimensional
   problems. *(planned)*
+- :mod:`pyeki.toy` — small calibration problems for this package's tests and
+  documentation, not for production use.
 
 The forward model is any callable mapping parameters to predicted observations,
 so pyEKI is independent of the model being calibrated.
