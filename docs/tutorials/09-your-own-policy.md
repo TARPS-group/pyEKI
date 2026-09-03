@@ -1,4 +1,4 @@
-# 7. Writing your own policy
+# 9. Writing your own policy
 
 :::{admonition} Stub
 :class: note
@@ -12,7 +12,7 @@ and validate it against the conformance harness before trusting it.
 
 ## Prerequisites
 
-Tutorials 1 to 6.
+Tutorials 1 to 8.
 
 ## What this page covers
 

@@ -1,4 +1,4 @@
-# 6. When the forward model fails
+# 8. When the forward model fails
 
 :::{admonition} Stub
 :class: note
@@ -13,7 +13,8 @@ describes most real simulators.
 
 ## Prerequisites
 
-Tutorials 1 to 3. Tutorial 4 is helpful but not required.
+Tutorials 1 to 3. {doc}`06-covariances-as-operators` is helpful but not
+required.
 
 ## What this page covers
 

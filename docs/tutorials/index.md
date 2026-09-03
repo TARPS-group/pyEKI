@@ -5,8 +5,8 @@ begins.
 
 The first tutorial runs a complete inversion and assumes nothing — no
 familiarity with EKI, and no knowledge of anything else in pyEKI. Structured
-operators, tempering ladders and ensemble diagnostics are each introduced at the
-point where the problem needs them, not before.
+operators, tempering schedules and ensemble diagnostics are each introduced at
+the point where the problem needs them, not before.
 
 The series works the problems in {doc}`../user-guide/toy-models`, so a
 tutorial can be followed with nothing of your own to hand and the same problem
@@ -24,10 +24,12 @@ exactly.
 01-first-inversion
 02-reading-a-run
 03-sampling-or-optimizing
-04-covariances-as-operators
-05-small-ensembles
-06-when-the-model-fails
-07-your-own-policy
+04-tempering-schedules
+05-transform-or-pathwise
+06-covariances-as-operators
+07-small-ensembles
+08-when-the-model-fails
+09-your-own-policy
 ```
 
 ## What each one covers
@@ -37,15 +39,17 @@ exactly.
 | {doc}`01-first-inversion` | run an inversion on your own forward model |
 | {doc}`02-reading-a-run` | tell whether the answer is trustworthy |
 | {doc}`03-sampling-or-optimizing` | choose between the two forms of EKI |
-| {doc}`04-covariances-as-operators` | express correlated and structured error |
-| {doc}`05-small-ensembles` | recognize and mitigate the ensemble-size limit |
-| {doc}`06-when-the-model-fails` | survive forward models that crash or return `nan` |
-| {doc}`07-your-own-policy` | write and validate a custom schedule or update |
+| {doc}`04-tempering-schedules` | choose how gradually to assimilate the data |
+| {doc}`05-transform-or-pathwise` | choose between the two ensemble updates |
+| {doc}`06-covariances-as-operators` | express correlated and structured error |
+| {doc}`07-small-ensembles` | recognize and mitigate the ensemble-size limit |
+| {doc}`08-when-the-model-fails` | survive forward models that crash or return `nan` |
+| {doc}`09-your-own-policy` | write and validate a custom schedule or update |
 
 :::{admonition} Being written
 :class: note
 
-These pages are stubs. Each one states its scope, its prerequisites and the
-API it exercises, so the series can be written in order without re-deciding
-the structure.
+Tutorials 1 to 3 are written. Tutorials 4 to 9 are stubs: each states its
+scope, its prerequisites and the API it exercises, so the series can be
+written in order without re-deciding the structure.
 :::

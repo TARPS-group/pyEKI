@@ -37,7 +37,7 @@ Tutorial 1. Same forward model, carried forward.
 ## Deliberately not covered
 
 - fixing anything the diagnostics reveal — tutorials 3, 5 and 6 each own a fix
-- writing a custom stopping rule → tutorial 7
+- writing a custom stopping rule → {doc}`09-your-own-policy`
 
 ## API exercised
 
