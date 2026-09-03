@@ -31,10 +31,12 @@ result.beta           # 1.0 — the ladder finished
 ```
 
 `forward` is any callable taking a `(J, P)` array of members and returning a
-`(J, N)` array of predictions: pyEKI ships no models and defines no base class,
-and the callable may be `jit`-ed, may fan out over processes, or may block on a
-job scheduler. It is called **once per step with the whole ensemble**,
-never one member at a time.
+`(J, N)` array of predictions: pyEKI ships no models for real use and defines
+no base class, and the callable may be `jit`-ed, may fan out over processes, or
+may block on a job scheduler. It is called **once per step with the whole
+ensemble**, never one member at a time. {doc}`toy-models` has three ready-made
+problems, with priors and data, for trying the library before wrapping your
+own code.
 
 Shapes are not quite the whole interface — a model that can fail also owes the
 run a failure signal, described under [Failed members](#failed-members) below.

@@ -21,12 +21,19 @@ Tutorials 1 to 4.
   $J - 1$ — however many steps are run and however the schedule is chosen.
   $J$ bounds what a run can *represent*, not merely how accurately it
   estimates moments.
-- A demonstration rather than an assertion. A linear model at $P = 2000$,
-  $N = 40$, $J = 40$, `AdaptiveESSSchedule` to $\beta = 1$: the run reports
-  `schedule_exhausted` in 27 steps, average posterior standard deviation falls
-  from 1.0 to 0.29, and the answer occupies 39 of 2000 directions. Nothing
-  raises, and no field of `HistoryRecord` flags it. **The failure is silent, and
-  that is the lesson.**
+- A demonstration rather than an assertion, and one that can be checked
+  against a closed form. `toy.linear_gaussian(u_dim=2000, v_dim=40)` with
+  $J = 40$ and `AdaptiveESSSchedule` to $\beta = 1$: the run reports
+  `schedule_exhausted` in 5 steps, the answer occupies 39 of 2000 directions,
+  and the ensemble's average posterior standard deviation is **0.014** where
+  the exact posterior's — `problem.posterior()`, available because the model
+  is linear — is **0.990**. Forty observations cannot constrain two thousand
+  parameters; the run fits them with 39 degrees of freedom and collapses,
+  reporting a spread seventy times too small. Nothing raises, and no field of
+  `HistoryRecord` flags it. **The failure is silent, and that is the lesson.**
+  Comparing against the closed form is what makes it sayable rather than
+  merely assertable, and it is worth showing that the same comparison is
+  unavailable for a model that is not linear.
 - How the symptom appears in diagnostics: collapsing `spread`, and `ess`
   behaviour that looks healthy while the answer is degenerate.
 - Mitigation 1, ensemble size. The honest first answer, bounded by the cost of
@@ -50,10 +57,12 @@ Tutorials 1 to 4.
 ## API exercised
 
 `MultiplicativeInflation`, `AdditiveInflation`, `HistoryRecord.spread`,
-`HistoryRecord.ess`, `EKIState.n_members`.
+`HistoryRecord.ess`, `EKIState.n_members`, `pyeki.toy.linear_gaussian`,
+`pyeki.toy.LinearGaussian.posterior`.
 
 ## Notes for the writer
 
-The measured numbers above are from the shipped driver and can be reproduced
-directly; do not re-derive them, but do re-run them, since a schedule change
-would move the step count.
+The measured numbers above are from the shipped driver and the shipped toy
+problem, and are pinned by `tests/test_toy.py`; do not re-derive them, but do
+re-run them, since a schedule change would move the step count and a change to
+`linear_gaussian`'s construction would move all of them.

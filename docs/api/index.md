@@ -225,5 +225,37 @@ and {doc}`../eki-contract` for the full behavioural contract.
 ```{eval-rst}
 .. automodule:: pyeki.eki.testing
    :members: check_schedule, check_update, check_inflation,
-             check_stopping_rule, synthetic_evaluation
+             check_stopping_rule, check_forward_model, synthetic_evaluation
+```
+
+## pyeki.toy
+
+Toy problems for tests and documentation — not for production use. See
+{doc}`../user-guide/toy-models` for what they are for and what they do and do
+not exemplify about the forward-model interface.
+
+```{eval-rst}
+.. automodule:: pyeki.toy
+   :no-members:
+```
+
+### The problems
+
+```{eval-rst}
+.. autoclass:: pyeki.toy.LinearGaussian
+   :members: u_dim, v_dim, forward, posterior
+
+.. autoclass:: pyeki.toy.ExponentialDecay
+   :members: u_dim, v_dim, forward
+
+.. autoclass:: pyeki.toy.RestrictedDecay
+   :members: u_dim, v_dim, forward
+```
+
+### Factories
+
+```{eval-rst}
+.. autofunction:: pyeki.toy.linear_gaussian
+.. autofunction:: pyeki.toy.exponential_decay
+.. autofunction:: pyeki.toy.restricted_decay
 ```

@@ -13,6 +13,8 @@ function                      checks
 :func:`check_inflation`       shape preservation, purity, and mean
                               preservation
 :func:`check_stopping_rule`   a Python ``bool`` is returned, and purity
+:func:`check_forward_model`   shape, dtype, row independence and determinism
+                              of a forward model
 :func:`synthetic_evaluation`  a small :class:`~pyeki.eki.Evaluation` to run
                               the checks against
 ============================= ==============================================
@@ -31,6 +33,14 @@ attribute            set it on          suppresses
 
 Both default to ``False`` when absent, so a rule that satisfies the property
 declares nothing.
+
+:func:`check_forward_model` is the exception to "your policy": a forward model
+is not a policy and has no protocol to conform to — the layer defines no base
+class for one. It is here because the obligations of the
+:mod:`pyeki.eki` layer's one external callable are this layer's, and because
+one of them, row independence, is invisible from inside a run and visible from
+outside it. It takes a ``stochastic`` argument rather than reading a
+declaration off the callable, since a bare function has nowhere to put one.
 
 Notes
 -----
@@ -52,6 +62,7 @@ from ..linalg import PSDDiagonal, PSDLinOp
 from .values import Evaluation
 
 __all__ = [
+    "check_forward_model",
     "check_inflation",
     "check_schedule",
     "check_stopping_rule",
@@ -367,6 +378,197 @@ def check_stopping_rule(stop, evaluation: Evaluation | None = None) -> None:
     assert first == stop(evaluation), (
         f"{name}: not pure across two calls on one evaluation"
     )
+
+
+def check_forward_model(
+    forward,
+    *,
+    u_dim: int,
+    v_dim: int,
+    n_members: int = 6,
+    seed: int = 0,
+    stochastic: bool = False,
+) -> None:
+    """Check a forward model of your own against what a run requires of one.
+
+    A forward model is any callable from a ``(J, P)`` ensemble to ``(J, N)``
+    predictions; there is no base class and nothing to register. This checks
+    the obligations that can be checked from outside — including **row
+    independence**, which nothing inside a run detects — on an ensemble of
+    pseudo-random parameters.
+
+    ============================================ ============================
+    checked                                      not checked
+    ============================================ ============================
+    the return is array-like of shape ``(J, N)`` failure signalling on your
+    at two ensemble sizes                        model's own error paths
+    the return's dtype is real floating and no   whether a non-finite row
+    narrower than the argument's                 *should* have been produced
+    determinism, by calling twice                cost, side effects, device
+    row independence, by permuting the members   placement
+    and by re-evaluating a subset of them
+    ============================================ ============================
+
+    A model that is legitimately stochastic breaks the last two by design;
+    pass ``stochastic=True`` to skip them. Nothing else here depends on
+    determinism.
+
+    **This calls the model five times** — twice when ``stochastic=True`` —
+    which for a real forward model is five evaluations of the expensive thing.
+    Check a cheap configuration of it: a coarse grid, a short horizon, a stub
+    solver.
+
+    Parameters
+    ----------
+    forward
+        The forward model: a callable taking one positional ``(J, P)`` array.
+    u_dim, v_dim
+        The sizes :math:`P` and :math:`N` the model is being checked at.
+        Keyword-only.
+    n_members
+        The ensemble size :math:`J` to check at; the model is also called at
+        ``J + 1``, since a model whose rows are independent cannot depend on
+        how many there are. Keyword-only.
+    seed
+        Seeds the NumPy generator that fills the ensemble. Keyword-only.
+    stochastic
+        Declare that the model is not deterministic, skipping the row
+        independence and determinism checks. Keyword-only.
+
+    Raises
+    ------
+    AssertionError
+        On any violation, naming which.
+
+    Notes
+    -----
+    Non-finite predictions are *not* a violation: a non-finite row is how a
+    forward model signals a failed member, so this check accepts them, and
+    compares results in a way that treats two ``nan`` s as equal. A model that
+    fails for every member of a pseudo-random ensemble still passes here and
+    still cannot drive a run — read the shapes it returns, not only this
+    check's silence.
+
+    There is no check that the model left its argument alone, because a
+    ``jax.Array`` cannot be written into: a wrapper that modifies
+    ``np.asarray(ensemble)`` — a read-only view — raises
+    ``assignment destination is read-only`` from wherever it wrote, without
+    needing a check here.
+
+    Row independence is checked twice, because the two ways of breaking it
+    are caught by different comparisons and neither catches both: for a model
+    whose row :math:`j` depends only on row :math:`j`,
+    ``forward(ensemble[perm])`` is exactly ``forward(ensemble)[perm]``, since
+    the rows are the same set of members either way — this is a **bit-exact**
+    comparison, and it catches a model that is order-dependent across rows,
+    such as one writing into a shared accumulator.
+
+    A symmetric coupling — normalizing by the ensemble mean, say — survives a
+    permutation, so the second check re-evaluates two of the members *without*
+    the others: row :math:`j` must come out the same alongside a different
+    set. That comparison is to a **tolerance** rather than bit-exact, because
+    a differently shaped batch legitimately takes a different matmul kernel
+    and rounds differently in the last bits, while a coupling changes the
+    answer by :math:`O(1)`.
+
+    Both are necessary conditions rather than sufficient ones. The subset
+    check evaluates two members together, never one, since a run never calls
+    a model with fewer than two.
+    """
+    name = getattr(forward, "__name__", None) or repr(forward)
+    rng = np.random.default_rng(seed)
+    ensemble = jnp.asarray(rng.normal(size=(n_members, u_dim)))
+
+    predictions = _forward_call(forward, ensemble, name, u_dim, v_dim)
+    assert jnp.issubdtype(predictions.dtype, jnp.floating), (
+        f"{name}: returned dtype {predictions.dtype}, which is not a real "
+        f"floating type; an integer or complex return is a ValueError in a run"
+    )
+    assert jnp.finfo(predictions.dtype).bits >= jnp.finfo(ensemble.dtype).bits, (
+        f"{name}: returned {predictions.dtype} for a {ensemble.dtype} "
+        f"ensemble; a narrower return is promoted, with a warning, and has "
+        f"already lost the digits by then"
+    )
+
+    wider = jnp.asarray(rng.normal(size=(n_members + 1, u_dim)))
+    _forward_call(forward, wider, name, u_dim, v_dim)
+
+    if stochastic:
+        return
+
+    # Determinism first: a stochastic model breaks the permutation check too,
+    # and "not deterministic" is the diagnosis it should get.
+    _identical_allowing_nan(
+        _forward_call(forward, ensemble, name, u_dim, v_dim),
+        predictions,
+        f"{name}: not deterministic across two calls on one ensemble. A "
+        f"stochastic forward model is legal — declare it with "
+        f"stochastic=True — but it damps the gain and costs extra evaluations",
+    )
+    permutation = jnp.asarray(rng.permutation(n_members))
+    _identical_allowing_nan(
+        _forward_call(forward, ensemble[permutation, :], name, u_dim, v_dim),
+        predictions[permutation, :],
+        f"{name}: row j of the return does not depend on row j of the "
+        f"argument alone — permuting the members changed more than the order "
+        f"of the predictions, so the model is order-dependent across rows. A "
+        f"shared accumulator written to in row order does this, and a run "
+        f"cannot detect it",
+    )
+    subset = jnp.asarray([1, n_members - 1])
+    _close_allowing_nan(
+        _forward_call(forward, ensemble[subset, :], name, u_dim, v_dim),
+        predictions[subset, :],
+        f"{name}: a member's prediction changed when it was evaluated "
+        f"alongside different members, so row j of the return does not depend "
+        f"on row j of the argument alone. A model that normalizes across the "
+        f"ensemble does this, and a run cannot detect it",
+    )
+
+
+def _forward_call(forward, ensemble, name: str, u_dim: int, v_dim: int):
+    """Call the model once and check the shape of what came back."""
+    n_members = ensemble.shape[0]
+    returned = forward(ensemble)
+    try:
+        predictions = jnp.asarray(returned)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - exotic returns
+        raise AssertionError(
+            f"{name}: returned {type(returned).__name__}, which is not "
+            f"array-like; the return may be a jax.Array, a NumPy array or a "
+            f"nested Python sequence"
+        ) from exc
+    assert predictions.shape == (n_members, v_dim), (
+        f"{name}: called with a ({n_members}, {u_dim}) ensemble and returned "
+        f"shape {predictions.shape}, expected ({n_members}, {v_dim}). The "
+        f"model is called once with the whole ensemble, not once per member; "
+        f"wrap a per-member function with jax.vmap or a loop"
+    )
+    return predictions
+
+
+def _identical_allowing_nan(got, want, what: str) -> None:
+    """Bit-identity, counting two ``nan`` s as equal: failed rows are legal."""
+    got, want = np.asarray(got), np.asarray(want)
+    assert got.shape == want.shape, f"{what}: shape {got.shape} != {want.shape}"
+    assert np.array_equal(got, want, equal_nan=True), what
+
+
+def _close_allowing_nan(got, want, what: str, rtol: float = 1e-8) -> None:
+    """Agreement to a tolerance, with the non-finite pattern matching exactly.
+
+    For comparisons across differently shaped batches, where the last bits
+    legitimately differ and a genuine coupling differs by ``O(1)``.
+    """
+    got, want = np.asarray(got), np.asarray(want)
+    assert got.shape == want.shape, f"{what}: shape {got.shape} != {want.shape}"
+    finite = np.isfinite(want)
+    assert np.array_equal(finite, np.isfinite(got)), (
+        f"{what} (the non-finite entries are in different places)"
+    )
+    scale = max(1.0, float(np.abs(want[finite]).max()) if finite.any() else 0.0)
+    err = float(np.abs(got[finite] - want[finite]).max()) if finite.any() else 0.0
+    assert err <= rtol * scale, f"{what} (max abs difference {err:.3e})"
 
 
 def _is_pytree(obj) -> bool:

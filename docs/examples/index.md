@@ -4,8 +4,9 @@ Runnable notebooks that work a problem end to end — model, prior, inversion,
 diagnostics and plots — rather than teaching one idea at a time. The
 {doc}`../tutorials/index` teach; these demonstrate.
 
-Every notebook here runs against the shipped toy models, so it can be executed
-from a clean checkout with no data and no domain code.
+Every notebook here runs against the problems in
+{doc}`../user-guide/toy-models`, so it can be executed from a clean checkout
+with no data and no domain code.
 
 :::{admonition} Being written
 :class: note

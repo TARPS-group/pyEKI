@@ -156,6 +156,7 @@ user-guide/conditioning
 user-guide/running-an-inversion
 user-guide/writing-a-forward-model
 user-guide/writing-an-operator
+user-guide/toy-models
 ```
 
 ```{toctree}

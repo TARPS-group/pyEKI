@@ -19,12 +19,21 @@ Four layers, each building on the one below:
 4. `pyeki.eki` — tempering schedules, ensemble updates, inflation, the driver
    loop, and variants. *(planned)*
 
+Beside them, `pyeki.toy` holds three toy problems — a forward model with a
+prior, a noise covariance and synthetic data — for this package's own tests
+and its documentation. It depends on the layers below; **nothing in
+`pyeki.linalg`, `pyeki.gauss` or `pyeki.eki` may import it**, which is what
+keeps toy problems from becoming load-bearing.
+
 ## What this project is NOT
 
 Out of scope, deliberately and permanently:
 
 - **Forward models.** The forward model is any callable from parameters to
-  predicted observations. pyEKI ships toy models for testing only.
+  predicted observations. pyEKI ships toy models for testing and documentation
+  only, in `pyeki.toy`, and defines no base class, protocol or registry for
+  one. A toy model that wants a domain-specific name belongs in a calling
+  repository.
 - **Priors, Gaussian process kernels, coregionalization.** A prior is any
   operator satisfying the covariance interface. Constructing covariances from
   kernels belongs to the caller.
@@ -45,6 +54,13 @@ that layer's concepts to define its own behaviour.
 | `pyeki.linalg` | operators, batches, rows, factors, whiteners | Gaussians, conditioning, priors, posteriors, samples, ensembles, members, steps |
 | `pyeki.gauss` | Gaussians, conditioning, samples, the `u` and `v` blocks | ensembles, members, steps, tempering, forward models, EKI |
 | `pyeki.eki` | runs, steps, ensembles, members, tempering, forward models | — |
+| `pyeki.toy` | forward models, ensembles, members, predictions, priors, observations, true parameters, the closed-form posterior at a tempering level | runs, steps, phases, schedules, updates, inflation, failure policy, stopping rules |
+
+`pyeki.toy` is the one module that sits at `pyeki.eki`'s vocabulary level
+while importing nothing from it: it defines *problems*, not *runs*, which is
+why *steps* and *schedules* are on its forbidden list even though *members* is
+not. The one word it borrows upward is **level**, for $\beta$, because the
+tempered posterior is the object its closed form exists to expose.
 
 The one permitted upward reference is **naming a consumer to justify scope**:
 "a square variant will be added when an EKI consumer needs `solve`" is fine,
