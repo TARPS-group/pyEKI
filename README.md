@@ -5,7 +5,7 @@ Ensemble Kalman Inversion for derivative-free Bayesian calibration.
 **Status: pre-alpha.** The linear operator, Gaussian conditioning and EKI layers
 are implemented, tested and documented — you can run an inversion today. The
 localization layer, needed when the parameter dimension far exceeds the ensemble
-size, is not yet built. See [HANDOFF.md](HANDOFF.md) for state and next steps.
+size, is not yet built.
 
 ## What it is
 
