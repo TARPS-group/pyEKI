@@ -66,6 +66,27 @@ the two posterior means differ in the third digit. That is one key, and one
 key is not a comparison — the page's own point above is that this needs
 replication across keys before anything is claimed from it.
 
+**One finding this page should carry, because it is what moved
+{doc}`01-first-inversion` off the default.** On the same problem, over eight
+keys, `TransformUpdate` reproduces the target's covariance but not its shape:
+the ensemble's least-varying principal direction comes out with a kurtosis
+between 6 and 34, against 3 for a Gaussian, and at 64 members two members can
+hold 72% of that direction's variance. `PathwiseUpdate` gives 2.3 to 3.6.
+
+It is the nonlinearity rather than sampling error, and the two checks that
+establish that are worth repeating on the page. Ensemble size does not help —
+the kurtosis is 19 at 64 members and 186 at 4096. And on
+`toy.linear_gaussian` the same rule leaves the ensemble Gaussian
+(kurtosis 3.2) *identically* at 1, 6 and 20 steps, so the rule is not
+intrinsically spiky: `transform_update` is a linear recombination of the
+anomalies the ensemble already has, and a curved forward model gives it
+anomalies whose off-ridge mass sits in a few members.
+
+This is one problem at one size, which is exactly the caveat below. Do not
+promote it to a ranking of the two rules; issue #29 is where the question of
+the package default is being decided, and this page should read the same
+whichever way that goes.
+
 The temptation to resist is ranking the two rules. The library has a default
 and states why; this page should leave a reader able to defend either choice
 on their own problem.

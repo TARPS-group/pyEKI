@@ -67,7 +67,7 @@ TUTORIAL_DIR = Path(__file__).resolve().parents[1] / "docs" / "tutorials"
 
 
 def test_1_tutorial_1_blocks_run():
-    """Every runnable block of "Your first inversion", in order."""
+    """Every runnable block of "From approximate conditioning to EKI", in order."""
     problem = toy.exponential_decay()
 
     assert (problem.u_dim, problem.v_dim) == (2, 12)
@@ -592,7 +592,8 @@ def test_4_the_answer_figure_plots_what_tutorial_1_says():
     prints_as(data["sd"], [0.0414, 0.0318])
     prints_as(data["posterior_sd"], [0.0366, 0.0317])
     # The right-hand panel's fan is inside the observation error bars, which
-    # is what distinguishes it from the one-step figure's.
+    # is what distinguishes it from the one-step figure's. No page quotes this
+    # number any more, so the pin guards the figure rather than the prose.
     prints_as(data["predictive_sd"][figures.JOINT_INDEX], 0.0078)
     assert data["predictive_sd"][figures.JOINT_INDEX] < 0.02
     ratio = data["sd"] / data["posterior_sd"]

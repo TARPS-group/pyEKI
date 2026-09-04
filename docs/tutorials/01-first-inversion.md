@@ -94,9 +94,9 @@ but the methodology is not confined to that setting. A non-Gaussian prior can
 often be handled by reparameterizing — a positive parameter as the exponential
 of a Gaussian one, a bounded parameter through a logit — so that the prior is
 (approximately) Gaussian in the new variable and the transformation becomes
-part of the forward model. Multiplicative or otherwise non-additive error can sometimes be
-brought into the assumed form by transforming the observations instead, for
-example by taking logarithms.
+part of the forward model. Multiplicative or otherwise non-additive error can
+sometimes be brought into the assumed form by transforming the observations
+instead, for example by taking logarithms.
 
 The cost is that both transformations make the forward model more nonlinear,
 which is precisely what the iterative algorithm below has to absorb.

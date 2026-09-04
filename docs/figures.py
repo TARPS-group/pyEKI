@@ -63,6 +63,7 @@ the one level where the quadrature can be checked against a closed form.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -95,16 +96,19 @@ OUTPUT_DIR = Path(__file__).parent / "_generated" / "figures"
 #: The problem the tutorials work. Deterministic in its arguments.
 PROBLEM = toy.exponential_decay()
 
-#: The observation index whose predictive spread tutorial 1 quotes, at t = 1.
+#: The index of :math:`t = 1` among the observation times. The figures return
+#: the whole predictive spread; this names the entry the tests read off it.
 JOINT_INDEX = 3
 
-#: The update rule tutorial 1 runs with. Not the library default: on this
+#: The update rule tutorial 1 runs with, and not the library default. On this
 #: problem the deterministic transform reproduces the target's covariance but
 #: leaves the ensemble strung along one direction, with the across-ridge
-#: variance carried by two or three members. The pathwise update draws a
-#: perturbation per member instead, which refills the cloud. The page says so,
-#: and :doc:`tutorials/05-transform-or-pathwise` is where the choice belongs.
-#: Tutorials 2 and 3 use the library default.
+#: variance carried by two or three members; the pathwise update draws a
+#: perturbation per member instead, which refills the cloud. The measurements
+#: are in ``HANDOFF.md``, and whether the package default should change is
+#: open. The page names the rule and defers the choice to
+#: :doc:`tutorials/05-transform-or-pathwise`. Tutorials 2 and 3 use the
+#: default.
 TUTORIAL_1_UPDATE = PathwiseUpdate()
 
 # Colours. Deliberately few, and the same meaning on every figure. The prior
@@ -880,16 +884,20 @@ def bridge_tracked():
             )
         )
 
-    for spare in axes[len(levels) :]:
+    # The legend goes in the first spare cell and any others are blanked. A
+    # ladder long enough to need a third row would otherwise draw one legend
+    # per leftover cell.
+    for index, spare in enumerate(axes[len(levels) :]):
         spare.axis("off")
-        spare.legend(
-            handles=[
-                _handle("patch", C_TARGET, "exact distribution"),
-                _handle("marker", C_ENSEMBLE, "ensemble members"),
-            ],
-            loc="center",
-            handlelength=1.5,
-        )
+        if index == 0:
+            spare.legend(
+                handles=[
+                    _handle("patch", C_TARGET, "exact distribution"),
+                    _handle("marker", C_ENSEMBLE, "ensemble members"),
+                ],
+                loc="center",
+                handlelength=1.5,
+            )
 
     fig.supxlabel("amplitude $a$", fontsize=9.0)
     fig.supylabel(r"decay rate $\lambda$", fontsize=9.0)
@@ -1212,7 +1220,6 @@ def is_current(output_dir=OUTPUT_DIR) -> bool:
 
 def setup(app):
     """Register the build-time hook. Called by Sphinx; see the module notes."""
-    import os
 
     def generate(_app):
         force = os.environ.get("PYEKI_DOCS_FIGURES") == "force"

@@ -113,14 +113,19 @@ Four things that produce a plausible wrong picture:
   keeps the shrinkage visible.
 
 Measured, so the page has something to be checked against — re-measure when
-writing rather than trusting these. At 256 members the adaptive ladder's
-levels are `0, 0.001, 0.003, 0.011, 0.055, 0.419, 1.0`, and against a
-converged grid reference whose standard deviations are `[0.037, 0.032]`:
+writing rather than trusting these. These are the **default**
+`TransformUpdate`, at 256 members, where the adaptive ladder's levels are
+`0, 0.001, 0.003, 0.011, 0.055, 0.419, 1.0`; against a converged grid
+reference whose standard deviations are `[0.037, 0.032]`:
 
 | | mean error | ensemble sd | sd relative to the reference |
 | --- | --- | --- | --- |
 | adaptive ladder | 0.004 | `[0.039, 0.041]` | `[1.07, 1.30]` |
 | one unit step | 0.035 | `[0.075, 0.737]` | `[2.04, 23.2]` |
+
+Note that {doc}`01-first-inversion` runs `PathwiseUpdate` rather than the
+default, so its level sequence and its numbers differ from the table above.
+Decide which rule this page uses before measuring anything, and say which.
 
 Stay true to what the problem shows. The one-step and adaptive ends of the
 sequence differ starkly on this problem; the ladders in between may not
