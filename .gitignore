@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 docs/_build/
+docs/_generated/
 dist/
 build/
 *.egg-info/

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # the `figures` module
 
 project = "pyEKI"
 author = "Andrew Roberts"
@@ -20,13 +21,14 @@ extensions = [
     "myst_parser",               # Markdown pages
     "sphinx_copybutton",
     "sphinx_design",             # cards and grids on the landing page
+    "figures",                   # docs/figures.py: generates the tutorials' figures
 ]
 
 # -- content -----------------------------------------------------------------
 
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 master_doc = "index"
-exclude_patterns = ["_build", "**.ipynb_checkpoints"]
+exclude_patterns = ["_build", "_generated", "**.ipynb_checkpoints"]
 
 myst_enable_extensions = ["colon_fence", "deflist", "dollarmath", "amsmath"]
 myst_heading_anchors = 3

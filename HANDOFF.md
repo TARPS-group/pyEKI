@@ -111,12 +111,69 @@ And **a forward model returning a dtype *wider* than the run is not demoted**,
 so it fails at the update's dtype check with an error naming the update rule;
 that is deliberate for now and recorded as issue #19.
 
+**Tutorial 1** shipped on 2026-09-04, complete and revised, with the figure
+machinery the rest of the series needs. Tutorials 2 and 3 are drafted, tested
+and building, but have **not** been through a revision pass — they are marked
+as unreviewed drafts on the series index, and they run the library's default
+update rule rather than the pathwise one tutorial 1 selects. Revising them is
+its own PR.
+
+The series was also restructured: tutorial 3 was carrying four lessons, so it
+split into three — sampling against optimizing (the destination), tempering
+schedules (the path), and the two update rules — which pushed the four
+remaining stubs down by two. The series is now nine pages, of which 4 to 9 are
+stubs.
+
+**Tutorial 1 runs `PathwiseUpdate`, not the default.** On
+`exponential_decay`, `TransformUpdate` reproduces the target's covariance but
+leaves the ensemble strung along one direction: the across-ridge projection
+has a kurtosis of 19 against a Gaussian's 3, and at 64 members two members
+carry 72% of that variance. It is the nonlinearity, not sampling error —
+present after a single step, and no better at 4096 members, while on
+`linear_gaussian` the same rule leaves the ensemble perfectly Gaussian at any
+number of steps. `PathwiseUpdate` draws a perturbation per member and refills
+the cloud, at about one extra forward evaluation. Issue #29 asks whether the
+package default should change; if it does, the explicit argument and its
+explanation come out of the page.
+
+Three things the first three pages settled, none of which had a precedent:
+
+- **Figures are generated at build time.** `docs/figures.py` is both the figure
+  module and a Sphinx extension: a `builder-inited` handler writes every figure
+  into `docs/_generated/figures`, which is gitignored. Nothing is committed, so
+  a figure cannot disagree with the code that made it. Regeneration is skipped
+  when every output postdates both that module and every source file of the
+  package — 6 s to regenerate all of them, 1.6 s cached — and
+  `PYEKI_DOCS_FIGURES=force` overrides. That alone catches only a figure whose
+  code *raises*, so each figure function also returns the numbers it plotted
+  and `tests/test_tutorials.py` pins them; a figure drawing the wrong array
+  fails the test rather than merely looking wrong. Pixels are deliberately not
+  compared, and the module records why.
+- **The quickstart stays.** Tutorial 6 (was 4) does not absorb it: four pages
+  link to it, and it serves a reader who came for `pyeki.linalg` alone.
+  Tutorial 6 is short and problem-led instead, and its stub now says so.
+- **Notebook wiring is still undecided**, deliberately. `myst-nb` would
+  *replace* `myst_parser` rather than join it, which changes how all 23 existing
+  pages are parsed, and that does not belong in a tutorials branch. The three
+  sub-decisions at the bottom of `docs/examples/index.md` stand as written, and
+  the figure machinery above forecloses none of them.
+
+The nonlinear problem has no closed form, so the pages compare against grid
+quadrature — `figures._tempered_moments`, which **refines its box**, because
+one grid does not serve every level: a box wide enough for the prior resolves
+the $\beta = 1$ target with about five points across its width and reports a
+mean wrong in the fourth decimal, while a box sized for the target puts the
+prior's mean at `[1.48, 1.31]` instead of `[1, 1]`. After two refinements the
+moments agree to six digits across three resolutions and recover the prior
+exactly at $\beta = 0$. Both failure modes are silent and invisible in a
+contour plot; `tests/test_tutorials.py` asserts against each.
+
 **Not started.** `pyeki.localize`, and the Kronecker family of operators. The
-design background for both is in `docs/design.md`. The tutorial series and the
-example notebooks are also unwritten, and are now unblocked in both of the
-ways they were waiting on: the forward-model contract and the toy problems
-they were to be written against. Tutorial 5's stub carries re-measured numbers
-from the shipped problem; the other six stubs were left alone.
+design background for both is in `docs/design.md`. Tutorials 4 to 9 and the
+example notebooks are unwritten. Tutorial 7's stub (was 5) carries re-measured
+numbers from the shipped problem; issue #24 covers what its page still owes.
+Issue #26 proposes a fixed-budget ablation study and leaves open whether it is
+a tutorial or a notebook.
 
 **Origin.** This package was extracted from a research repository where the
 operator layer was first written. That repository keeps the domain-specific
@@ -240,6 +297,9 @@ layer; this is the index.
 | The same members in a differently *sized* batch round differently | a dense contraction picks a different kernel per batch shape, so a subset comparison holds only to round-off while a permutation one is bit-exact |
 | The closed form's cost is set by the prior factor's width $k$, not by $P$ | a full-rank prior at $P = 2000$ means a $(2000, 2000)$ posterior factor — 32 MB, 0.07 s — so `LinearGaussian.posterior` guards on $Pk$ and the *run* has no such limit |
 | A run at $P \gg J$ reports a spread the exact posterior contradicts | at $P = 2000$, $N = 40$, $J = 40$ the ensemble's mean posterior sd is 0.014 against an exact 0.990, a factor of seventy, with nothing raised and no history field flagging it |
+| A deterministic square-root update can get the covariance right and the shape wrong | on a nonlinear problem `TransformUpdate` leaves the least-varying direction with a kurtosis of 19 and two members holding 72% of its variance; it is a linear recombination of existing anomalies, so more members do not help. Only visible in a scatter plot or a shape statistic — no `HistoryRecord` field reports it |
+| One grid cannot serve every tempering level | a box wide enough for the prior reports the $\beta = 1$ mean wrong in the fourth decimal; a box sized for the target reports the prior's mean as `[1.48, 1.31]` rather than `[1, 1]`. Both are silent, and invisible in a contour plot |
+| A multi-line `:alt:` value breaks a MyST `{figure}` | the continuation lines are absorbed into the caption, and the build fails with "Figure caption must be a paragraph" pointing at the directive rather than at the option |
 
 ## Working agreements
 

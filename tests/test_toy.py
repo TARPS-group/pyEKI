@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from conftest import prints_as
 
 import pyeki  # noqa: F401  -- enables x64 before any array exists
 from pyeki import toy
@@ -67,21 +68,6 @@ def _ensemble(n_members: int, u_dim: int, seed: int = 0):
 def _identical(got, want) -> bool:
     """Bit-identity, counting two ``nan`` s as equal: failed rows are legal."""
     return np.array_equal(np.asarray(got), np.asarray(want), equal_nan=True)
-
-
-def _prints_as(got, want, decimals: int = 4) -> None:
-    """Assert a value's printed digits, which is what a doc block shows.
-
-    Pinning with a tolerance invites a window nobody measured: an ``atol`` of
-    half the printed precision leaves whatever slack the rounding happens to
-    give, which for one of the values below was 0.25% of the stated window.
-    Rounding to the printed precision and comparing exactly says what the
-    documentation actually claims.
-    """
-    got = np.round(np.asarray(got, dtype=float), decimals)
-    want = np.asarray(want, dtype=float)
-    assert got.shape == want.shape, f"shape {got.shape} != {want.shape}"
-    assert np.array_equal(got, want), f"prints as {got}, documented as {want}"
 
 
 def _exact_moment_ensemble(J: int, mu: np.ndarray, F: np.ndarray) -> np.ndarray:
@@ -642,7 +628,7 @@ def test_8_a_run_against_the_restricted_model_repairs_and_reports():
     assert [w for w in caught if "evaluations failed" in str(w.message)]
     assert np.abs(np.asarray(result.mean) - np.asarray(problem.u_true)).max() < 0.05
 
-    _prints_as(result.mean, [1.9801, 1.474])  # the page prints this too
+    prints_as(result.mean, [1.9801, 1.474])  # the page prints this too
     with pytest.raises(EKIError, match="finite"):
         run(state, *common, schedule=AdaptiveESSSchedule(), on_failure="raise")
 
@@ -678,8 +664,8 @@ def test_9_the_high_dimensional_problem_is_confined_and_over_confident():
     exact_sd = float((problem.posterior().cov.diag() ** 0.5).mean())
     assert exact_sd / ensemble_sd > 20.0, (ensemble_sd, exact_sd)
     # The numbers the user guide prints, to the precision it prints them.
-    _prints_as(ensemble_sd, 0.0140)
-    _prints_as(exact_sd, 0.9900)
+    prints_as(ensemble_sd, 0.0140)
+    prints_as(exact_sd, 0.9900)
 
 
 # ===========================================================================
@@ -751,21 +737,21 @@ def test_11_the_toy_models_page_blocks_run():
     exact = problem.posterior()
     fitted = Gaussian.from_samples(result.ensemble)
 
-    _prints_as(result.mean, [-1.3289, 1.362, 0.6229, 0.1361])
-    _prints_as(exact.mean, [-1.3303, 1.3749, 0.6281, 0.1409])
-    _prints_as(problem.u_true, [-1.4009, 1.4321, 0.6248, 0.2005])
+    prints_as(result.mean, [-1.3289, 1.362, 0.6229, 0.1361])
+    prints_as(exact.mean, [-1.3303, 1.3749, 0.6281, 0.1409])
+    prints_as(problem.u_true, [-1.4009, 1.4321, 0.6248, 0.2005])
     # The page says "within 0.013"; measured 0.01292, so the threshold is
     # stated loosely enough that a change of a few percent does not fail it.
     assert np.abs(np.asarray(result.mean) - np.asarray(exact.mean)).max() < 0.015
-    _prints_as(fitted.cov.diag() ** 0.5, [0.0686, 0.1272, 0.1167, 0.0877])
-    _prints_as(exact.cov.diag() ** 0.5, [0.0687, 0.1276, 0.1165, 0.0876])
+    prints_as(fitted.cov.diag() ** 0.5, [0.0686, 0.1272, 0.1167, 0.0877])
+    prints_as(exact.cov.diag() ** 0.5, [0.0687, 0.1276, 0.1165, 0.0876])
 
     # The correlated-noise variant, whose R the page names.
     rng = np.random.default_rng(1)
     M = rng.normal(size=(8, 8))
     R = jnp.asarray(M @ M.T / 8 + 0.01 * np.eye(8))
     correlated = dataclasses.replace(problem, noise_cov=DensePSD.from_matrix(R))
-    _prints_as(correlated.posterior().mean, [-1.4093, 0.8248, 0.4646, 0.0692])
+    prints_as(correlated.posterior().mean, [-1.4093, 0.8248, 0.4646, 0.0692])
 
 
 def _dense_posterior_from_blocks(problem, beta: float):
@@ -861,7 +847,7 @@ def test_6_the_documented_true_parameters_are_what_the_factories_build():
         np.testing.assert_array_equal(np.asarray(factory().u_true), [2.0, 1.5])
     problem = toy.linear_gaussian()
     # The linear problem's u_true is a prior draw, so it is pinned by digits.
-    _prints_as(problem.u_true, [-1.4009, 1.4321, 0.6248, 0.2005])
+    prints_as(problem.u_true, [-1.4009, 1.4321, 0.6248, 0.2005])
 
 
 def test_8_the_failure_fraction_matches_its_closed_form_under_the_prior():

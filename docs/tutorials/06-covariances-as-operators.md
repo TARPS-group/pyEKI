@@ -1,4 +1,4 @@
-# 4. Covariances as operators
+# 6. Covariances as operators
 
 :::{admonition} Stub
 :class: note
@@ -55,12 +55,19 @@ dimension is too large for a dense covariance to fit in memory.
 ## Notes for the writer
 
 :::{important}
-{doc}`../user-guide/quickstart` currently covers most of this material, and was
-written as the package's entry point before this series existed. Decide
-explicitly whether this tutorial **absorbs** that page — with the quickstart
-retired and its inbound links repointed — or whether the quickstart stays as
-the operator layer's standalone reference and this page stays shorter and more
-motivated. Do not silently duplicate it; that is how the two drift apart.
+**Settled: the quickstart stays, and this page stays short.**
+{doc}`../user-guide/quickstart` covers most of this material and was written as
+the package's entry point before this series existed. It is kept rather than
+absorbed, for two reasons: it is linked from the landing page, this series'
+index, {doc}`../user-guide/operators` and {doc}`../user-guide/conditioning`,
+and it serves a reader who came for `pyeki.linalg` alone — which is a real
+audience, since the operator layer is usable without the rest of the package.
+
+So this page is not the operator layer's reference. It leads with the reader's
+own problem — correlated observations, a non-diagonal prior, a covariance too
+large to store — introduces only the operators that problem needs, and links
+to the quickstart and {doc}`../user-guide/operators` for the catalogue. Do not
+restate the catalogue here; that is how the two pages drift apart.
 :::
 
 Never write `M @ x` when demonstrating application: for arrays of two or more

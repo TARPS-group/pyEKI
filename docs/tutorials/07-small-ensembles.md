@@ -1,4 +1,4 @@
-# 5. When the ensemble is too small
+# 7. When the ensemble is too small
 
 :::{admonition} Stub
 :class: note
@@ -12,7 +12,8 @@ which mitigations exist and what each costs.
 
 ## Prerequisites
 
-Tutorials 1 to 4.
+Tutorials 1 to 3, and {doc}`06-covariances-as-operators`
+for the operator `AdditiveInflation` takes.
 
 ## What this page covers
 

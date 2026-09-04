@@ -1,4 +1,4 @@
-# Writing a forward model
+# Forward model requirements
 
 pyEKI supplies everything in a run except the forward model. This page is what
 that callable must satisfy; {ref}`eki-failures` is the normative statement.

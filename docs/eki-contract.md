@@ -2887,7 +2887,7 @@ written independently of the code under test. The suite must verify at least:
     double-counting hazard is asserted as an over-concentration so that a later
     change cannot quietly "fix" it.
 
-    Two recipes from outside this page are covered too. The
+    Recipes from outside this page are covered too. The
     external-executable wrapper of {doc}`user-guide/writing-a-forward-model`,
     run against real subprocesses; and every runnable block of
     {doc}`user-guide/toy-models`, with the values it prints pinned, in
@@ -2895,6 +2895,16 @@ written independently of the code under test. The suite must verify at least:
     thing this layer needs from a forward model beyond its shape, and nothing
     else in the suite exercises it against a process that can actually exit
     non-zero.
+
+    The written tutorials are covered by `tests/test_tutorials.py`, which also
+    covers what a page shows rather than prints. Every figure in the
+    documentation is generated at build time by `docs/figures.py`, and each
+    figure function returns the numbers it plotted; the test asserts those
+    returned values rather than recomputing them, so a figure that draws the
+    wrong array fails a test rather than merely looking wrong. Regeneration on
+    every build catches a figure whose code raises and nothing more, which is
+    why both mechanisms exist. Ratios and counts a page states in prose,
+    rather than in a block, are asserted from the same returned data.
 27. **The forward model's argument is what this section says it is.** A
     recording model asserts, from inside the call, that it received a concrete
     `jax.Array` — `isinstance(u, jax.Array)` and *not* a `jax.core.Tracer` —
