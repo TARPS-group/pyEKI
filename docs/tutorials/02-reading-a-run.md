@@ -6,7 +6,8 @@ two steps and spent the rest of the run agreeing with itself. Nothing in the
 result is named `converged`, because no single field can be.
 
 This page is about what to look at instead. It carries on with the problem and
-the run from {doc}`01-first-inversion`:
+the initial ensemble of {doc}`01-first-inversion`, and with the library's
+default update rule rather than the pathwise one that page selects:
 
 ```python
 import pyeki

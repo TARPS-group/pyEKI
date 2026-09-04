@@ -44,12 +44,13 @@ from pyeki.eki import (
     DiscrepancyStop,
     EKIState,
     FixedSchedule,
+    PathwiseUpdate,
+    TransformUpdate,
     effective_sample_size,
     iterate,
     misfits,
     run,
 )
-from pyeki.eki.testing import check_forward_model
 from pyeki.gauss import Gaussian, GaussianJoint
 from pyeki.linalg import PSDDiagonal
 
@@ -93,8 +94,6 @@ def test_1_tutorial_1_blocks_run():
     vmapped = jax.vmap(one_member)
     assert jnp.array_equal(vmapped(ensemble), problem.forward(ensemble))
 
-    assert check_forward_model(forward, u_dim=2, v_dim=12) is None
-
     # The prior and the noise the page writes out are the problem's own.
     prior = Gaussian(
         mean=jnp.array([1.0, 1.0]), cov=PSDDiagonal(jnp.array([1.0, 1.0]))
@@ -103,9 +102,14 @@ def test_1_tutorial_1_blocks_run():
     assert jnp.array_equal(prior.mean, problem.prior.mean)
     assert jnp.array_equal(prior.cov.to_dense(), problem.prior.cov.to_dense())
     assert jnp.array_equal(noise_cov.to_dense(), problem.noise_cov.to_dense())
+    # The page states these as m0 = [1, 1], C0 = I, Sigma = 0.02^2 I.
+    assert jnp.array_equal(prior.cov.to_dense(), jnp.eye(2))
+    assert jnp.array_equal(noise_cov.to_dense(), 0.02**2 * jnp.eye(12))
 
     state = EKIState.from_prior(jax.random.key(0), problem.prior, n_members=64)
     assert state.ensemble.shape == (64, 2)
+    predictions = problem.forward(state.ensemble)
+    assert predictions.shape == (64, 12)
 
     one_step = run(
         state,
@@ -113,29 +117,41 @@ def test_1_tutorial_1_blocks_run():
         problem.y,
         problem.noise_cov,
         schedule=FixedSchedule.constant(1.0, n_steps=1),
+        update=PathwiseUpdate(),
     )
-    prints_as(one_step.mean, [2.0129, 1.6505])
-    prints_as(one_step.ensemble.std(axis=0, ddof=1), [0.0781, 0.7632])
+    prints_as(one_step.mean, [2.0227, 1.666])
+    prints_as(one_step.ensemble.std(axis=0, ddof=1), [0.0835, 0.7719])
 
-    # The page's claim that doing the fit by hand gives the same numbers.
+    # The Gaussian the update conditions, which the members are drawn from.
     joint = GaussianJoint.from_samples(
         u_samples=state.ensemble, v_samples=problem.forward(state.ensemble)
     )
     conditioned = joint.condition(problem.y, problem.noise_cov)
     prints_as(conditioned.mean, [2.0129, 1.6505])
     prints_as(conditioned.cov.diag() ** 0.5, [0.0781, 0.7632])
-    # "to floating point": the page does not claim bit-identity, and the two
-    # are not bit-identical -- they reach the moments by different routes.
-    assert float(jnp.abs(conditioned.mean - one_step.mean).max()) < 1e-14
-    assert (
-        float(
-            jnp.abs(
-                jnp.sqrt(conditioned.cov.diag())
-                - one_step.ensemble.std(axis=0, ddof=1)
-            ).max()
-        )
-        < 1e-14
+
+    # "mean and covariance that should approximately match the sample mean and
+    # covariance of the ensemble above (they would match exactly if we had
+    # instead used `TransformUpdate`)." Both halves are asserted: approximate
+    # under the pathwise update, exact under the transform.
+    gaussian_sd = np.sqrt(np.asarray(conditioned.cov.diag()))
+    ensemble_sd = np.asarray(one_step.ensemble.std(axis=0, ddof=1))
+    relative = np.abs(ensemble_sd - gaussian_sd) / gaussian_sd
+    assert relative.max() < 0.08, relative
+    assert relative.max() > 1e-3, relative  # approximate, not exact
+
+    deterministic = run(
+        state,
+        problem.forward,
+        problem.y,
+        problem.noise_cov,
+        schedule=FixedSchedule.constant(1.0, n_steps=1),
+        update=TransformUpdate(),
     )
+    exact_cov = np.cov(np.asarray(deterministic.ensemble), rowvar=False, ddof=1)
+    gaussian_cov = np.asarray(conditioned.cov.to_dense())
+    assert float(jnp.abs(conditioned.mean - deterministic.mean).max()) < 1e-14
+    assert np.abs(gaussian_cov - exact_cov).max() < 1e-15
 
     result = run(
         state,
@@ -143,24 +159,65 @@ def test_1_tutorial_1_blocks_run():
         problem.y,
         problem.noise_cov,
         schedule=AdaptiveESSSchedule(),
+        update=PathwiseUpdate(),
     )
     assert result.status == "schedule_exhausted"
-    assert result.n_evaluations == 6
+    assert result.n_evaluations == 8
     assert float(result.beta) == 1.0
-    assert result.n_evaluations * 64 == 384
+    assert result.n_evaluations * 64 == 512
     assert result.ensemble.shape == (64, 2)
-    prints_as(result.mean, [1.9802, 1.4741])
-    prints_as(result.ensemble.std(axis=0, ddof=1), [0.0396, 0.0363])
+    prints_as(result.mean, [1.978, 1.4771])
+    prints_as(result.ensemble.std(axis=0, ddof=1), [0.0414, 0.0318])
 
-    # The prose's three comparisons against the true parameters.
-    error = np.abs(np.asarray(result.mean) - np.asarray(problem.u_true))
-    prints_as(error, [0.0198, 0.0259])
-    assert error[0] < 0.02 and error[1] < 0.026
-    rate_narrowing = float(
-        one_step.ensemble.std(axis=0, ddof=1)[1]
-        / result.ensemble.std(axis=0, ddof=1)[1]
+    # The grid block the page closes on, and the table it fills in.
+    amp = jnp.linspace(1.70, 2.25, 400)
+    rate = jnp.linspace(1.25, 1.70, 400)
+    A, R = jnp.meshgrid(amp, rate, indexing="ij")
+    grid = jnp.stack([A.ravel(), R.ravel()], axis=-1)
+    assert grid.shape == (160_000, 2)
+
+    log_density = problem.prior.log_density(grid) - misfits(
+        problem.y, problem.forward(grid), problem.noise_cov
     )
-    assert 20.5 < rate_narrowing < 21.5, rate_narrowing
+    weights = jnp.exp(log_density - log_density.max())
+    weights = weights / weights.sum()
+
+    exact_mean = (weights[:, None] * grid).sum(axis=0)
+    centred = grid - exact_mean
+    exact_cov = (weights[:, None] * centred).T @ centred
+
+    prints_as(exact_mean, [1.9769, 1.4719])
+    prints_as(jnp.sqrt(jnp.diag(exact_cov)), [0.0366, 0.0317])
+
+    # The block is a single grid where `figures._tempered_moments` refines its
+    # box; the page uses the simple version, so it has to agree with the
+    # refined one it is standing in for.
+    refined_mean, refined_sd = figures._tempered_moments(1.0)
+    assert np.abs(np.asarray(exact_mean) - refined_mean).max() < 1e-6
+    assert (
+        np.abs(np.asarray(jnp.sqrt(jnp.diag(exact_cov))) - refined_sd).max() < 1e-6
+    )
+
+    exact_sd = np.asarray(jnp.sqrt(jnp.diag(exact_cov)))
+    exact_corr = float(
+        exact_cov[0, 1] / jnp.sqrt(exact_cov[0, 0] * exact_cov[1, 1])
+    )
+    ensemble = np.asarray(result.ensemble)
+    prints_as(exact_corr, 0.822, 3)
+    prints_as(float(np.corrcoef(ensemble.T)[0, 1]), 0.864, 3)
+
+    # "The mean agrees to within 0.006 in both parameters, and the decay
+    # rate's spread to within a fraction of a percent; the amplitude's spread
+    # comes out about 13% too wide."
+    assert np.abs(np.asarray(result.mean) - np.asarray(exact_mean)).max() < 0.006
+    sd_ratio = np.asarray(result.ensemble.std(axis=0, ddof=1)) / exact_sd
+    assert abs(sd_ratio[1] - 1.0) < 0.01, sd_ratio
+    assert 1.10 < sd_ratio[0] < 1.16, sd_ratio
+
+    # The truth sits inside the ensemble's spread in both parameters, which is
+    # the reason the page can show `u_true` on the figure without apology.
+    error = np.abs(np.asarray(result.mean) - np.asarray(problem.u_true))
+    assert np.all(error < np.asarray(result.ensemble.std(axis=0, ddof=1)))
 
 
 def test_1_tutorial_2_blocks_run():
@@ -413,38 +470,135 @@ def test_3_every_figure_a_page_references_is_generated():
     assert referenced == set(figures.FIGURES)
 
 
+def test_4_the_prior_predictive_figure_plots_what_tutorial_1_says():
+    """Tutorial 1's opening figure, and the two counts in its caption."""
+    data = figures.prior_predictive()[1]
+    assert data["n_members"] == 64
+    # The caption says "some curves leave the panel, and some have a negative
+    # decay rate", so that is what is asserted; the exact counts follow as a
+    # regression pin on the picture rather than on the prose, since a figure
+    # in which every curve or no curve left the panel would be a different
+    # figure making a different point.
+    assert 0 < data["prior_curves_leaving_panel"] < data["n_members"]
+    assert 0 < data["prior_negative_rates"] < data["n_members"]
+    assert data["prior_curves_leaving_panel"] == 7
+    assert data["prior_negative_rates"] == 9
+    # The panel's own limits, which decide that first count.
+    prints_as(data["prediction_ylim"], [-0.6, 2.4], 2)
+    # "the noise in this problem is quite small, so the bars are obscured by
+    # the observation markers" -- true only because the panel spans 3 units.
+    assert data["noise_sd"] == 0.02
+    # The prior predictive is wide, which is the panel's whole point.
+    assert data["prior_predictive_sd"][figures.JOINT_INDEX] > 0.9
+
+
 def test_4_the_one_step_figure_plots_what_tutorial_1_says():
-    """Tutorial 1's four-panel figure, and the sentences that read it."""
+    """Tutorial 1's conditioning figure, and the sentences that read it."""
     data = figures.one_step()[1]
     assert data["n_members"] == 64
-    prints_as(data["conditioned_mean"], [2.0129, 1.6505])
-    prints_as(data["conditioned_sd"], [0.0781, 0.7632])
-    prints_as(data["one_step_mean"], [2.0129, 1.6505])
-    prints_as(data["one_step_sd"], [0.0781, 0.7632])
+    prints_as(data["one_step_mean"], [2.0227, 1.666])
+    prints_as(data["one_step_sd"], [0.0835, 0.7719])
+    prints_as(data["posterior_mean"], [1.9769, 1.4719])
+    prints_as(data["posterior_sd"], [0.0366, 0.0317])
 
-    # The caption's two counts.
-    assert data["prior_predictive_above_panel"] == 3
-    assert data["prior_negative_rates"] == 9
+    # The section reads the failure off this figure qualitatively: the
+    # ensemble finds the right region and misrepresents the shape. These
+    # bracket what "misrepresents" amounts to, so a change that quietly fixed
+    # it -- or made it worse -- would not pass unnoticed.
+    ratio = data["one_step_sd"] / data["posterior_sd"]
+    assert 2.1 < ratio[0] < 2.5, ratio
+    assert 23.5 < ratio[1] < 25.0, ratio
+    # The rate is barely narrowed from the prior's own spread of one.
+    prior_sd = np.sqrt(np.asarray(toy.exponential_decay().prior.cov.diag()))
+    assert 0.7 < data["one_step_sd"][1] / prior_sd[1] < 0.85
+    # In prediction space the fan is still far wider than the error bars.
+    assert data["one_step_predictive_sd"][figures.JOINT_INDEX] / 0.02 > 25.0
+    # The panel is sized to the ensemble, so almost every curve stays in the
+    # prediction panel; the parameter panel is where the failure shows.
+    assert data["one_step_curves_leaving_panel"] == 1
 
-    # "at t = 1 the members' predictions have a standard deviation of 0.578,
-    # against an observation error of 0.02".
-    prints_as(data["one_step_predictive_sd"][figures.JOINT_INDEX], 0.5777)
-    # "its standard deviation is 0.76, which is most of the prior's own 1.0".
-    assert 0.7 < data["one_step_sd"][1] < 0.8
+
+def test_4_the_tempering_bridge_figure_plots_what_tutorial_1_says():
+    """Tutorial 1's closing figure: the exact tempered family, five levels."""
+    data = figures.tempering_bridge()[1]
+    prints_as(data["levels"], [0.0, 0.001, 0.01, 0.1, 1.0], 3)
+    prints_as(
+        data["sd"],
+        [
+            [1.0, 1.0],
+            [0.6186, 0.6016],
+            [0.3249, 0.2906],
+            [0.1145, 0.0997],
+            [0.0366, 0.0317],
+        ],
+    )
+    # The two ends are the prior and the posterior, which is what makes it a
+    # bridge; beta = 0 is checkable against the prior in closed form.
+    problem = toy.exponential_decay()
+    prints_as(data["mean"][0], np.asarray(problem.prior.mean), 4)
+    prints_as(data["sd"][0], np.sqrt(np.asarray(problem.prior.cov.diag())), 4)
+    prints_as(data["mean"][-1], [1.9769, 1.4719])
+    prints_as(data["sd"][-1], [0.0366, 0.0317])
+
+    # "the distribution narrows by a factor of about thirty along the way",
+    # monotonically, which is why each panel needs its own scale.
+    assert np.all(np.diff(data["sd"], axis=0) < 0.0)
+    narrowing = data["sd"][0] / data["sd"][-1]
+    assert 25.0 < narrowing.min() and narrowing.max() < 35.0, narrowing
+
+
+def test_4_the_tracked_bridge_figure_plots_what_tutorial_1_says():
+    """Tutorial 1's figure of the run against the exact tempered family.
+
+    The page makes three claims about it: the members follow the exact
+    distribution closely at most levels, the second level is the exception
+    because its target is a curved ridge, and the ensemble stays slightly
+    over-dispersed throughout. All three are ratios of plotted quantities.
+    """
+    data = figures.bridge_tracked()[1]
+    assert data["n_members"] == 64
+    prints_as(
+        data["levels"],
+        [0.0, 0.001, 0.0029, 0.0094, 0.0265, 0.0735, 0.2031, 0.6559, 1.0],
+    )
+
+    ratio = data["cloud_sd"] / data["exact_sd"]
+    # "the ensemble tracks the distributions fairly well".
+    others = np.delete(ratio, 1, axis=0)
+    assert others.max() < 1.35, ratio
+    assert others.min() > 0.9, ratio
+    # "the curvature present at the second distribution presents a challenge"
+    # -- and it is the worst-tracked level, which is what makes it the one the
+    # page singles out.
+    assert ratio[1, 1] > 1.4, ratio
+    assert ratio[1, 1] == ratio[:, 1].max(), ratio
+    # "the final posterior approximation is far superior to the one-step
+    # result": within about 15% at beta = 1, against a factor of 24.
+    assert np.abs(ratio[-1] - 1.0).max() < 0.15, ratio
+    # The panels hold the clouds: a handful of members outside is a scatter
+    # plot, a third of them outside is a badly sized panel.
+    assert data["members_outside_panel"].max() <= 6, data[
+        "members_outside_panel"
+    ]
 
 
 def test_4_the_answer_figure_plots_what_tutorial_1_says():
-    """Tutorial 1's closing figure, and the predictive spread its caption gives."""
+    """Tutorial 1's closing figure, and the contrast it draws with one step."""
     data = figures.answer()[1]
     assert data["n_members"] == 64
     assert data["status"] == "schedule_exhausted"
-    assert data["n_evaluations"] == 6
-    prints_as(data["mean"], [1.9802, 1.4741])
-    prints_as(data["sd"], [0.0396, 0.0363])
-    # "a standard deviation of 0.0099 at t = 1 against an observation error
-    # of 0.02" -- the fan is inside the error bars.
-    prints_as(data["predictive_sd"][figures.JOINT_INDEX], 0.0099)
+    assert data["n_evaluations"] == 8
+    prints_as(data["mean"], [1.978, 1.4771])
+    prints_as(data["sd"], [0.0414, 0.0318])
+    prints_as(data["posterior_sd"], [0.0366, 0.0317])
+    # The right-hand panel's fan is inside the observation error bars, which
+    # is what distinguishes it from the one-step figure's.
+    prints_as(data["predictive_sd"][figures.JOINT_INDEX], 0.0078)
     assert data["predictive_sd"][figures.JOINT_INDEX] < 0.02
+    ratio = data["sd"] / data["posterior_sd"]
+    assert ratio.max() < 1.2, ratio
+    # The panel is sized to the ensemble, so no prediction curve escapes.
+    assert data["curves_leaving_panel"] == 0
 
 
 def test_4_the_trajectories_figure_plots_what_tutorial_2_says():
@@ -502,6 +656,36 @@ def test_4_the_two_forms_figure_plots_what_tutorial_3_says():
 # ===========================================================================
 # 3. the two claims the pages rest on
 # ===========================================================================
+
+
+@pytest.mark.parametrize("n_members", [64, 2048])
+def test_5_the_one_step_error_is_the_gaussian_fit_not_the_ensemble_size(
+    n_members,
+):
+    """Tutorial 1: "the discrepancy does not go away with a larger ensemble".
+
+    The page attributes the one-step failure to the Gaussian approximation
+    rather than to sampling error, which is a claim about what happens as the
+    ensemble grows. Thirty-two times as many members leaves the overspread in
+    the decay rate essentially unchanged, so the attribution holds.
+
+    Stated as a band rather than a pinned value: the point is that the ratio
+    stays large, not that it takes a particular value at a particular size.
+    """
+    problem = toy.exponential_decay()
+    state = EKIState.from_prior(jax.random.key(0), problem.prior, n_members)
+    result = run(
+        state,
+        problem.forward,
+        problem.y,
+        problem.noise_cov,
+        schedule=FixedSchedule.constant(1.0, n_steps=1),
+        update=PathwiseUpdate(),
+    )
+    _, posterior_sd = figures._tempered_moments(1.0)
+    ratio = np.asarray(result.ensemble.std(axis=0, ddof=1)) / posterior_sd
+    assert 20.0 < ratio[1] < 26.0, (n_members, ratio)
+    assert 1.9 < ratio[0] < 2.5, (n_members, ratio)
 
 
 def test_5_an_evaluation_and_its_record_carry_the_same_level():
@@ -613,11 +797,13 @@ def test_7_regression_the_figure_cache_notices_a_changed_source(tmp_path):
 
 
 def test_7_regression_a_toy_problem_is_not_passed_to_run():
-    """The three-argument call the tutorials teach is the real signature.
+    """The three-argument call every tutorial writes is the real signature.
 
-    Every tutorial writes ``run(state, problem.forward, problem.y,
-    problem.noise_cov, ...)``. A reader who tries the container instead should
-    meet an error rather than a wrong answer, and the pages say so.
+    Every block in the series calls ``run(state, problem.forward, problem.y,
+    problem.noise_cov, ...)``, so a reader who tries handing the container to
+    ``run`` instead must meet an error rather than a wrong answer. The pages
+    teach this by example rather than stating it, which is why it is asserted
+    here.
     """
     problem = toy.exponential_decay()
     state = EKIState.from_prior(jax.random.key(0), problem.prior, n_members=8)

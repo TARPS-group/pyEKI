@@ -31,7 +31,7 @@ state = EKIState.from_prior(jax.random.key(0), problem.prior, n_members=64)
 {doc}`01-first-inversion` introduced the sequence of distributions a run walks
 up,
 
-$$\pi_\beta(u) \;\propto\; \pi_0(u)\, e^{-\beta \Phi(\mathcal{G}(u))},$$
+$$\pi_\beta(u) \;\propto\; \pi_0(u)\, e^{-\beta \Phi(u)},$$
 
 with the prior at $\beta = 0$ and the distribution the observations imply at
 $\beta = 1$. The exponent is what makes the two forms one family. Nothing
