@@ -106,6 +106,39 @@ divisor is the *increment*, never the accumulated level: dividing by $\beta$
 raises nothing and produces a plausible-looking posterior that is wrong by a
 factor growing with the ladder's length.
 
+## The misfit and the likelihood
+
+$\Phi$ is the negative log-likelihood of the Gaussian noise model, less a
+constant that does not depend on the prediction:
+
+$$\log \mathcal{N}(y \mid v, R) \;=\; -\Phi(v)
+\;-\; \tfrac12\bigl(\log\det R + N \log 2\pi\bigr).$$
+
+Most uses never need the constant. A sampler run as a baseline against EKI
+targets the same posterior as the run, with the same $R$ and the same factor
+of $\tfrac12$, through `misfits`:
+
+```python
+import jax.numpy as jnp
+from pyeki.eki import misfits
+
+def log_target(u):
+    v = forward(u[None])[0]          # one point, as a batch of one
+    log_p = prior.log_density(u) - misfits(y, v, noise_cov)
+    return jnp.where(jnp.all(jnp.isfinite(v)), log_p, -jnp.inf)
+```
+
+The last line is the sampler's version of a failed member. Neither function
+turns a non-finite prediction into $-\infty$ on its own; the value is usually
+`nan`, which stops most samplers instead of rejecting the proposal.
+
+Where the normalized value matters — comparing evidence across noise models,
+say — it is `Gaussian(y, noise_cov).log_density(predictions)`. The Gaussian
+density is symmetric in its point and its mean, so passing the observation as
+the mean scores every prediction row at once, `(..., N) -> (...)`, exactly as
+`misfits` is batched. It additionally requires `noise_cov` to support
+`logdet`.
+
 ## Choosing a schedule
 
 | schedule | ladder | reach for it when |

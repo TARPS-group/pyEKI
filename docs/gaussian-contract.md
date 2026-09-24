@@ -528,6 +528,12 @@ $\lVert W r \rVert^2 = r^\top C^{-1} r$ that the operator contract
 guarantees. Precondition: $C$ nonsingular — a singular covariance yields
 `nan`/`inf` downstream of the operator layer, per its tier-4 convention.
 
+The value is symmetric in the point and the mean,
+$\mathcal{N}(x \mid m, C) = \mathcal{N}(m \mid x, C)$, so one fixed vector
+is scored against a batch of candidate means by passing the vector as `mean`
+and the batch as `x`. That is the batched form; no separate entry point
+exists for it.
+
 (gauss-joint)=
 ## `GaussianJoint`
 

@@ -61,6 +61,7 @@ from pyeki.eki.driver import _check_predictions
 from pyeki.gauss import EmpiricalJoint, Gaussian
 from pyeki.linalg import (
     DensePSD,
+    Identity,
     PSDDiagonal,
     PSDLowRank,
     UnsupportedOpError,
@@ -1056,6 +1057,43 @@ def test_11_misfits_is_whitener_invariant_and_carries_the_half():
     # Closed form: 0.5 * (1/2 + 4/0.5 + 9/4) for the first row, 0 for the second.
     assert float(got[0]) == pytest.approx(0.5 * (0.5 + 8.0 + 2.25))
     assert float(got[1]) == 0.0
+
+
+def _noise_operators() -> dict[str, object]:
+    """One noise operator of each structure, all of side 6."""
+    diagonal = PSDDiagonal(jnp.asarray([0.5, 2.0, 1.5, 3.0, 0.25, 1.0]))
+    return {
+        "identity": Identity(6),
+        "diagonal": diagonal,
+        "dense": DensePSD.from_matrix(jnp.asarray(_psd(6, seed=47))),
+        "block_diag": block_diag(
+            Identity(2),
+            PSDDiagonal(jnp.asarray([2.0, 0.5])),
+            DensePSD.from_matrix(jnp.asarray(_psd(2, seed=53))),
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", ["identity", "diagonal", "dense", "block_diag"])
+@pytest.mark.parametrize("batch", [(), (4,), (3, 4)])
+def test_11_misfits_is_the_gaussian_log_likelihood_less_its_normalizer(name, batch):
+    """``log N(y | v, R) + Phi(v) == -1/2 (log det R + N log 2 pi)``, every row.
+
+    The normalized log-likelihood is ``Gaussian(y, R).log_density(v)``, by
+    the symmetry of the density in its point and its mean. This pins the two
+    layers to the same ``R`` and the same factor of 1/2, and the constant to
+    its closed form rather than merely to being constant.
+    """
+    noise_cov = _noise_operators()[name]
+    rng = np.random.default_rng(59)
+    y = jnp.asarray(rng.normal(size=6))
+    predictions = jnp.asarray(rng.normal(size=(*batch, 6)))
+    log_likelihood = Gaussian(y, noise_cov).log_density(predictions)
+    total = log_likelihood + misfits(y, predictions, noise_cov)
+    R = np.asarray(noise_cov.to_dense())
+    want = -0.5 * (np.linalg.slogdet(R)[1] + 6 * np.log(2.0 * np.pi))
+    assert total.shape == batch
+    assert np.abs(np.asarray(total) - want).max() < 1e-12 * abs(want)
 
 
 def test_11_the_centre_misfit_differs_from_the_mean_by_exactly_the_spread_term():

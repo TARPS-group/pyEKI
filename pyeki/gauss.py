@@ -543,6 +543,11 @@ class Gaussian:
         The core-shape check on ``x`` runs before anything is computed: a
         shorter ``x`` would otherwise broadcast against ``mean`` and return a
         finite, plausible, wrong number.
+
+        The density is symmetric in the point and the mean,
+        :math:`\\mathcal{N}(x \\mid m, C) = \\mathcal{N}(m \\mid x, C)`, so one
+        fixed vector is scored against a batch of candidate means by passing
+        the vector as ``mean`` and the batch as ``x``.
         """
         _check_not_vmap_family(self, "log_density")
         _require_cov_ops(self.cov, "whiten", "logdet")
