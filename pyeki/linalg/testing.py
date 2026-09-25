@@ -7,21 +7,25 @@ runs the individual checks below, which can also be called on their own.
 =================================  ===========================================
 function                           checks
 =================================  ===========================================
-:func:`check_core`                 ``matvec``/``rmatvec`` at batch rank
-                                   0, 1, 2; ``matmat``/``rmatmat`` batched
-                                   and unbatched
-:func:`check_transpose`            ``T`` matches the dense transpose, its
-                                   capabilities included
+:func:`check_core`                 ``matvec``/``rmatvec`` at batch shapes
+                                   ``()``, ``(1,)``, ``(n,)``, ``(2, n)``;
+                                   ``matmat``/``rmatmat`` at ``k`` of 1,
+                                   ``n`` and ``n + 1``
+:func:`check_transpose`            ``T`` and ``T.T`` match the dense form,
+                                   and are conforming operators themselves
 :func:`check_solve`                ``solve``/``solve_mat`` vs. the inverse
-:func:`check_factor`               ``factor()`` reproduces the operator
+:func:`check_factor`               ``factor()`` reproduces the operator and
+                                   is a conforming operator itself
 :func:`check_whiten`               ``whiten`` is a fixed valid whitener
 :func:`check_scalars`              ``diag`` and ``logdet``
 :func:`check_dense_independence`   ``to_dense`` does not route through matvec
-:func:`check_capabilities`         ``supports`` is honest in both directions
+:func:`check_capabilities`         ``supports`` is honest in both directions,
+                                   and a PSD type is symmetric PSD
 :func:`check_operand_validation`   wrong core shapes raise ``ValueError``
-:func:`check_pytree`               flatten round trip, sentinels, ``jit``,
-                                   ``vmap`` over operands and operators,
-                                   ``grad``
+:func:`check_pytree`               every operation after a flatten round
+                                   trip, under ``jit``, and under ``vmap``
+                                   over operands and operators; sentinels;
+                                   ``grad`` values
 :func:`check_repr`                 repr is type and shape, no array data
 :func:`check_arithmetic`           arithmetic dispatch and guided errors
 :func:`check_family`               ``batch_shape`` and family inertness
@@ -29,6 +33,12 @@ function                           checks
 
 Checks skip operations the operator does not claim to support; capability
 honesty itself is checked, so the same suite applies to every type.
+
+Every array an operation returns — ``to_dense`` and ``factor().to_dense()``
+included — must be a JAX array of a real floating dtype, and of the dtype of
+the dense reference it is compared with: float64 for an operator with
+float64 arrays applied to float64 operands. A NumPy array, a Python float or
+a single-precision result fails, even when its values are close.
 """
 from __future__ import annotations
 
@@ -60,22 +70,90 @@ __all__ = [
 ]
 
 _RTOL, _ATOL = 1e-9, 1e-9
+_LOGDET_TOL = 1e-10
 _MISSING = object()
 
 
+def _leaf_dtype(op: LinOp) -> np.dtype:
+    """The floating dtype an operator's dense form should have: that of its
+    inexact array leaves combined, or the default float for none."""
+    dtypes = [
+        jnp.result_type(leaf)
+        for leaf in jax.tree_util.tree_leaves(op)
+        if jnp.issubdtype(jnp.result_type(leaf), jnp.inexact)
+    ]
+    return np.dtype(jnp.result_type(*dtypes) if dtypes else jnp.result_type(float))
+
+
+def _check_output(got, what: str, dtype) -> None:
+    """Require a JAX array of a real floating dtype, equal to ``dtype``."""
+    assert isinstance(got, jax.Array), (
+        f"{what}: returned {type(got).__name__}, not a JAX array"
+    )
+    assert jnp.issubdtype(got.dtype, jnp.floating), (
+        f"{what}: dtype {got.dtype} is not a real floating dtype"
+    )
+    assert got.dtype == dtype, f"{what}: dtype {got.dtype}, expected {dtype}"
+
+
 def _ref(op: LinOp) -> np.ndarray:
-    return np.asarray(op.to_dense())
+    """The dense form, checked for type, dtype and shape."""
+    dense = op.to_dense()
+    _check_output(dense, f"{op!r}.to_dense", _leaf_dtype(op))
+    assert dense.shape == op.shape, f"{op!r}.to_dense: shape {dense.shape}"
+    return np.asarray(dense)
 
 
-def _close(got, want, what: str, rtol=_RTOL, atol=_ATOL) -> None:
+def _close_np(got, want, what: str, rtol=_RTOL, atol=_ATOL) -> None:
+    """Compare two arrays in value and shape only."""
     got, want = np.asarray(got), np.asarray(want)
     assert got.shape == want.shape, f"{what}: shape {got.shape} != {want.shape}"
     err = np.abs(got - want).max() if got.size else 0.0
     assert np.allclose(got, want, rtol=rtol, atol=atol), f"{what}: max abs err {err:.3e}"
 
 
-def _rand(key, shape) -> Array:
-    return jax.random.normal(key, shape, dtype=jnp.float64)
+def _close(got, want, what: str, rtol=_RTOL, atol=_ATOL) -> None:
+    """Compare an operation's output with a reference: ``got`` must be a JAX
+    array of the reference's dtype, and agree with it in shape and value."""
+    want = np.asarray(want)
+    _check_output(got, what, want.dtype)
+    _close_np(got, want, what, rtol=rtol, atol=atol)
+
+
+def _numpy_rng(key) -> np.random.Generator:
+    """A NumPy generator seeded from a JAX key, typed or raw.
+
+    Operands are drawn with NumPy because ``jax.random`` compiles a sampler
+    for every new operand shape, and the checks draw many shapes.
+    """
+    if jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
+        key = jax.random.key_data(key)
+    return np.random.default_rng(np.asarray(key, dtype=np.uint32).ravel().tolist())
+
+
+def _rand(rng: np.random.Generator, shape) -> Array:
+    return jnp.asarray(rng.standard_normal(shape))
+
+
+def _vec_batches(n: int) -> list[tuple[int, ...]]:
+    """Leading batch shapes for a vector operand whose core length is ``n``.
+
+    A batch axis of length ``n`` makes the operand square in its trailing
+    two axes, where contracting the wrong axis gives a wrong answer instead
+    of a shape error.
+    """
+    return list(dict.fromkeys([(), (1,), (n,), (2, n)]))
+
+
+def _mat_cases(n: int) -> list[tuple[tuple[int, ...], int]]:
+    """``(batch shape, k)`` pairs for a matrix operand with ``n`` rows.
+
+    ``k = 1`` catches squeezing; ``k = n`` makes the core square, where the
+    wrong contraction is silent.
+    """
+    return list(
+        dict.fromkeys((batch, k) for batch in [(), (2,)] for k in (1, n, n + 1))
+    )
 
 
 def _expect_raises(exc: type[Exception], fn, what: str) -> Exception:
@@ -94,82 +172,113 @@ def _expect_raises(exc: type[Exception], fn, what: str) -> Exception:
 def check_core(op: LinOp, key) -> None:
     """Check application and transposed application against the dense form.
 
-    ``matvec`` and ``rmatvec`` run at leading batch rank 0, 1 and 2 with a
-    distinct random operand per rank; ``matmat`` and ``rmatmat`` run batched
-    and unbatched. Varying the rank catches implementations that contract
-    the wrong axis, which are wrong without raising exactly when the
-    operator is square.
+    ``matvec`` and ``rmatvec`` run at leading batch shapes ``()``, ``(1,)``,
+    ``(n,)`` and ``(2, n)``, where ``n`` is the operand's core length, with
+    a distinct random operand for each. ``matmat`` and ``rmatmat`` run
+    batched and unbatched at ``k`` of 1, ``n`` and ``n + 1``. A batch or
+    column count equal to ``n`` catches implementations that contract the
+    wrong axis, which are wrong without raising exactly when the operand is
+    square in its trailing axes; ``k = 1`` catches squeezing.
     """
     A = _ref(op)
     n_out, n_in = op.shape
-    keys = jax.random.split(key, 10)
-    for i, batch in enumerate([(), (3,), (2, 3)]):
-        x = _rand(keys[i], (*batch, n_in))
+    rng = _numpy_rng(key)
+    for batch in _vec_batches(n_in):
+        x = _rand(rng, (*batch, n_in))
         want = np.einsum("ij,...j->...i", A, np.asarray(x))
         _close(op.matvec(x), want, f"{op!r}.matvec batch={batch}")
-        y = _rand(keys[3 + i], (*batch, n_out))
+    for batch in _vec_batches(n_out):
+        y = _rand(rng, (*batch, n_out))
         want = np.einsum("ij,...i->...j", A, np.asarray(y))
         _close(op.rmatvec(y), want, f"{op!r}.rmatvec batch={batch}")
-    for j, batch in enumerate([(), (2,)]):
-        X = _rand(keys[6 + j], (*batch, n_in, 4))
-        _close(op.matmat(X), A @ np.asarray(X), f"{op!r}.matmat batch={batch}")
-        Y = _rand(keys[8 + j], (*batch, n_out, 4))
-        _close(op.rmatmat(Y), A.T @ np.asarray(Y), f"{op!r}.rmatmat batch={batch}")
+    for batch, k in _mat_cases(n_in):
+        X = _rand(rng, (*batch, n_in, k))
+        _close(op.matmat(X), A @ np.asarray(X), f"{op!r}.matmat batch={batch} k={k}")
+    for batch, k in _mat_cases(n_out):
+        Y = _rand(rng, (*batch, n_out, k))
+        _close(
+            op.rmatmat(Y), A.T @ np.asarray(Y), f"{op!r}.rmatmat batch={batch} k={k}"
+        )
 
 
 def check_transpose(op: LinOp, key) -> None:
-    """Check ``T``: the dense transpose, full core behaviour, and ``T.T``.
+    """Check ``T`` and ``T.T``: the dense forms, and full behaviour of each.
 
-    The transpose is checked as an operator in its own right — core
-    behaviour, solve, scalars, and capability honesty — so a structured
-    ``T`` override cannot ship a broken ``solve`` or ``logdet`` behind a
-    correct dense form.
+    ``T`` must densify to the dense transpose and ``T.T`` to the operator's
+    own dense form. Each is then checked as an operator in its own right —
+    core behaviour, solve, scalars, and capability honesty — so a
+    structured ``T`` override cannot ship a broken ``solve`` or ``logdet``
+    behind a correct dense form. Either one that is the operator itself (as
+    ``T`` is for a PSD operator, and ``T.T`` for a ``Transposed`` view) is
+    not checked again here.
     """
     A = _ref(op)
     t = op.T
-    key_core, key_solve = jax.random.split(key)
+    tt = t.T
+    keys = jax.random.split(key, 4)
     _close(t.to_dense(), A.T, f"{op!r}.T.to_dense")
-    check_core(t, key_core)
-    check_solve(t, key_solve)
-    check_scalars(t)
-    check_capabilities(t)
-    _close(t.T.to_dense(), A, f"{op!r}.T.T.to_dense")
+    _close(tt.to_dense(), A, f"{op!r}.T.T.to_dense")
+    views = [t] if tt is t else [t, tt]
+    for view, (key_core, key_solve) in zip(views, (keys[:2], keys[2:]), strict=False):
+        if view is op:
+            continue
+        check_core(view, key_core)
+        check_solve(view, key_solve)
+        check_scalars(view)
+        check_capabilities(view)
 
 
 def check_solve(op: LinOp, key) -> None:
-    """Check ``solve`` at batch rank 0, 1, 2 and ``solve_mat``, when claimed."""
+    """Check ``solve`` and ``solve_mat`` against the dense inverse, when claimed.
+
+    Operands take the batch shapes and column counts of :func:`check_core`.
+    """
     if not (isinstance(op, SquareLinOp) and op.supports("solve")):
         return
     A = _ref(op)
     n = op.shape[0]
-    keys = jax.random.split(key, 5)
+    rng = _numpy_rng(key)
     inv = np.linalg.inv(A)
-    for i, batch in enumerate([(), (3,), (2, 3)]):
-        b = _rand(keys[i], (*batch, n))
+    for batch in _vec_batches(n):
+        b = _rand(rng, (*batch, n))
         want = np.einsum("ij,...j->...i", inv, np.asarray(b))
-        _close(op.solve(b), want, f"{op!r}.solve batch={batch}", rtol=1e-7, atol=1e-7)
-    for j, batch in enumerate([(), (2,)]):
-        B = _rand(keys[3 + j], (*batch, n, 4))
+        _close(op.solve(b), want, f"{op!r}.solve batch={batch}")
+    for batch, k in _mat_cases(n):
+        B = _rand(rng, (*batch, n, k))
         _close(
-            op.solve_mat(B),
-            np.linalg.solve(A, np.asarray(B)),
-            f"{op!r}.solve_mat batch={batch}",
-            rtol=1e-7,
-            atol=1e-7,
+            op.solve_mat(B), inv @ np.asarray(B), f"{op!r}.solve_mat batch={batch} k={k}"
         )
 
 
 def check_factor(op: LinOp, key) -> None:
-    """Check ``factor()``: ``L L^T`` reproduces the operator, and ``L`` is a
-    conforming operator in its own right (including ``rmatvec``)."""
+    """Check ``factor()``, when claimed: ``L L^T`` reproduces the operator,
+    and ``L`` passes every other check in this module.
+
+    Those are :func:`check_core`, :func:`check_transpose`,
+    :func:`check_solve`, :func:`check_whiten`, :func:`check_scalars`,
+    :func:`check_dense_independence`, :func:`check_capabilities`,
+    :func:`check_operand_validation` and :func:`check_pytree` — each of
+    which skips what ``L`` does not claim. :func:`check_factor` itself is
+    not applied to ``L``, since a factor may be its own factor.
+    """
     if not (isinstance(op, PSDLinOp) and op.supports("factor")):
         return
     A = _ref(op)
     L = op.factor()
+    assert isinstance(L, LinOp), f"{op!r}.factor returned {type(L).__name__}"
     assert L.shape[0] == op.shape[0], f"factor rows {L.shape[0]} != {op.shape[0]}"
     Ld = _ref(L)
-    _close(Ld @ Ld.T, A, f"{op!r}.factor: L L^T != A", rtol=1e-8, atol=1e-8)
-    check_core(L, key)
+    _close_np(Ld @ Ld.T, A, f"{op!r}.factor: L L^T != A", rtol=1e-8, atol=1e-8)
+    keys = jax.random.split(key, 5)
+    check_core(L, keys[0])
+    check_transpose(L, keys[1])
+    check_solve(L, keys[2])
+    check_whiten(L, keys[3])
+    check_scalars(L)
+    check_dense_independence(L)
+    check_capabilities(L)
+    check_operand_validation(L)
+    check_pytree(L, keys[4])
 
 
 def check_whiten(op: LinOp, key) -> None:
@@ -177,50 +286,53 @@ def check_whiten(op: LinOp, key) -> None:
 
     Recovers ``W`` by applying ``whiten`` to the columns of the identity,
     then requires ``W A W^T == I`` and *elementwise* agreement of
-    ``whiten(x)`` with ``W x`` at batch rank 0, 1 and 2 — which pins
-    linearity, per-instance fixedness, and rank behaviour at once.
-    ``whiten_mat`` is compared columnwise against ``whiten``, never against
-    any particular factorization, which the contract does not promise.
+    ``whiten(x)`` with ``W x`` at the batch shapes of :func:`check_core` —
+    which pins linearity, per-instance fixedness, and batch behaviour at
+    once. ``whiten_mat`` is compared columnwise against ``whiten``, never
+    against any particular factorization, which the contract does not
+    promise.
     """
     if not (isinstance(op, PSDLinOp) and op.supports("whiten")):
         return
     A = _ref(op)
     n = op.shape[0]
-    keys = jax.random.split(key, 5)
-    W = np.asarray(op.whiten(jnp.eye(n))).T  # row i of whiten(I) is W e_i
-    _close(W @ A @ W.T, np.eye(n), f"{op!r}.whiten: W A W^T != I", rtol=1e-7, atol=1e-7)
-    for i, batch in enumerate([(), (3,), (2, 3)]):
-        x = _rand(keys[i], (*batch, n))
+    rng = _numpy_rng(key)
+    identity_image = op.whiten(jnp.eye(n))
+    _check_output(identity_image, f"{op!r}.whiten", A.dtype)
+    W = np.asarray(identity_image).T  # row i of whiten(I) is W e_i
+    _close_np(W @ A @ W.T, np.eye(n), f"{op!r}.whiten: W A W^T != I")
+    for batch in _vec_batches(n):
+        x = _rand(rng, (*batch, n))
         want = np.einsum("ij,...j->...i", W, np.asarray(x))
+        _close(op.whiten(x), want, f"{op!r}.whiten batch={batch}")
+    for batch, k in _mat_cases(n):
+        X = _rand(rng, (*batch, n, k))
         _close(
-            op.whiten(x), want, f"{op!r}.whiten batch={batch}", rtol=1e-7, atol=1e-7
-        )
-    for j, batch in enumerate([(), (2,)]):
-        X = _rand(keys[3 + j], (*batch, n, 4))
-        _close(
-            op.whiten_mat(X),
-            W @ np.asarray(X),
-            f"{op!r}.whiten_mat batch={batch}",
-            rtol=1e-7,
-            atol=1e-7,
+            op.whiten_mat(X), W @ np.asarray(X), f"{op!r}.whiten_mat batch={batch} k={k}"
         )
 
 
 def check_scalars(op: LinOp) -> None:
     """Check ``diag`` and ``logdet`` against the dense reference, when claimed.
 
-    Also checks that ``logdet`` is a real 0-d JAX array, never a Python
-    float or a complex value.
+    ``logdet`` must be a real 0-d JAX array, never a Python float or a
+    complex value, and agree with the dense log-determinant to a relative
+    tolerance of ``1e-10``.
     """
     A = _ref(op)
     if isinstance(op, SquareLinOp) and op.supports("diag"):
         _close(op.diag(), np.diag(A), f"{op!r}.diag")
     if isinstance(op, SquareLinOp) and op.supports("logdet"):
         ld = op.logdet()
-        assert isinstance(ld, jnp.ndarray), "logdet must return a JAX array"
+        _check_output(ld, f"{op!r}.logdet", A.dtype)
         assert jnp.ndim(ld) == 0, "logdet must be 0-d"
-        assert not jnp.iscomplexobj(ld), "logdet must be real, not complex"
-        _close(ld, np.linalg.slogdet(A)[1], f"{op!r}.logdet", rtol=1e-7, atol=1e-7)
+        _close(
+            ld,
+            np.linalg.slogdet(A)[1],
+            f"{op!r}.logdet",
+            rtol=_LOGDET_TOL,
+            atol=_LOGDET_TOL,
+        )
 
 
 def check_dense_independence(op: LinOp) -> None:
@@ -293,12 +405,14 @@ _OPERATION_OPERANDS = {
 
 
 def check_capabilities(op: LinOp) -> None:
-    """Check that ``supports`` is honest in both directions.
+    """Check that ``supports`` and the operator's level are honest.
 
     Every supported operation runs without ``UnsupportedOpError``; every
     type-defined operation reported unsupported raises it; operations below
     the operator's level are absent from the type. An unknown name raises
-    ``ValueError``.
+    ``ValueError``. An operator at the PSD level must have a dense form
+    that is symmetric, to ``1e-10`` relative to its spectral norm, with no
+    eigenvalue below ``-1e-8`` times that norm.
     """
     n_out, n_in = op.shape
     for name, make_args in _OPERATION_OPERANDS.items():
@@ -326,6 +440,17 @@ def check_capabilities(op: LinOp) -> None:
     elif not isinstance(op, PSDLinOp):
         for name in psd_names:
             assert not hasattr(type(op), name), f"{op!r} defines below-level {name}"
+    else:
+        A = _ref(op)
+        scale = np.linalg.norm(A, 2)
+        asymmetry = np.abs(A - A.T).max()
+        assert asymmetry <= 1e-10 * scale, (
+            f"{op!r} is PSD-level but not symmetric: max |A - A^T| {asymmetry:.3e}"
+        )
+        lowest = np.linalg.eigvalsh((A + A.T) / 2).min()
+        assert lowest >= -1e-8 * scale, (
+            f"{op!r} is PSD-level but has eigenvalue {lowest:.3e}"
+        )
 
 
 def check_operand_validation(op: LinOp) -> None:
@@ -368,55 +493,187 @@ def check_operand_validation(op: LinOp) -> None:
         assert out.shape[-1] == 0
 
 
-def check_pytree(op: LinOp, key) -> None:
-    """Check pytree behaviour: round trip, sentinel tolerance, ``jit``,
-    ``vmap`` over operands and over the operator itself, and ``grad``.
+#: Every operation, as a function of the operator and its operands, and the
+#: core shape of each operand: "in"/"out" for a vector of length n_in/n_out,
+#: "in_mat"/"out_mat" for a matrix with that many rows.
+_OPERATIONS = {
+    "matvec": (lambda o, x: o.matvec(x), ("in",)),
+    "rmatvec": (lambda o, y: o.rmatvec(y), ("out",)),
+    "matmat": (lambda o, X: o.matmat(X), ("in_mat",)),
+    "rmatmat": (lambda o, Y: o.rmatmat(Y), ("out_mat",)),
+    "to_dense": (lambda o: o.to_dense(), ()),
+    "solve": (lambda o, b: o.solve(b), ("out",)),
+    "solve_mat": (lambda o, B: o.solve_mat(B), ("out_mat",)),
+    "logdet": (lambda o: o.logdet(), ()),
+    "diag": (lambda o: o.diag(), ()),
+    "factor": (lambda o: o.factor().to_dense(), ()),
+    "whiten": (lambda o, x: o.whiten(x), ("out",)),
+    "whiten_mat": (lambda o, X: o.whiten_mat(X), ("out_mat",)),
+}
 
-    The operator-batching check flattens the instance, stacks each leaf,
-    and reconstructs inside ``jax.vmap`` — exercising the vmap-exit
-    reconstruction, which bypasses the constructor. So does the sentinel
-    check: ``tree_unflatten`` with bare ``object()`` leaves must succeed
-    for every operator type, composites included.
+
+def _supported_operations(op: LinOp) -> dict:
+    return {
+        name: entry
+        for name, entry in _OPERATIONS.items()
+        if hasattr(type(op), name) and op.supports(name)
+    }
+
+
+def _draw_operands(op: LinOp, table: dict, rng: np.random.Generator) -> dict:
+    n_out, n_in = op.shape
+    shapes = {"in": (n_in,), "out": (n_out,), "in_mat": (n_in, 2), "out_mat": (n_out, 2)}
+    return {
+        name: tuple(_rand(rng, shapes[spec]) for spec in specs)
+        for name, (_, specs) in table.items()
+    }
+
+
+def _apply(o: LinOp, table: dict, operands: dict, what: str) -> dict:
+    """Run every operation in ``table``, turning any exception into an
+    ``AssertionError`` that names the operation and the context."""
+    out = {}
+    for name, (fn, _) in table.items():
+        try:
+            out[name] = fn(o, *operands[name])
+        except Exception as e:  # noqa: BLE001 - reported, not swallowed
+            raise AssertionError(
+                f"{what}: {name} raised {type(e).__name__}: {e}"
+            ) from e
+    return out
+
+
+def _compare(got: dict, want: dict, what: str) -> None:
+    for name in want:
+        _close(got[name], want[name], f"{what}: {name}")
+
+
+def check_pytree(op: LinOp, key, *, other: LinOp | None = None) -> None:
+    """Check pytree behaviour of every supported operation.
+
+    Each operation — the application methods, ``to_dense``, ``solve``,
+    ``solve_mat``, ``logdet``, ``diag``, ``factor().to_dense()``,
+    ``whiten`` and ``whiten_mat``, as supported — must give the eager
+    result on an instance rebuilt by a flatten round trip; under ``jit``,
+    with the operator passed as an argument rather than closed over; under
+    ``vmap`` over its operands, where it must agree with native batching;
+    and under ``vmap`` over a family of two operators, where it must agree
+    with a loop over the two. ``tree_unflatten`` with bare ``object()``
+    leaves must succeed. The gradients of ``y @ matvec(x)`` and
+    ``x @ rmatvec(y)`` with respect to the array leaves must equal the
+    gradient of ``y @ to_dense() @ x``, leaf by leaf.
+
+    Parameters
+    ----------
+    op
+        Instance to check.
+    key
+        JAX random key for the operands.
+    other
+        A second instance with the same pytree structure and leaf shapes
+        but different values, to make up the family with ``op``. If
+        omitted, the family is two copies of ``op``, which cannot expose an
+        operator that answers from something other than its leaves.
+
+    Raises
+    ------
+    AssertionError
+        On the first disagreement, or if any operation raises.
+
+    Notes
+    -----
+    The family is built by stacking leaves and reconstructing inside
+    ``jax.vmap``, which exercises the vmap-exit reconstruction; like the
+    sentinel check, that bypasses the constructor.
     """
     leaves, treedef = jax.tree_util.tree_flatten(op)
-    n_in = op.shape[1]
-    keys = jax.random.split(key, 3)
+    rng = _numpy_rng(key)
+    table = _supported_operations(op)
+    operands = _draw_operands(op, table, rng)
+    eager = _apply(op, table, operands, f"{op!r}")
 
     rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
     assert type(rebuilt) is type(op)
-    x = _rand(keys[0], (n_in,))
-    _close(rebuilt.matvec(x), op.matvec(x), f"{op!r} round-trip matvec")
+    _compare(
+        _apply(rebuilt, table, operands, f"{op!r} after a flatten round trip"),
+        eager,
+        f"{op!r} round trip",
+    )
 
     # JAX internals may unflatten with placeholder leaves; constructors must
     # tolerate them, composites included.
     jax.tree_util.tree_unflatten(treedef, [object()] * treedef.num_leaves)
 
-    _close(
-        jax.jit(lambda o, v: o.matvec(v))(op, x), op.matvec(x), f"{op!r} under jit"
-    )
+    jitted = jax.jit(lambda o, a: _apply(o, table, a, f"{op!r} under jit"))
+    _compare(jitted(op, operands), eager, f"{op!r} under jit")
 
-    xs = _rand(keys[1], (3, n_in))
-    _close(
-        jax.vmap(lambda v: op.matvec(v))(xs),
-        op.matvec(xs),
-        f"{op!r} vmap over operand agrees with native batching",
+    with_operands = {name: entry for name, entry in table.items() if entry[1]}
+    stacked = {
+        name: tuple(_rand(rng, (3, *a.shape)) for a in args)
+        for name, args in operands.items()
+        if name in with_operands
+    }
+    what = f"{op!r} under vmap over operands"
+    _compare(
+        jax.vmap(lambda a: _apply(op, with_operands, a, what))(stacked),
+        _apply(op, with_operands, stacked, f"{op!r} with batched operands"),
+        f"{what} vs. native batching",
     )
 
     if leaves:
-        stacked = [jnp.stack([leaf] * 3) for leaf in leaves]
+        second = op if other is None else other
+        other_leaves, other_treedef = jax.tree_util.tree_flatten(second)
+        assert other_treedef == treedef, (
+            f"other ({second!r}) has a different pytree structure or static "
+            f"metadata from {op!r}"
+        )
+        for a, b in zip(leaves, other_leaves, strict=True):
+            assert jnp.shape(a) == jnp.shape(b), (
+                f"other's leaf shape {jnp.shape(b)} != {jnp.shape(a)}"
+            )
         family = jax.vmap(
             lambda *ls: jax.tree_util.tree_unflatten(treedef, list(ls))
-        )(*stacked)
-        got = jax.vmap(lambda o, v: o.matvec(v))(family, xs)
-        want = np.stack([np.asarray(op.matvec(xs[i])) for i in range(3)])
-        _close(got, want, f"{op!r} vmap over the operator agrees with a loop")
+        )(*[jnp.stack([a, b]) for a, b in zip(leaves, other_leaves, strict=True)])
+        second_operands = _draw_operands(op, table, rng)
+        both = jax.tree_util.tree_map(
+            lambda a, b: jnp.stack([a, b]), operands, second_operands
+        )
+        want = jax.tree_util.tree_map(
+            lambda a, b: jnp.stack([a, b]),
+            eager,
+            _apply(second, table, second_operands, f"{second!r} (other)"),
+        )
+        what = f"{op!r} under vmap over the operator"
+        _compare(
+            jax.vmap(lambda o, a: _apply(o, table, a, what))(family, both),
+            want,
+            f"{what} vs. a loop",
+        )
 
-    float_leaves = any(
-        jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) for leaf in leaves
-    )
-    if float_leaves:
-        g = jax.grad(lambda o: jnp.sum(o.matvec(x)), allow_int=True)(op)
-        assert jax.tree_util.tree_structure(g) == treedef
+    if any(jnp.issubdtype(jnp.result_type(leaf), jnp.inexact) for leaf in leaves):
+        n_out, n_in = op.shape
+        x, y = _rand(rng, (n_in,)), _rand(rng, (n_out,))
+        via_dense = jax.grad(
+            lambda o: jnp.dot(y, jnp.dot(o.to_dense(), x)), allow_int=True
+        )(op)
+        for name, scalar in (
+            ("matvec", lambda o: jnp.dot(y, o.matvec(x))),
+            ("rmatvec", lambda o: jnp.dot(x, o.rmatvec(y))),
+        ):
+            g = jax.grad(scalar, allow_int=True)(op)
+            assert jax.tree_util.tree_structure(g) == treedef
+            for (path, got), want_leaf in zip(
+                jax.tree_util.tree_leaves_with_path(g),
+                jax.tree_util.tree_leaves(via_dense),
+                strict=True,
+            ):
+                if jnp.issubdtype(got.dtype, jnp.inexact):
+                    _close(
+                        got,
+                        want_leaf,
+                        f"{op!r} grad of {name} wrt "
+                        f"{jax.tree_util.keystr(path)} vs. via to_dense",
+                    )
 
 
 def check_repr(op: LinOp) -> None:
@@ -520,7 +777,7 @@ def check_family(op: LinOp) -> None:
         assert "vmap" in str(e), str(e)
 
 
-def check_operator(op: LinOp, *, seed: int = 0) -> None:
+def check_operator(op: LinOp, *, seed: int = 0, other: LinOp | None = None) -> None:
     """Run every conformance check against one operator instance.
 
     Parameters
@@ -529,6 +786,11 @@ def check_operator(op: LinOp, *, seed: int = 0) -> None:
         Instance to check. Should be small enough to densify.
     seed
         Seed for the random test operands; each check draws its own keys.
+    other
+        Optional second instance of the same type, with the same pytree
+        structure and leaf shapes but different values. :func:`check_pytree`
+        then applies a family made of ``op`` and ``other`` under
+        ``jax.vmap``, instead of a family of copies of ``op``.
 
     Raises
     ------
@@ -545,7 +807,7 @@ def check_operator(op: LinOp, *, seed: int = 0) -> None:
     check_dense_independence(op)
     check_capabilities(op)
     check_operand_validation(op)
-    check_pytree(op, keys[5])
+    check_pytree(op, keys[5], other=other)
     check_repr(op)
     check_arithmetic(op)
     check_family(op)
