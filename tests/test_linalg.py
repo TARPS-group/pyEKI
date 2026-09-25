@@ -398,6 +398,56 @@ def test_psd_low_rank_factor_finiteness_is_a_debug_check():
         assert jax.jit(lambda F: PSDLowRank(F).diag())(nan_factor).shape == (4,)
 
 
+def test_dense_psd_given_the_matrix_instead_of_its_factor():
+    """DensePSD stores the Cholesky factor. Handed the covariance itself as
+    ``L`` it constructs, and every operation is silently wrong — and not even
+    consistently wrong: matvec multiplies out the whole array, so the operator
+    applies C @ C, while solve, whiten and logdet read only its lower
+    triangle, a third matrix.
+
+    ``L`` is keyword-only, so the natural positional spelling ``DensePSD(C)``
+    always raises. Spelled ``DensePSD(L=C)``, only debug checks can catch it,
+    since the check is on values.
+    """
+    C = jnp.asarray(_psd(3))
+    x = jnp.asarray(RNG.normal(size=3))
+
+    with pytest.raises(TypeError):
+        DensePSD(C)
+
+    # off by default: constructs, and disagrees with from_matrix
+    wrong = DensePSD(L=C)
+    np.testing.assert_allclose(wrong.to_dense(), C @ C)
+    assert not np.allclose(wrong.solve(wrong.matvec(x)), x)
+    assert not np.isclose(wrong.logdet(), DensePSD.from_matrix(C).logdet())
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="DensePSD.from_matrix"):
+            DensePSD(L=C)
+        # a triangular factor with a nonpositive diagonal is not a Cholesky
+        # factor, and makes logdet nan
+        with pytest.raises(ValueError, match="strictly positive diagonal"):
+            DensePSD(L=jnp.diag(jnp.asarray([1.0, -1.0, 1.0])))
+        DensePSD(L=jnp.linalg.cholesky(C))  # the factor itself still constructs
+
+    # tracers are exempt, as everywhere in tier 4
+    with debug_checks(True):
+        assert jax.jit(lambda M: DensePSD(L=M).logdet())(C).shape == ()
+
+
+def test_triangular_rejects_entries_outside_its_triangle():
+    """Triangular.solve reads only the declared triangle, so an entry outside
+    it is silently ignored by solve yet used by matvec."""
+    L = jnp.asarray(np.tril(RNG.normal(size=(3, 3))) + 3.0 * np.eye(3))
+    with debug_checks(True):
+        Triangular(L, lower=True)
+        Triangular(L.T, lower=False)
+        with pytest.raises(ValueError, match="Triangular.L must be lower"):
+            Triangular(L.T, lower=True)
+        with pytest.raises(ValueError, match="Triangular.L must be upper"):
+            Triangular(L, lower=False)
+
+
 # ---------------------------------------------------------------------------
 # operand and constructor validation
 # ---------------------------------------------------------------------------

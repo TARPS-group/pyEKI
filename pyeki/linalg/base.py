@@ -426,6 +426,30 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
         )
 
 
+def _check_triangular(
+    cls_name: str, field_name: str, value, *, lower: bool, hint: str = ""
+) -> None:
+    """Debug check that a stored square-matrix field is triangular.
+
+    ``lower`` selects the triangle that may be nonzero; entries outside it
+    must be zero to within ``jnp.allclose``. ``hint``, if given, is appended
+    to the error message. A :func:`value_check`, so it runs only when debug
+    checks are enabled and never under a trace.
+    """
+    side = "lower" if lower else "upper"
+    message = (
+        f"{cls_name}.{field_name} must be {side} triangular, but has nonzero "
+        f"entries outside that triangle"
+    )
+    value_check(
+        value,
+        lambda mat: bool(
+            jnp.allclose(mat, jnp.tril(mat) if lower else jnp.triu(mat))
+        ),
+        f"{message}. {hint}" if hint else message,
+    )
+
+
 def _construct_unchecked(cls: type, **fields):
     """Build an operator instance without running ``__init__``.
 

@@ -32,6 +32,8 @@ discarded.
 """
 from __future__ import annotations
 
+from dataclasses import field
+
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -42,6 +44,7 @@ from .base import (
     SquareLinOp,
     _broadcast_batch,
     _check_core_rank,
+    _check_triangular,
     _construct_unchecked,
     dense_matvec,
     linop,
@@ -379,13 +382,7 @@ class Triangular(SquareLinOp):
             raise TypeError(
                 f"Triangular.lower must be a bool, got {type(self.lower).__name__}"
             )
-        value_check(
-            self.L,
-            lambda mat: bool(
-                jnp.allclose(mat, jnp.tril(mat) if self.lower else jnp.triu(mat))
-            ),
-            "Triangular.L has nonzero entries outside its declared triangle",
-        )
+        _check_triangular("Triangular", "L", self.L, lower=self.lower)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -444,10 +441,13 @@ class DensePSD(PSDLinOp):
     Parameters
     ----------
     L
-        Lower Cholesky factor, satisfying ``L @ L.T`` equals the matrix.
+        Lower Cholesky factor of the matrix, keyword-only: lower triangular
+        with a strictly positive diagonal, and ``L @ L.T`` equal to the
+        matrix. Passing the matrix itself gives an operator for a different
+        matrix, without raising unless debug checks are enabled.
     """
 
-    L: Array
+    L: Array = field(kw_only=True)
 
     def __post_init__(self) -> None:
         _check_square_field("DensePSD", "L", self.L)
@@ -456,6 +456,20 @@ class DensePSD(PSDLinOp):
             lambda mat: bool(jnp.all(jnp.isfinite(mat))),
             "DensePSD.L must be finite; a nan factor means the matrix was not "
             "positive definite",
+        )
+        _check_triangular(
+            "DensePSD",
+            "L",
+            self.L,
+            lower=True,
+            hint="Pass the Cholesky factor, or build from the matrix itself "
+            "with DensePSD.from_matrix.",
+        )
+        value_check(
+            self.L,
+            lambda mat: bool(jnp.all(jnp.diagonal(mat) > 0)),
+            "DensePSD.L must have a strictly positive diagonal, as a Cholesky "
+            "factor does",
         )
 
     @classmethod
@@ -473,7 +487,7 @@ class DensePSD(PSDLinOp):
             lambda M: bool(jnp.allclose(M, M.swapaxes(-1, -2))),
             "DensePSD.from_matrix: matrix must be symmetric",
         )
-        return cls(jnp.linalg.cholesky(A))
+        return cls(L=jnp.linalg.cholesky(A))
 
     @property
     def shape(self) -> tuple[int, int]:
