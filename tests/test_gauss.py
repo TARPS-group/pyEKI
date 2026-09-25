@@ -182,7 +182,9 @@ class CountingWhitenPSD(PSDLinOp):
     """A whitening operator that records how many vectors it has whitened.
 
     The count is a plain Python list on the instance rather than a field, so
-    it stays invisible to the pytree machinery. Eager use only.
+    it stays invisible to the pytree machinery. Only the instance built by
+    :meth:`counting` counts; a copy rebuilt from its pytree has no list, and
+    whitens without counting.
     """
 
     L: Array
@@ -203,9 +205,9 @@ class CountingWhitenPSD(PSDLinOp):
         return self.L @ self.L.swapaxes(-1, -2)
 
     def _whiten(self, x: Array) -> Array:
-        object.__getattribute__(self, "log").append(
-            1 if x.ndim == 1 else int(np.prod(x.shape[:-1]))
-        )
+        log = self.__dict__.get("log")
+        if log is not None:
+            log.append(1 if x.ndim == 1 else int(np.prod(x.shape[:-1])))
         return tri_solve(self.L, x, lower=True)
 
     @classmethod
