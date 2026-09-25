@@ -426,6 +426,35 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
         )
 
 
+def _check_real(cls_name: str, field_name: str, value) -> None:
+    """Reject an array field whose dtype is not real: complex or boolean.
+
+    A dtype is static, so this runs always, under ``jit`` included. Values
+    without a ``dtype`` pass untouched.
+    """
+    dtype = getattr(value, "dtype", None)
+    if dtype is None:
+        return
+    if not (jnp.issubdtype(dtype, jnp.floating) or jnp.issubdtype(dtype, jnp.integer)):
+        raise TypeError(
+            f"{cls_name}.{field_name} must be real, got dtype {dtype}"
+        )
+
+
+def _check_not_family(cls_name: str, op) -> None:
+    """Reject a vmapped family passed as a composite's child operator.
+
+    Inside ``jax.vmap`` the child is presented unbatched and passes; a family
+    reaching a constructor outside ``vmap`` would build an inert wrapper
+    with mixed batching.
+    """
+    if isinstance(op, LinOp) and op.batch_shape != ():
+        raise ValueError(
+            f"{cls_name}: {op!r} is a vmapped family; build the composite "
+            f"inside jax.vmap, from one member at a time"
+        )
+
+
 def _check_finite(
     cls_name: str, field_name: str, value, *, hint: str = ""
 ) -> None:
@@ -497,7 +526,12 @@ def _broadcast_batch(op_type: str, *shapes) -> tuple[int, ...]:
 
 
 def _as_scalar(op: LinOp, c) -> Array:
-    """Convert a scaling factor to a 0-d array, rejecting non-scalars."""
+    """Convert a scaling factor to a real 0-d array of at least float64.
+
+    Rejects non-scalars, and complex or boolean scalars. The promotion keeps
+    a low-precision scalar — ``np.float16(0.1)``, say — from pulling every
+    scaled operation down to its precision.
+    """
     arr = jnp.asarray(c)
     if arr.ndim != 0:
         raise TypeError(
@@ -505,20 +539,28 @@ def _as_scalar(op: LinOp, c) -> Array:
             f"{arr.shape}. For per-coordinate scaling of a PSD operator, "
             f"use diag_congruence()."
         )
-    return arr
+    _check_real(type(op).__name__, "scalar", arr)
+    return arr.astype(jnp.promote_types(arr.dtype, jnp.float64))
 
 
 def _scale(op: LinOp, c: Array) -> LinOp:
-    """Build the scaled composite matching ``op``'s hierarchy level."""
+    """Build the scaled composite matching ``op``'s hierarchy level.
+
+    Nested scalings fold into a single wrapper at the level of the outer
+    one, never of the operator inside it: a :class:`~.composite.SquareScaled`
+    of a PSD operator, which may hold a negative scalar, stays square.
+    """
     from .composite import PSDScaled, Scaled, SquareScaled
 
-    if isinstance(op, Scaled):  # fold nested scalings into a single wrapper
-        return _scale(op.op, op.c * c)
     if isinstance(op, PSDLinOp):
-        return PSDScaled(op, c)
-    if isinstance(op, SquareLinOp):
-        return SquareScaled(op, c)
-    return Scaled(op, c)
+        cls = PSDScaled
+    elif isinstance(op, SquareLinOp):
+        cls = SquareScaled
+    else:
+        cls = Scaled
+    if isinstance(op, Scaled):
+        return cls(op.op, op.c * c)
+    return cls(op, c)
 
 
 # ---------------------------------------------------------------------------
@@ -877,8 +919,8 @@ class LinOp(abc.ABC):
         Raises
         ------
         TypeError
-            If ``c`` is an array with one or more axes, or another
-            operator (composition is ``@``).
+            If ``c`` is an array with one or more axes, is complex or
+            boolean, or is another operator (composition is ``@``).
         ValueError
             If this operator is a vmapped family.
         """
@@ -894,13 +936,17 @@ class LinOp(abc.ABC):
     def __truediv__(self, c):
         """Scale by the reciprocal of a scalar: ``op / c`` represents ``A / c``.
 
-        Accepts, returns, and raises exactly as ``op * (1 / c)`` — see
-        :meth:`__mul__`.
+        Accepts, returns, and raises as ``op * (1 / c)`` — see
+        :meth:`__mul__` — except that a zero ``c`` does not raise
+        ``ZeroDivisionError``: it gives an infinite scalar, which debug mode
+        rejects.
         """
         self._check_not_vmap_family("__truediv__")
         if isinstance(c, LinOp):
             raise TypeError("op1 / op2 is not defined.")
-        return _scale(self, 1.0 / _as_scalar(self, c))
+        c = _as_scalar(self, c)
+        value_check(c, lambda a: bool(a != 0), f"{self!r} / c: c must be nonzero")
+        return _scale(self, 1.0 / c)
 
     def __repr__(self) -> str:
         """Return the type name and shape, as ``Dense(4, 6)``.
@@ -942,9 +988,10 @@ class SquareLinOp(LinOp):
     def solve(self, b) -> Array:
         """Solve ``A x = b`` for a batch of right-hand sides.
 
-        An exact direct solve; the operator must be nonsingular (a value
-        precondition — a singular operator yields non-finite results rather
-        than an error, except in debug mode).
+        An exact direct solve; the operator must be nonsingular. This is a
+        value precondition: a singular or nearly singular operator gives
+        non-finite or silently inaccurate results rather than an error,
+        except where debug mode checks it at construction.
 
         Parameters
         ----------
@@ -1005,7 +1052,9 @@ class SquareLinOp(LinOp):
             A 0-d real JAX array — never a Python float, which would fail
             on a tracer under ``jit``. The absolute value matters only for
             non-PSD operators and matches ``slogdet``'s magnitude
-            convention; a singular operator yields ``-inf``.
+            convention. A singular operator yields ``-inf``, ``nan``, or —
+            when rounding leaves a tiny nonzero pivot — a large negative
+            finite value.
 
         Raises
         ------

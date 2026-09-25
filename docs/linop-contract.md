@@ -243,7 +243,11 @@ operation, the batch shape, and the remedy — apply the family under
 `jax.vmap`. (Operations below the operator's level stay absent from the
 type and raise `AttributeError`, as always.) The arithmetic dunders are
 guarded the same way, on either operand: scaling or composing a family
-raises rather than building an inert wrapper. This *family guard* runs
+raises rather than building an inert wrapper. So are the composite
+constructors and factories (`product`, `block_diag`, `hstack`,
+`diag_congruence`, and the scaled classes built directly), which reject a
+family child; the `Transposed` view is the one composite a family may
+wrap. This *family guard* runs
 before the capability gate, which runs before operand validation.
 Introspection stays available, because introspection is how a family is
 recognized: `shape` (the core shape), `n`, `batch_shape`, `supports`,
@@ -1002,15 +1006,20 @@ Requirements:
   role — so scaling a `PSDLinOp` yields a `PSDLinOp`, and scaling a
   factor yields a plain `LinOp`.
 - The dunders accept Python and NumPy real scalars and 0-d arrays,
-  converting to a 0-d `jnp` array before storing; anything with
-  `ndim > 0` gets the guided error below.
+  converting to a 0-d `jnp` array of at least float64 before storing, so a
+  low-precision scalar cannot pull the scaled operations down to its
+  precision. Complex and boolean scalars are a `TypeError`, since a dtype
+  is static; anything with `ndim > 0` gets the guided error below.
 - Scaling an already-scaled operator folds the scalars into a single
-  wrapper rather than nesting. The repr follows the composite rule (type
-  and shape).
-- Value preconditions are tier 4 ({ref}`contract-validation`): $c > 0$
-  when the operand is PSD (a traced sign cannot be checked eagerly),
-  $c \ne 0$ when `solve` is used. Violations produce `nan`, or an error
-  in debug mode, like every other value precondition.
+  wrapper rather than nesting, at the level of the **outer** wrapper: a
+  `SquareScaled` of a PSD operator, which may hold a negative scalar,
+  stays a `SquareScaled` when scaled again. The repr follows the composite
+  rule (type and shape).
+- Value preconditions are tier 4 ({ref}`contract-validation`): $c$ finite
+  always, $c > 0$ when the operand is PSD (a traced sign cannot be checked
+  eagerly), $c \ne 0$ when `solve` is used, and a nonzero divisor for
+  `op / c`, checked before the reciprocal is taken. Violations produce
+  `nan`, or an error in debug mode, like every other value precondition.
 - Only true scalars scale: `array * op` for a non-0-d array is a guided
   `TypeError`, for the same reason `@` rejects arrays — elementwise and
   batched readings would be ambiguous.

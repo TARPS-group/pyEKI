@@ -43,6 +43,9 @@ from .base import (
     SquareLinOp,
     _broadcast_batch,
     _check_core_rank,
+    _check_finite,
+    _check_not_family,
+    _check_real,
     linop,
     value_check,
 )
@@ -77,6 +80,7 @@ def _check_ops_tuple(cls_name: str, field_name: str, ops, required=LinOp) -> Non
                 f"{cls_name} blocks must be {required.__name__}, "
                 f"got {type(op).__name__}"
             )
+        _check_not_family(cls_name, op)
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +165,13 @@ class Scaled(LinOp):
     c: Array
 
     def __post_init__(self) -> None:
+        name = type(self).__name__
         if not isinstance(self.op, LinOp):
             raise TypeError(f"Scaled wraps a LinOp, got {type(self.op).__name__}")
-        _check_core_rank("Scaled", "c", self.c, 0)
+        _check_not_family(name, self.op)
+        _check_core_rank(name, "c", self.c, 0)
+        _check_real(name, "c", self.c)
+        _check_finite(name, "c", self.c)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -548,7 +556,10 @@ class PSDDiagCongruence(PSDLinOp):
             raise TypeError(
                 f"PSDDiagCongruence wraps a PSDLinOp, got {type(self.op).__name__}"
             )
+        _check_not_family("PSDDiagCongruence", self.op)
         _check_core_rank("PSDDiagCongruence", "scale", self.scale, 1)
+        _check_real("PSDDiagCongruence", "scale", self.scale)
+        _check_finite("PSDDiagCongruence", "scale", self.scale)
         if getattr(self.scale, "ndim", None) is not None:
             if self.scale.shape[-1] != self.op.shape[0]:
                 raise ValueError(

@@ -1021,3 +1021,113 @@ def test_value_checks_do_not_raise_from_inside_a_trace():
             PSDLowRank(jnp.full((3, 2), jnp.nan))
         with pytest.raises(ValueError, match="strictly positive"):
             PSDDiagonal(jnp.asarray([1.0, -1.0, 1.0]))
+
+
+# ---------------------------------------------------------------------------
+# scalars, composites and families: silent failure paths
+# ---------------------------------------------------------------------------
+
+
+def test_rescaling_keeps_the_level_of_the_outer_scaling():
+    """Folding nested scalings once took its level from the operator inside,
+    not from the wrapper. A SquareScaled of a PSD operator may legitimately
+    hold a negative scalar; multiplying it by +2 turned it into a PSDScaled
+    with c = -2, whose whiten and factor were nan without raising."""
+    P = DensePSD(jnp.asarray(_psd(3)))
+    neg = SquareScaled(P, jnp.asarray(-1.0))
+    for scaled in (2.0 * neg, neg / 0.5):
+        assert type(scaled) is SquareScaled
+        assert not scaled.supports("whiten")
+        np.testing.assert_allclose(scaled.to_dense(), -2.0 * P.to_dense())
+    assert type(Scaled(P, jnp.asarray(-1.0)) * 3.0) is Scaled
+    # same-level folding is unchanged: one wrapper, product of the scalars
+    folded = 3.0 * (2.0 * P)
+    assert type(folded) is PSDScaled and folded.op is P
+    np.testing.assert_allclose(folded.c, 6.0)
+
+
+def test_scalars_are_promoted_to_float64():
+    """A low-precision scalar was stored at its own dtype, so every scaled
+    operation ran at that precision: logdet of Identity(100) * float16(0.1)
+    was off by 0.08."""
+    c = np.float16(0.1)
+    exact = 100 * np.log(np.float64(c))
+    for op in (Identity(100) * c, Identity(100) / np.float16(1 / 0.1)):
+        assert op.c.dtype == jnp.float64
+    np.testing.assert_allclose((Identity(100) * c).logdet(), exact, rtol=1e-14)
+    np.testing.assert_allclose(
+        (Identity(3) / np.float16(3.0)).solve(jnp.ones(3)), 3.0, rtol=1e-14
+    )
+
+
+def test_complex_and_boolean_scalars_are_rejected():
+    """Complex scalars built complex "PSD" operators, and debug mode passed
+    them: JAX orders complex numbers lexicographically, so 1j > 0 is True."""
+    P = DensePSD(jnp.asarray(_psd(2)))
+    for bad in (1j, 0.5 - 3j, True, jnp.asarray(1j)):
+        with pytest.raises(TypeError, match="must be real"):
+            P * bad
+    with pytest.raises(TypeError, match="must be real"):
+        PSDScaled(P, jnp.asarray(2.0 + 0j))
+    with pytest.raises(TypeError, match="must be real"):
+        diag_congruence(P, jnp.asarray([1j, 1.0]))
+    with pytest.raises(TypeError, match="must be real"):
+        PSDDiagonal(jnp.asarray([1.0 + 100j, 2.0]))
+
+
+def test_debug_checks_reject_zero_and_non_finite_scalars():
+    """Dividing by zero took the reciprocal first, and inf passed both the
+    nonzero and the positive check: P / 0 constructed in debug mode, and its
+    solve returned zeros."""
+    P = DensePSD(jnp.asarray(_psd(2)))
+    Q = DenseSquare(jnp.asarray(RNG.normal(size=(2, 2)) + 3.0 * np.eye(2)))
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="nonzero"):
+            P / 0
+        with pytest.raises(ValueError, match="must be finite"):
+            P * jnp.inf
+        with pytest.raises(ValueError, match="must be finite"):
+            Q * jnp.nan
+        with pytest.raises(ValueError, match="must be finite"):
+            Dense(jnp.ones((2, 3))) * jnp.inf
+        with pytest.raises(ValueError, match="must be finite"):
+            PSDDiagonal(jnp.asarray([jnp.inf, 2.0]))
+        with pytest.raises(ValueError, match="Triangular.L must be finite"):
+            Triangular(jnp.asarray([[1.0, 0.0], [jnp.nan, 1.0]]))
+    # a traced divisor is exempt, as every value check is
+    with debug_checks(True):
+        assert jax.jit(lambda c: (P / c).logdet())(jnp.asarray(2.0)).shape == ()
+
+
+def test_composites_reject_vmapped_family_children():
+    """The contract says composing a family raises. `A @ family` did, but
+    product(), block_diag(), hstack(), diag_congruence() and direct
+    construction built an inert wrapper with mixed batching."""
+    family = jax.vmap(PSDDiagonal)(jnp.ones((4, 2)))
+    P = DensePSD(jnp.asarray(_psd(2)))
+    builders = [
+        lambda: product(family, Dense(jnp.ones((2, 3)))),
+        lambda: block_diag(family, P),
+        lambda: hstack(family, Dense(jnp.ones((2, 1)))),
+        lambda: diag_congruence(family, jnp.ones(2)),
+        lambda: Scaled(family, jnp.asarray(2.0)),
+    ]
+    for build in builders:
+        with pytest.raises(ValueError, match="vmapped family"):
+            build()
+    # building inside vmap is the supported route, and T of a family is a view
+    inside = jax.vmap(lambda d: block_diag(PSDDiagonal(d), P))(jnp.ones((4, 2)))
+    assert inside.batch_shape == (4,)
+    assert family.T.batch_shape == (4,)
+
+
+def test_debug_check_catches_a_singular_dense_square_with_a_rounded_pivot():
+    """An exactly singular matrix rarely gives an exactly zero pivot: for
+    [[1, 2, 3], [4, 5, 6], [7, 8, 9]] it is about 1e-16, so the check that
+    pivots are nonzero passed, and logdet returned a finite -34.6."""
+    singular = jnp.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="singular"):
+            DenseSquare(singular)
+        # ill-conditioned but not singular
+        DenseSquare(jnp.asarray(np.diag([1e-6, 1.0, 1e6])))
