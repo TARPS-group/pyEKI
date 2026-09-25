@@ -2546,6 +2546,8 @@ directly, and a caller driving the phases by hand needs it.
 | helper | signature | returns |
 | ------ | --------- | ------- |
 | `misfits(y, predictions, noise_cov)` | `(N,), (..., N), PSDLinOp -> (...)` | $\tfrac12\lVert W(y - v)\rVert^2$, batched per the operator layer's contract |
+| `effective_sample_size(misfits, increment)` | `(J,), scalar -> 0-d` | $\mathrm{ESS}$ of $e^{-\delta\Phi}$, computed in log space |
+| `repair_failed_members(*, ensemble, predictions, valid)` | `(J,P), (J,N), (J,) bool -> (J,P), (J,N)` | the mean-preserving repair of {ref}`eki-failures` |
 
 `misfits` and {attr}`Evaluation.misfits` are deliberately the same name for the
 same quantity, and the conformance suite asserts they agree: the free function
@@ -2554,8 +2556,12 @@ and the property is how a policy reads it inside one. "Whitened" is not in
 either name — the misfit is defined as the whitened quadratic form, so there is
 no unwhitened one to distinguish it from, and the word would attach to the
 misfit rather than to the residual it actually describes.
-| `effective_sample_size(misfits, increment)` | `(J,), scalar -> 0-d` | $\mathrm{ESS}$ of $e^{-\delta\Phi}$, computed in log space |
-| `repair_failed_members(*, ensemble, predictions, valid)` | `(J,P), (J,N), (J,) bool -> (J,P), (J,N)` | the mean-preserving repair of {ref}`eki-failures` |
+
+There is deliberately no normalized log-likelihood helper beside it. That
+value is `Gaussian(y, noise_cov).log_density(predictions)`, by the symmetry of
+the density in its point and its mean, and it differs from $-\Phi$ by exactly
+$\tfrac12(\log\det R + N\log 2\pi)$ at every batch rank; the test suite pins
+the identity for each noise structure.
 
 `repair_failed_members` is **keyword-only** for the reason
 {ref}`eki-updates` gives for the update protocol: its first two arguments are

@@ -85,6 +85,18 @@ def misfits(y, predictions, noise_cov) -> Array:
     tempered likelihood and :math:`2\\overline{\\Phi} \\approx N` the
     well-specified-fit benchmark. Halving or doubling it silently rescales
     every schedule parameter in the layer.
+
+    With it, the misfit is the Gaussian negative log-likelihood up to a
+    constant that does not depend on :math:`v`:
+
+    .. math::
+
+        \\log \\mathcal{N}(y \\mid v, R)
+        \\;=\\; -\\Phi(v) - \\tfrac12\\bigl(\\log\\det R + N \\log 2\\pi\\bigr) .
+
+    The normalized value is ``Gaussian(y, noise_cov).log_density(predictions)``
+    (:meth:`pyeki.gauss.Gaussian.log_density`), batched the same way; it
+    additionally requires ``noise_cov`` to support ``logdet``.
     """
     if not isinstance(noise_cov, PSDLinOp):
         raise TypeError(
