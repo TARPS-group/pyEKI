@@ -183,7 +183,9 @@ along. `k` is part of the core shape, never a batch axis.
   Rank-dependent bugs (a reshape that hard-codes one batch axis, a
   reduction over the wrong axis) are the layer's most dangerous class of
   defect because they produce wrong numbers without raising; the
-  conformance suite tests all three ranks for this reason.
+  conformance suite tests all three ranks for this reason, including a
+  batch whose size equals the contracted size, where contracting the
+  wrong axis is shape-valid.
 
 (contract-batching-operators)=
 ### Batching over operators
@@ -243,7 +245,11 @@ operation, the batch shape, and the remedy — apply the family under
 `jax.vmap`. (Operations below the operator's level stay absent from the
 type and raise `AttributeError`, as always.) The arithmetic dunders are
 guarded the same way, on either operand: scaling or composing a family
-raises rather than building an inert wrapper. This *family guard* runs
+raises rather than building an inert wrapper. So are the composite
+constructors and factories (`product`, `block_diag`, `hstack`,
+`diag_congruence`, and the scaled classes built directly), which reject a
+family child; the `Transposed` view is the one composite a family may
+wrap. This *family guard* runs
 before the capability gate, which runs before operand validation.
 Introspection stays available, because introspection is how a family is
 recognized: `shape` (the core shape), `n`, `batch_shape`, `supports`,
@@ -1002,15 +1008,20 @@ Requirements:
   role — so scaling a `PSDLinOp` yields a `PSDLinOp`, and scaling a
   factor yields a plain `LinOp`.
 - The dunders accept Python and NumPy real scalars and 0-d arrays,
-  converting to a 0-d `jnp` array before storing; anything with
-  `ndim > 0` gets the guided error below.
+  converting to a 0-d `jnp` array of at least float64 before storing, so a
+  low-precision scalar cannot pull the scaled operations down to its
+  precision. Complex and boolean scalars are a `TypeError`, since a dtype
+  is static; anything with `ndim > 0` gets the guided error below.
 - Scaling an already-scaled operator folds the scalars into a single
-  wrapper rather than nesting. The repr follows the composite rule (type
-  and shape).
-- Value preconditions are tier 4 ({ref}`contract-validation`): $c > 0$
-  when the operand is PSD (a traced sign cannot be checked eagerly),
-  $c \ne 0$ when `solve` is used. Violations produce `nan`, or an error
-  in debug mode, like every other value precondition.
+  wrapper rather than nesting, at the level of the **outer** wrapper: a
+  `SquareScaled` of a PSD operator, which may hold a negative scalar,
+  stays a `SquareScaled` when scaled again. The repr follows the composite
+  rule (type and shape).
+- Value preconditions are tier 4 ({ref}`contract-validation`): $c$ finite
+  always, $c > 0$ when the operand is PSD (a traced sign cannot be checked
+  eagerly), $c \ne 0$ when `solve` is used, and a nonzero divisor for
+  `op / c`, checked before the reciprocal is taken. Violations produce
+  `nan`, or an error in debug mode, like every other value precondition.
 - Only true scalars scale: `array * op` for a non-0-d array is a guided
   `TypeError`, for the same reason `@` rejects arrays — elementwise and
   batched readings would be ambiguous.
@@ -1059,12 +1070,14 @@ enough to densify, before it is merged. It must verify at least:
 
 1. **Dense agreement at batch ranks 0, 1, 2** for `matvec` and `rmatvec`,
    with distinct random operands per rank (a shared operand can mask
-   rank-dependent bugs).
+   rank-dependent bugs), at batch shapes `()`, `(1,)`, `(n,)` and
+   `(2, n)` — the `(n,)` batch is the one where contracting the wrong axis
+   is shape-valid and silently wrong.
 2. **Matrix siblings**: `matmat`, `rmatmat` and `solve_mat` against the
    dense reference, and `whiten_mat` against columnwise `whiten` (the
    column identity of the batch contract — a dense reference for
    `whiten_mat` does not exist, since the contract fixes no particular
-   $W$), each batched and unbatched.
+   $W$), each batched and unbatched, with `k` of 1, `n` and `n + 1`.
 3. **Transpose**: `op.T` itself passes the core, solve, scalar, and
    capability checks (1–2, 4, 7, 9), with its dense reference the dense
    transpose, and `op.T.T` matches `op`'s dense form. (A structured `T`
@@ -1073,8 +1086,10 @@ enough to densify, before it is merged. It must verify at least:
 4. **Solve**: `solve` against the dense inverse at batch ranks 0, 1 and 2,
    when claimed.
 5. **Square roots**: `factor()` returns an `L` whose dense form satisfies
-   $L L^\top = A$, and `L` itself passes the `LinOp` checks (including
-   `rmatvec`).
+   $L L^\top = A$, and `L` itself passes every other check here, not only
+   the `LinOp` ones: a factor with the right dense form but a broken
+   `solve` must not slip through. (`check_factor` is not applied to `L`
+   recursively; `Identity.factor()` returns itself.)
 6. **Whitening**: with $W$ recovered by applying `whiten` to the columns
    of $I_n$, (a) $W A W^\top \approx I_n$, and (b) `whiten(x)` agrees
    **elementwise** with $Wx$ on random operands at batch ranks 0, 1 and 2.
@@ -1084,8 +1099,12 @@ enough to densify, before it is merged. It must verify at least:
    $W^\top W = A^{-1}$) — whereas the norm identity alone is satisfied by
    maps that are not a fixed matrix at all. No comparison against any
    particular factorization — the contract does not promise one.
-7. **Scalars**: `diag` and `logdet` against the dense reference; `logdet`
-   is a 0-d real JAX array.
+7. **Scalars and output types**: `diag` and `logdet` against the dense
+   reference; `logdet` is a 0-d real JAX array. Every output of every
+   check is a JAX array — never NumPy, never a Python float — of the
+   reference's real floating dtype, float64 under the package default,
+   with tolerances tight enough (`1e-9` for solves and whitening, `1e-10`
+   for `logdet`) that a float32 result fails.
 8. **`to_dense` independence, enforced**: with the class-level
    application methods and hooks — all eight names, `matvec`/`rmatvec`/
    `matmat`/`rmatmat` and their hooks — temporarily replaced by raising
@@ -1102,21 +1121,27 @@ enough to densify, before it is merged. It must verify at least:
    level are absent from the type (`hasattr` is `False`) and `supports`
    answers `False` for them. Operands are synthesized at the core shapes
    of the method table, with `k = 3`. This is the invariant of
-   {ref}`contract-capabilities` made mechanical.
+   {ref}`contract-capabilities` made mechanical. A PSD-level type must
+   also be PSD: its dense form symmetric, and its smallest eigenvalue no
+   less than $-10^{-8}\lVert A\rVert_2$.
 10. **Operand validation**: for each operand-taking method, an operand
     whose *contracted* axis has the wrong length — axis `-1` for the
     vector methods, axis `-2` for the matrix methods — raises
     `ValueError`, as does an operand of insufficient rank. The
     uncontracted `k` axis is unconstrained and must not raise.
-11. **Pytree round trip**: flatten/unflatten preserves type and behaviour;
-    unflattening with bare `object()` sentinel leaves succeeds for every
-    operator type, composites included; the operator works under `jit`;
-    `vmap` over the *operand* agrees with native batching; rebuilding the
-    operator inside `jax.vmap` and returning it round-trips (the
-    vmap-exit reconstruction of {ref}`contract-batching-operators`), and
-    `vmap` over the resulting family agrees with a Python loop; `grad` of
-    a fixed scalar (the sum of `matvec` on a fixed operand) through array
-    leaves returns the same tree structure.
+11. **Pytree round trip**, for **every supported operation**, not only
+    `matvec`: flatten/unflatten preserves type and behaviour; unflattening
+    with bare `object()` sentinel leaves succeeds for every operator type,
+    composites included; each operation works under `jit` with the
+    operator passed as a traced argument (which catches a factorization
+    stored outside the fields, and NumPy code in a hook); `vmap` over the
+    *operand* agrees with native batching; rebuilding the operator inside
+    `jax.vmap` and returning it round-trips (the vmap-exit reconstruction
+    of {ref}`contract-batching-operators`), and `vmap` over the resulting
+    family agrees with a Python loop — over two different members when
+    the caller passes `other=`; and `grad` of `matvec` and `rmatvec`
+    through the floating-point leaves agrees, value by value, with `grad`
+    through `to_dense`.
 12. **Repr hygiene**: `repr(op)` matches the type-and-shape form and
     contains no array data.
 13. **Arithmetic dispatch**: JAX and NumPy left operands defer to the

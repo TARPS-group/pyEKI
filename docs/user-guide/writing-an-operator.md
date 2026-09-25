@@ -89,14 +89,30 @@ stored fields directly. The conformance suite compares `matvec` against
 
 **`check_operator`** from `pyeki.linalg.testing` is the executable contract:
 run it on a small instance of every new operator type. It checks
-application at several batch ranks, transposition, solves, square roots,
-whitening, capability honesty, operand validation, pytree behaviour, and
-arithmetic dispatch.
+application at several batch shapes and column counts, transposition,
+solves, square roots, whitening, capability honesty, that a PSD type really
+is symmetric positive semi-definite, operand validation, every operation
+under `jit` and `vmap`, gradient values, and arithmetic dispatch. Every
+returned array must be a JAX array of the expected floating dtype — float64
+here — so a NumPy result or a single-precision one fails even when its values
+are close.
 
 ```python
 from pyeki.linalg.testing import check_operator
 
 check_operator(IdentityPlusRankOne(jnp.asarray(0.5), jnp.arange(1.0, 5.0)))
+```
+
+Pass a second instance of the same type as `other=`, with different values,
+and the `vmap` checks apply a family made of the two, rather than two copies
+of one. Only that catches an operator that answers from something other than
+its stored arrays — array data kept in a static field, for example:
+
+```python
+check_operator(
+    IdentityPlusRankOne(jnp.asarray(0.5), jnp.arange(1.0, 5.0)),
+    other=IdentityPlusRankOne(jnp.asarray(2.0), jnp.arange(4.0, 0.0, -1.0)),
+)
 ```
 
 ## Adding cheap operations

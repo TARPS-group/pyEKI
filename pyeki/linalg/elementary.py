@@ -42,6 +42,7 @@ from .base import (
     _broadcast_batch,
     _check_core_rank,
     _check_finite,
+    _check_real,
     _check_triangular,
     _construct_unchecked,
     dense_matvec,
@@ -152,6 +153,8 @@ class PSDDiagonal(PSDLinOp):
 
     def __post_init__(self) -> None:
         _check_core_rank("PSDDiagonal", "diagonal", self.diagonal, 1)
+        _check_real("PSDDiagonal", "diagonal", self.diagonal)
+        _check_finite("PSDDiagonal", "diagonal", self.diagonal)
         value_check(
             self.diagonal,
             lambda d: bool(jnp.all(d > 0)),
@@ -229,6 +232,19 @@ class Dense(LinOp):
 
     def _to_dense(self) -> Array:
         return self.A
+
+
+def _lu_is_nonsingular(lu: Array) -> bool:
+    """Whether an LU factor is finite and numerically nonsingular.
+
+    Rounding rarely leaves an exactly zero pivot, even for an exactly
+    singular matrix, so a pivot counts as zero when it is below ``n`` units
+    of roundoff relative to the largest entry of the factor.
+    """
+    n = lu.shape[-1]
+    pivots = jnp.abs(jnp.diagonal(lu, axis1=-2, axis2=-1))
+    tol = n * jnp.finfo(lu.dtype).eps * jnp.max(jnp.abs(lu))
+    return bool(jnp.all(jnp.isfinite(lu)) & jnp.all(pivots > tol))
 
 
 def _check_given_lu(A: Array, lu: Array, piv: Array) -> None:
@@ -354,11 +370,7 @@ class DenseSquare(SquareLinOp):
             lu, piv = jnp.asarray(lu), jnp.asarray(piv)
             _check_given_lu(A, lu, piv)
         value_check(
-            lu,
-            lambda f: bool(
-                jnp.all(jnp.isfinite(f)) & jnp.all(jnp.diagonal(f) != 0)
-            ),
-            "DenseSquare: matrix is singular or non-finite",
+            lu, _lu_is_nonsingular, "DenseSquare: matrix is singular or non-finite"
         )
         if given:
             _check_lu_factorizes(A, lu, piv, lu_of_transpose)
@@ -451,6 +463,7 @@ class Triangular(SquareLinOp):
             raise TypeError(
                 f"Triangular.lower must be a bool, got {type(self.lower).__name__}"
             )
+        _check_finite("Triangular", "L", self.L)
         _check_triangular("Triangular", "L", self.L, lower=self.lower)
 
     @property
