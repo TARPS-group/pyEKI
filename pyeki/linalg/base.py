@@ -150,7 +150,7 @@ _debug_checks_enabled = False
 def set_debug_checks(enabled: bool) -> bool:
     """Enable or disable value-level validation; return the previous setting.
 
-    When enabled, constructors and ``from_matrix``-style classmethods assert
+    When enabled, operator constructors and alternate constructors assert
     value preconditions — positivity of diagonal entries, positive
     definiteness of factorized matrices — on concrete inputs. The checks are
     always skipped on tracers, so enabling them does not affect ``jit``-ed
@@ -189,9 +189,9 @@ def debug_checks(enabled: bool = True):
 def value_check(x, predicate, message: str) -> None:
     """Assert a value-level precondition when debug checks are enabled.
 
-    The helper operator authors use inside ``__post_init__`` and
-    ``from_matrix``-style classmethods for preconditions that are values
-    rather than shapes — positivity, finiteness, definiteness.
+    The helper operator authors use inside constructors and alternate
+    constructors for preconditions that are values rather than shapes —
+    positivity, finiteness, definiteness.
 
     Skipped when debug checks are off, when ``x`` is not array-like, and
     whenever the check cannot be evaluated concretely — value checks never
@@ -1206,7 +1206,7 @@ def densify(op: LinOp, *, max_n: int = 4096) -> LinOp:
         )
     A = op.to_dense()
     if isinstance(op, PSDLinOp):
-        return DensePSD.from_matrix(A)
+        return DensePSD(A)
     if isinstance(op, SquareLinOp):
-        return DenseSquare.from_matrix(A)
+        return DenseSquare(A)
     return Dense(A)

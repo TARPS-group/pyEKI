@@ -24,9 +24,9 @@ operator. The full behavioural specification is the
 | `Identity(size)` | $I_n$ | every operation is free |
 | `PSDDiagonal(diagonal)` | $\mathrm{diag}(d)$ | all operations linear in $n$ |
 | `Dense(A)` | an explicit array | may be rectangular; no structure assumed |
-| `DenseSquare.from_matrix(A)` | a dense square matrix | stored with its LU; what `densify` returns for square non-PSD operators |
+| `DenseSquare(A)` | a dense square matrix | stored with its LU; what `densify` returns for square non-PSD operators |
 | `Triangular(L, lower)` | a triangular matrix | what `DensePSD.factor()` returns |
-| `DensePSD.from_matrix(A)` | a dense PSD matrix | stored as its Cholesky factor |
+| `DensePSD(A)` | a dense PSD matrix | stored as its Cholesky factor; `DensePSD(L=L)` from a factor |
 | `PSDLowRank(F)` | $FF^\top$ for a factor $F$ of shape $(n, k)$ | singular when $k < n$; provides `diag` and `factor` only |
 
 `PSDLowRank` imposes no relation between $n$ and $k$, and computes nothing
@@ -43,10 +43,13 @@ full rank. `densify` of a thin-factor `PSDLowRank` takes the Cholesky of a
 singular matrix, which returns `nan` with no exception unless you are
 inside `debug_checks()`.
 
-`DensePSD` and `DenseSquare` are built with `from_matrix`, which factorizes
-once at construction. Operators never factorize lazily on first use, because
-a factor cached inside a traced function is discarded when the trace ends,
-which would silently re-factorize on every call.
+`DensePSD(A)` and `DenseSquare(A)` factorize the matrix once, at
+construction. If you already have the factorization, pass it by keyword
+instead — `DensePSD(L=L)` for a lower Cholesky factor,
+`DenseSquare(A, lu=lu, piv=piv)` for an LU — and it is stored as given.
+Operators never factorize lazily on first use, because a factor cached
+inside a traced function is discarded when the trace ends, which would
+silently re-factorize on every call.
 
 ## Operators built from other operators
 
@@ -89,7 +92,7 @@ with `jax.vmap` over the constructor, and used with `jax.vmap` over the
 operator argument:
 
 ```python
-covs = jax.vmap(DensePSD.from_matrix)(As)          # As: (100, n, n)
+covs = jax.vmap(DensePSD)(As)                      # As: (100, n, n)
 outs = jax.vmap(lambda C, x: C.solve(x))(covs, xs) # xs: (100, n)
 ```
 
@@ -106,8 +109,8 @@ family; it is rejected outright.
 ## Debugging value preconditions
 
 Some requirements are about values, not shapes: `PSDDiagonal` entries must
-be positive, `DensePSD.from_matrix` needs a symmetric positive-definite
-matrix. JAX cannot check values inside `jit`, so by default a violation
+be positive, `DensePSD` needs a symmetric positive-definite
+matrix or, as `L=`, a genuine Cholesky factor. JAX cannot check values inside `jit`, so by default a violation
 produces `nan` or `inf` downstream rather than an error. When a `nan`
 appears and you want to find where, turn on debug checks:
 
@@ -115,7 +118,7 @@ appears and you want to find where, turn on debug checks:
 from pyeki.linalg import debug_checks
 
 with debug_checks():
-    cov = DensePSD.from_matrix(A)   # raises here if A is not symmetric PD
+    cov = DensePSD(A)   # raises here if A is not symmetric PD
 ```
 
 `set_debug_checks(True)` enables them process-wide. The checks run only on

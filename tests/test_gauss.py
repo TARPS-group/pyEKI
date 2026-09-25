@@ -405,7 +405,7 @@ def test_1_gain_weights_reproduces_the_dense_gain(J, P, N, batch_rank):
     """gain_weights composed with whiten reproduces K r elementwise, in all
     three shape regimes and at batch ranks 0, 1 and 2."""
     U, V, R, _ = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     residual_shape = (2, 3, N)[2 - batch_rank :]
     r = RNG.normal(size=residual_shape)
 
@@ -428,7 +428,7 @@ def test_2_weights_are_invariant_to_the_choice_of_whitener():
     J, P, N = 7, 4, 5
     U, V, R, y = _problem(J, P, N)
     Q, _ = np.linalg.qr(RNG.normal(size=(N, N)))
-    plain = DensePSD.from_matrix(jnp.asarray(R))
+    plain = DensePSD(jnp.asarray(R))
     rotated = RotatedWhitenPSD.from_matrix(R, Q)
 
     # the two whiteners really do differ, while both whiten R
@@ -546,7 +546,7 @@ def test_4_posterior_moments_match_the_dense_posterior(J, P, N):
     covariance, all equal the hand-written dense posterior; and the two methods
     satisfy the elementwise identity u_j' = m_post + sqrt(J-1) F_j."""
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, C_post = _dense_posterior(U, V, R, y)
     scale = max(np.abs(m_post).max(), np.abs(C_post).max())
@@ -580,7 +580,7 @@ def test_4_posterior_covariance_rank_is_bounded_by_the_ensemble():
     U, V, R, y = _problem(J, P, N)
     posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
-    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
+    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD(jnp.asarray(R)))
     singular = np.linalg.svd(np.asarray(posterior.cov.to_dense()), compute_uv=False)
     assert np.sum(singular > 1e-10 * singular[0]) <= J - 1
 
@@ -593,7 +593,7 @@ def test_5_pathwise_update_matches_the_dense_perturbed_observation_update(J, P, 
     """With eps recomputed from the same key, pathwise_update equals
     u_j + K(y - v_j - W^-1 eps_j) computed densely."""
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     key = jax.random.key(4)
 
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
@@ -651,7 +651,7 @@ def test_6_exact_moment_ensemble_reaches_the_analytic_posterior():
     scale = max(np.abs(m_post).max(), np.abs(C_post).max())
 
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
 
     posterior = joint.to_gaussian_joint().condition(jnp.asarray(y), noise_cov)
     np.testing.assert_allclose(posterior.mean, m_post, rtol=0, atol=1e4 * EPS * scale)
@@ -756,7 +756,7 @@ def test_7_sample_matches_its_pinned_elementwise_definition():
     """sample is exactly mean + L.matvec(normal(key, (n_samples, k)))."""
     n = 4
     mean = jnp.asarray(RNG.normal(size=n))
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(n)))
+    cov = DensePSD(jnp.asarray(_psd(n)))
     key = jax.random.key(7)
 
     got = Gaussian(mean, cov).sample(key, 5)
@@ -781,7 +781,7 @@ def test_7_log_density_matches_the_dense_closed_form(batch_rank):
     n = 4
     C = _psd(n)
     mean = RNG.normal(size=n)
-    gaussian = Gaussian(jnp.asarray(mean), DensePSD.from_matrix(jnp.asarray(C)))
+    gaussian = Gaussian(jnp.asarray(mean), DensePSD(jnp.asarray(C)))
 
     shape = (2, 3, n)[2 - batch_rank :]
     x = RNG.normal(size=shape)
@@ -804,7 +804,7 @@ def test_7_log_density_differentiates():
     hyperparameter estimation needs."""
     n = 3
     gaussian = Gaussian(
-        jnp.asarray(RNG.normal(size=n)), DensePSD.from_matrix(jnp.asarray(_psd(n)))
+        jnp.asarray(RNG.normal(size=n)), DensePSD(jnp.asarray(_psd(n)))
     )
     x = jnp.asarray(RNG.normal(size=n))
 
@@ -830,7 +830,7 @@ def test_8_zero_prediction_anomalies_make_both_updates_the_identity(J, P, N):
     """
     U = RNG.normal(size=(J, P))
     V = np.tile(np.full(N, 0.5), (J, 1))  # 0.5 is exact in binary
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    noise_cov = DensePSD(jnp.asarray(_psd(N)))
     y = jnp.asarray(RNG.normal(size=N))
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
 
@@ -920,7 +920,7 @@ def test_9_posterior_log_density_raises_at_any_ensemble_size(J, P):
     U, V, R, y = _problem(J, P, N)
     posterior = EmpiricalJoint(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
-    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD.from_matrix(jnp.asarray(R)))
+    ).to_gaussian_joint().condition(jnp.asarray(y), DensePSD(jnp.asarray(R)))
     assert posterior.cov.supports("factor")
     with pytest.raises(UnsupportedOpError, match="whiten"):
         posterior.log_density(jnp.zeros(P))
@@ -932,7 +932,7 @@ def test_9_posterior_log_density_raises_at_any_ensemble_size(J, P):
 
 
 def test_10_gaussian_construction_validation():
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    cov = DensePSD(jnp.asarray(_psd(3)))
     with pytest.raises(ValueError, match="rank 1"):
         Gaussian(jnp.zeros((2, 3)), cov)
     with pytest.raises(ValueError, match="rank 1"):
@@ -966,7 +966,7 @@ def test_10_conditioning_call_validation():
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    noise_cov = DensePSD(jnp.asarray(_psd(N)))
     y = jnp.asarray(RNG.normal(size=N))
 
     def calls(y_arg, cov_arg):
@@ -985,7 +985,7 @@ def test_10_conditioning_call_validation():
         with pytest.raises(TypeError, match="PSDLinOp"):
             call()
 
-    wrong_side = DensePSD.from_matrix(jnp.asarray(_psd(N + 1)))
+    wrong_side = DensePSD(jnp.asarray(_psd(N + 1)))
     for call in calls(y, wrong_side):
         with pytest.raises(ValueError, match="dimension 4"):
             call()
@@ -993,7 +993,7 @@ def test_10_conditioning_call_validation():
 
 def test_10_sample_and_log_density_call_validation():
     n = 3
-    gaussian = Gaussian(jnp.zeros(n), DensePSD.from_matrix(jnp.asarray(_psd(n))))
+    gaussian = Gaussian(jnp.zeros(n), DensePSD(jnp.asarray(_psd(n))))
 
     for bad in (3.0, True, np.int64(3), "3"):
         with pytest.raises(TypeError, match="Python int"):
@@ -1022,7 +1022,7 @@ def test_10_primitive_operand_validation():
 def test_10_value_checks_are_debug_only():
     """Tier 4 runs at construction and at call, and only in debug mode."""
     n = 3
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(n)))
+    cov = DensePSD(jnp.asarray(_psd(n)))
     joint_args = {
         "u_samples": jnp.zeros((3, 2)),
         "v_samples": jnp.asarray([[0.0], [jnp.nan], [0.0]]),
@@ -1070,7 +1070,7 @@ def test_10_value_checks_are_debug_only():
             "v": jnp.zeros((4, 3)),
             "whitened_noise": jnp.zeros((4, 3)),
             "y": jnp.zeros(3),
-            "noise_cov": DensePSD.from_matrix(jnp.asarray(_psd(3))),
+            "noise_cov": DensePSD(jnp.asarray(_psd(3))),
         }
         for name, shape in (("u", (4, 2)), ("v", (4, 3)), ("whitened_noise", (4, 3))):
             with pytest.raises(ValueError, match=f"{name} must be finite"):
@@ -1080,7 +1080,7 @@ def test_10_value_checks_are_debug_only():
             u_samples=jnp.asarray(RNG.normal(size=(3, 2))),
         v_samples=jnp.asarray(RNG.normal(size=(3, 2))),
         )
-        noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(2)))
+        noise_cov = DensePSD(jnp.asarray(_psd(2)))
         with pytest.raises(ValueError, match="y must be finite"):
             good.transform_update(jnp.asarray([jnp.nan, 0.0]), noise_cov)
 
@@ -1093,7 +1093,7 @@ def _reference_problem():
     U, V, R, y = _problem(J, P, N)
     return (
         EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)),
-        DensePSD.from_matrix(jnp.asarray(R)),
+        DensePSD(jnp.asarray(R)),
         jnp.asarray(y),
     )
 
@@ -1103,7 +1103,7 @@ def test_11_flatten_unflatten_preserves_type_and_behaviour(factory):
     if factory == "gaussian":
         obj = Gaussian(
             jnp.asarray(RNG.normal(size=3)),
-            DensePSD.from_matrix(jnp.asarray(_psd(3))),
+            DensePSD(jnp.asarray(_psd(3))),
         )
         probe = lambda o: o.log_density(jnp.zeros(3))  # noqa: E731
     else:
@@ -1142,7 +1142,7 @@ def test_11_conditioning_methods_run_under_jit():
     ):
         np.testing.assert_allclose(eager, jitted, rtol=0, atol=1e3 * EPS)
 
-    logp = Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.asarray(_psd(3))))
+    logp = Gaussian(jnp.zeros(3), DensePSD(jnp.asarray(_psd(3))))
     np.testing.assert_allclose(
         jax.jit(logp.log_density)(jnp.ones(3)), logp.log_density(jnp.ones(3))
     )
@@ -1163,7 +1163,7 @@ def test_11_a_vmapped_family_agrees_with_a_python_loop():
     U = RNG.normal(size=(members, J, P))
     V = RNG.normal(size=(members, J, N))
     ys = RNG.normal(size=(members, N))
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    noise_cov = DensePSD(jnp.asarray(_psd(N)))
 
     def update(u, v, y):
         return EmpiricalJoint(u_samples=u, v_samples=v).transform_update(y, noise_cov)
@@ -1183,13 +1183,13 @@ def test_11_vmap_over_the_noise_operator():
     joint, _, y = _reference_problem()
     N = joint.v_dim
     matrices = jnp.stack([jnp.asarray(_psd(N)) for _ in range(3)])
-    covs = jax.vmap(DensePSD.from_matrix)(matrices)
+    covs = jax.vmap(DensePSD)(matrices)
     assert covs.batch_shape == (3,)
 
     batched = jax.vmap(lambda cov: joint.transform_update(y, cov))(covs)
     looped = jnp.stack(
         [
-            joint.transform_update(y, DensePSD.from_matrix(matrices[i]))
+            joint.transform_update(y, DensePSD(matrices[i]))
             for i in range(3)
         ]
     )
@@ -1211,7 +1211,7 @@ def test_12_stochastic_calls_are_reproducible():
         joint.pathwise_update(jax.random.key(4), y, noise_cov),
     )
 
-    gaussian = Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.asarray(_psd(3))))
+    gaussian = Gaussian(jnp.zeros(3), DensePSD(jnp.asarray(_psd(3))))
     np.testing.assert_array_equal(
         gaussian.sample(key, 4), gaussian.sample(key, 4)
     )
@@ -1221,7 +1221,7 @@ def test_12_stochastic_calls_are_reproducible():
 
 
 def test_12_repr_names_static_sizes_and_no_array_data():
-    gaussian = Gaussian(jnp.zeros(12), DensePSD.from_matrix(jnp.asarray(_psd(12))))
+    gaussian = Gaussian(jnp.zeros(12), DensePSD(jnp.asarray(_psd(12))))
     assert repr(gaussian) == "Gaussian(dim=12)"
 
     joint = EmpiricalJoint(u_samples=jnp.zeros((100, 12)), v_samples=jnp.zeros((100, 40)))
@@ -1287,7 +1287,7 @@ def _stacked(obj, reps: int = 8):
 
 def test_13_gaussian_family_is_legible_and_inert():
     family = _stacked(
-        Gaussian(jnp.zeros(12), DensePSD.from_matrix(jnp.asarray(_psd(12))))
+        Gaussian(jnp.zeros(12), DensePSD(jnp.asarray(_psd(12))))
     )
     assert family.batch_shape == (8,)
     assert family.dim == 12  # core sizes, never batch sizes
@@ -1320,7 +1320,7 @@ def test_13_empirical_joint_family_is_legible_and_inert():
 
 
 def test_13_genuine_construction_rejects_a_family_covariance():
-    cov_family = _stacked(DensePSD.from_matrix(jnp.asarray(_psd(3))), reps=4)
+    cov_family = _stacked(DensePSD(jnp.asarray(_psd(3))), reps=4)
     assert cov_family.batch_shape == (4,)
     with pytest.raises(ValueError, match="vmapped family"):
         Gaussian(jnp.zeros(3), cov_family)
@@ -1426,7 +1426,7 @@ def _linear_gaussian(P: int, N: int, k: int | None = None, seed: int = 23):
     return (
         Gaussian(jnp.asarray(m0), prior_cov),
         Dense(jnp.asarray(G)),
-        DensePSD.from_matrix(jnp.asarray(R)),
+        DensePSD(jnp.asarray(R)),
         jnp.asarray(y),
         {"m0": m0, "L": L, "G": G, "R": R, "y": y, "C0": L @ L.T},
     )
@@ -1616,7 +1616,7 @@ def test_14_a_joint_family_is_legible_and_inert():
     assert repr(family) == (
         "vmapped(GaussianJoint(u_dim=3, v_dim=4, latent_dim=6), batch=(5,))"
     )
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(4)))
+    noise_cov = DensePSD(jnp.asarray(_psd(4)))
     y = jnp.zeros(4)
     with pytest.raises(ValueError, match="vmapped family"):
         family.condition(y, noise_cov)
@@ -1655,7 +1655,7 @@ def test_14_a_joint_batch_shape_includes_both_factors():
         # the static sizes still answer, and every method refuses
         assert (family.u_dim, family.v_dim, family.latent_dim) == (3, 4, 6)
         with pytest.raises(ValueError, match="vmapped family"):
-            family.condition(jnp.zeros(4), DensePSD.from_matrix(jnp.asarray(_psd(4))))
+            family.condition(jnp.zeros(4), DensePSD(jnp.asarray(_psd(4))))
 
 
 def test_14_joint_fields_are_keyword_only():
@@ -1674,7 +1674,7 @@ def test_14_joint_fields_are_keyword_only():
     # and the swap the keywords rule out is otherwise silent: same shapes,
     # finite answer, different distribution
     y = jnp.asarray(RNG.normal(size=n))
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(n)))
+    noise_cov = DensePSD(jnp.asarray(_psd(n)))
     kw = {
         "u_mean": jnp.asarray(RNG.normal(size=n)),
         "v_mean": jnp.asarray(RNG.normal(size=n)),
@@ -1731,7 +1731,7 @@ def test_15_pathwise_matches_the_dense_matheron_map_elementwise():
     the distributional claim follows and is checked exactly below."""
     J, P, N = 8, 3, 4
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     joint = GaussianJoint.from_samples(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
     )
@@ -1778,7 +1778,7 @@ def test_15_pathwise_carries_an_exact_moment_sample_set_to_the_posterior():
     rows = _exact_moment_ensemble(J, np.concatenate([m_u, m_v, np.zeros(N)]), stacked)
     U, V, eta = rows[:, :P], rows[:, P : P + N], rows[:, P + N :]
 
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     W = _recovered_whitener(noise_cov, N)
     joint = GaussianJoint.from_factors(
         u_mean=jnp.asarray(m_u),
@@ -1812,7 +1812,7 @@ def test_15_pathwise_agrees_with_the_sample_update_on_the_joints_own_samples():
     round-off rather than bit for bit."""
     J, P, N = 7, 3, 4
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     empirical = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     key = jax.random.key(4)
 
@@ -1834,7 +1834,7 @@ def test_15_pathwise_agrees_with_the_sample_update_on_the_joints_own_samples():
 def test_15_pathwise_batches_over_realizations_and_validates_them():
     J, P, N = 5, 3, 4
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     joint = GaussianJoint.from_samples(
         u_samples=jnp.asarray(U), v_samples=jnp.asarray(V)
     )
@@ -1888,7 +1888,7 @@ def test_regression_the_square_root_reading_needs_a_centred_factor():
     """
     J, P, N = 8, 3, 4
     U, V, R, y = _problem(J, P, N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     empirical = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     posterior = empirical.to_gaussian_joint().condition(jnp.asarray(y), noise_cov)
     m_post = np.asarray(posterior.mean)
@@ -1943,7 +1943,7 @@ def test_regression_independently_chosen_factors_lose_the_cross_covariance():
     Cuu, Cuv, Cvv = C[:P, :P], C[:P, P:], C[P:, P:]
     R = _psd(N)
     y = rng.normal(size=N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     zeros_u, zeros_v = np.zeros(P), np.zeros(N)
 
     coherent = GaussianJoint.from_factors(
@@ -2126,7 +2126,7 @@ def test_regression_uncentered_transform_shifts_the_ensemble_mean():
     M = rng.normal(size=(N, N))
     R = M @ M.T + N * np.eye(N)
     y = rng.normal(size=N)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(R))
+    noise_cov = DensePSD(jnp.asarray(R))
     joint = EmpiricalJoint(u_samples=jnp.asarray(U), v_samples=jnp.asarray(V))
     m_post, _ = _dense_posterior(U, V, R, y)
 
@@ -2315,7 +2315,7 @@ def test_10_log_density_value_check_is_debug_only():
     """The evaluation point is a call-time operand like `y`, and covered by
     tier 4 for the same reason: a nan `x` returns nan without an exception."""
     n = 3
-    gaussian = Gaussian(jnp.zeros(n), DensePSD.from_matrix(jnp.asarray(_psd(n))))
+    gaussian = Gaussian(jnp.zeros(n), DensePSD(jnp.asarray(_psd(n))))
     bad_x = jnp.asarray([0.0, jnp.nan, 0.0])
 
     assert bool(jnp.isnan(gaussian.log_density(bad_x)))
@@ -2356,7 +2356,7 @@ def test_regression_each_update_applies_the_whitener_j_plus_one_times():
     # and the numbers are unchanged by the grouping: both the dense reference
     # and the implementation center before whitening -- the implementation
     # structurally, since the joint factor is centered at construction
-    plain = DensePSD.from_matrix(jnp.asarray(R))
+    plain = DensePSD(jnp.asarray(R))
     m_post, _ = _dense_posterior(U, V, R, y)
     np.testing.assert_allclose(
         joint.transform_update(jnp.asarray(y), plain).mean(axis=0),
@@ -2389,7 +2389,7 @@ def test_regression_anomalies_are_centered_before_whitening():
     A = rng.normal(size=(J, N))
     V = A - A.mean(axis=0) + 1e10 * Q[:, -1]  # mean along R's most precise direction
     U = rng.normal(size=(J, P))
-    noise_cov = DensePSD.from_matrix(jnp.asarray(Rm))
+    noise_cov = DensePSD(jnp.asarray(Rm))
     y = jnp.asarray(rng.normal(size=N))
 
     exact = _exact_posterior_mean(U, V, Rm, np.asarray(y))
@@ -2428,7 +2428,7 @@ def test_regression_a_collapsed_ensemble_is_exact_at_any_magnitude():
     """
     J, P, N = 10, 3, 2
     U = np.random.default_rng(0).normal(size=(J, P))
-    noise_cov = DensePSD.from_matrix(jnp.eye(N))
+    noise_cov = DensePSD(jnp.eye(N))
     y = jnp.zeros(N)
 
     for magnitude in (1.0, 0.1, 6.02e23, 1e150):
@@ -2512,13 +2512,13 @@ def test_regression_check_order_with_two_simultaneous_violations():
     # the one forced exception: supports() cannot be asked of a non-operator
     with pytest.raises(TypeError, match="PSDLinOp"):
         joint.transform_update(bad_y, jnp.eye(N))
-    family = _stacked(DensePSD.from_matrix(jnp.asarray(_psd(N))), reps=2)
+    family = _stacked(DensePSD(jnp.asarray(_psd(N))), reps=2)
     with pytest.raises(ValueError, match="vmapped family"):
         joint.transform_update(bad_y, family)
 
     # the side check stays behind the capability check but ahead of y
     with pytest.raises(ValueError, match="dimension"):
-        joint.transform_update(bad_y, DensePSD.from_matrix(jnp.asarray(_psd(N + 1))))
+        joint.transform_update(bad_y, DensePSD(jnp.asarray(_psd(N + 1))))
 
     # and the family guard on the joint precedes everything
     joint_family = _stacked(joint, reps=2)
@@ -2542,7 +2542,7 @@ def test_error_messages_name_the_object_the_method_and_the_offending_value():
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    noise_cov = DensePSD(jnp.asarray(_psd(N)))
 
     with pytest.raises(ValueError) as excinfo:
         joint.transform_update(jnp.zeros((2, N)), noise_cov)
@@ -2552,7 +2552,7 @@ def test_error_messages_name_the_object_the_method_and_the_offending_value():
     assert f"({N},)" in message            # the expectation
     assert "(2, 4)" in message             # the offending shape
 
-    gaussian = Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.asarray(_psd(3))))
+    gaussian = Gaussian(jnp.zeros(3), DensePSD(jnp.asarray(_psd(3))))
     with pytest.raises(ValueError) as excinfo:
         gaussian.log_density(jnp.zeros((2, 7)))
     message = str(excinfo.value)
@@ -2596,7 +2596,7 @@ def test_gaussian_batch_shape_includes_its_covariance_contribution():
     batch, so ignoring the covariance's contribution passes.
     """
     n = 3
-    gaussian = Gaussian(jnp.zeros(n), DensePSD.from_matrix(jnp.asarray(_psd(n))))
+    gaussian = Gaussian(jnp.zeros(n), DensePSD(jnp.asarray(_psd(n))))
     leaves, treedef = jax.tree_util.tree_flatten(gaussian)
     mean_leaf, cov_leaf = leaves
 
@@ -2619,7 +2619,7 @@ def test_gaussian_batch_shape_includes_its_covariance_contribution():
 def test_gaussian_repr_never_raises_on_unreadable_leaves():
     """The never-raises rule is per class, and only EmpiricalJoint was covered."""
     treedef = jax.tree_util.tree_structure(
-        Gaussian(jnp.zeros(2), DensePSD.from_matrix(jnp.eye(2)))
+        Gaussian(jnp.zeros(2), DensePSD(jnp.eye(2)))
     )
     broken = jax.tree_util.tree_unflatten(treedef, [object(), object()])
     assert repr(broken) == "<Gaussian (unprintable leaves)>"
@@ -2632,7 +2632,7 @@ def test_non_array_fields_are_rejected_at_construction():
     the other field — and yields an object whose every accessor raises
     AttributeError instead of a constructor ValueError.
     """
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    cov = DensePSD(jnp.asarray(_psd(3)))
     with pytest.raises(TypeError, match="no shape to check"):
         Gaussian([0.0, 0.0, 0.0], cov)
     with pytest.raises(TypeError, match="no shape to check"):
@@ -2670,7 +2670,7 @@ def test_the_transform_does_not_promote_the_dtype():
     U = jnp.asarray(RNG.normal(size=(J, P)), dtype=jnp.float32)
     V = jnp.asarray(RNG.normal(size=(J, N)), dtype=jnp.float32)
     s = jnp.asarray(RNG.normal(size=(J, N)), dtype=jnp.float32)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(N), dtype=jnp.float32))
+    noise_cov = DensePSD(jnp.asarray(_psd(N), dtype=jnp.float32))
     y = jnp.asarray(RNG.normal(size=N), dtype=jnp.float32)
 
     assert sqrt_transform(s).dtype == jnp.float32
@@ -2684,7 +2684,7 @@ def test_the_transform_does_not_promote_the_dtype():
         u_samples=jnp.asarray(RNG.normal(size=(J, P))),
         v_samples=jnp.asarray(RNG.normal(size=(J, N))),
     )
-    cov64 = DensePSD.from_matrix(jnp.asarray(_psd(N)))
+    cov64 = DensePSD(jnp.asarray(_psd(N)))
     assert joint64.transform_update(jnp.zeros(N), cov64).dtype == jnp.float64
 
 
@@ -2704,7 +2704,7 @@ def test_empirical_joint_fields_are_keyword_only():
 
     joint = EmpiricalJoint(u_samples=U, v_samples=V)
     swapped = EmpiricalJoint(u_samples=V, v_samples=U)
-    noise_cov = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    noise_cov = DensePSD(jnp.asarray(_psd(3)))
     y = jnp.asarray(RNG.normal(size=3))
 
     # both are computable and neither is nan -- which is why the swap is a
@@ -2722,7 +2722,7 @@ def test_empirical_joint_fields_are_keyword_only():
 
     # Gaussian stays positional: its two fields cannot be swapped, being an
     # array and an operator
-    Gaussian(jnp.zeros(3), DensePSD.from_matrix(jnp.eye(3)))
+    Gaussian(jnp.zeros(3), DensePSD(jnp.eye(3)))
 
 
 def test_regression_anomalies_are_formed_over_the_member_axis_when_batched():

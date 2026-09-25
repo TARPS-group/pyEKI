@@ -369,9 +369,9 @@ def _general_linear_problem():
         base,
         prior=Gaussian(
             jnp.asarray(rng.normal(size=4)),
-            DensePSD.from_matrix(jnp.asarray(factor @ factor.T)),
+            DensePSD(jnp.asarray(factor @ factor.T)),
         ),
-        noise_cov=DensePSD.from_matrix(
+        noise_cov=DensePSD(
             jnp.asarray(noise @ noise.T / 8.0 + np.eye(8))
         ),
     )
@@ -750,7 +750,7 @@ def test_11_the_toy_models_page_blocks_run():
     rng = np.random.default_rng(1)
     M = rng.normal(size=(8, 8))
     R = jnp.asarray(M @ M.T / 8 + 0.01 * np.eye(8))
-    correlated = dataclasses.replace(problem, noise_cov=DensePSD.from_matrix(R))
+    correlated = dataclasses.replace(problem, noise_cov=DensePSD(R))
     prints_as(correlated.posterior().mean, [-1.4093, 0.8248, 0.4646, 0.0692])
 
 

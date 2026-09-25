@@ -193,12 +193,12 @@ A family of operators — one covariance per row of a batch, say — is a
 the mapped function the operator behaves exactly like an unbatched one.
 
 ```python
-covs = jax.vmap(DensePSD.from_matrix)(As)          # As: (m, n, n)
+covs = jax.vmap(DensePSD)(As)                      # As: (m, n, n)
 outs = jax.vmap(lambda C, x: C.solve(x))(covs, xs) # xs: (m, n)
 ```
 
 This is the only supported way to batch an operator. Handing batched
-arrays to a strict constructor (`Dense.from_matrix` on a 3-D array) is
+arrays to a strict constructor (`Dense` or `DensePSD` on a 3-D array) is
 rejected.
 
 The mechanics deserve precision. *Inside* a `vmap` trace, each leaf is
@@ -602,7 +602,7 @@ the operation that just raised:
   one, and a class in that position implements `factor` but not
   `_solve`/`_whiten` — and `densify` cannot manufacture what does not
   exist. Feeding a singular matrix to a class that *does* advertise
-  `solve` (`DensePSD.from_matrix` of a rank-deficient array) is the other
+  `solve` (`DensePSD` of a rank-deficient array) is the other
   case: a tier-4 value violation, on which `supports` still answers `True`
   — support is static — and the result is `nan`.
 
@@ -610,7 +610,7 @@ the operation that just raised:
 requires. Its pivot array is integer pytree data (it must batch under
 `vmap`), so differentiating with respect to a pytree containing a
 `DenseSquare` requires `jax.grad(..., allow_int=True)`.
-`DenseSquare.from_matrix(A)` computes the LU factorization once and stores
+`DenseSquare(A)` computes the LU factorization once and stores
 `A` together with the factors; `to_dense` returns the stored `A`; it
 supports `solve`, `solve_mat`, `logdet` ($\log\lvert\det\rvert$ from the
 LU diagonal — pivot signs are irrelevant under the log-magnitude
@@ -722,16 +722,16 @@ trace time only. Tier 2 runs once per constructed operator, never at
 with no array work.
 
 Tier 4 covers preconditions that are *values*: `PSDDiagonal` entries strictly
-positive, `from_matrix` arguments actually positive definite, factors
-finite. Outside debug mode these are the caller's responsibility, and
+positive, matrices passed to a factorizing constructor actually positive
+definite, stored factors finite and triangular where declared. Outside debug mode these are the caller's responsibility, and
 violating them yields `nan` (or `±inf` — `logdet` of a singular operator)
 downstream rather than an exception — silently, which is why the debug
 mode exists. Debug mode is a process-global boolean, toggled by
 `set_debug_checks` and usable as the `debug_checks` context manager, with
 `value_check` the helper that consults it inside constructors; it is
-consulted when constructors and `from_matrix`-style classmethods execute —
+consulted when constructors and alternate constructors execute —
 call-time value checks are out of scope. `densify`'s singular-PSD hazard
-is caught this way: `densify` routes through `from_matrix`, which in debug
+is caught this way: `densify` routes through `DensePSD(A)`, which in debug
 mode asserts positive definiteness of the materialized array. On tracers,
 all tier-4 checks are skipped.
 
@@ -789,15 +789,18 @@ explicitly separated data and metadata:
   base-class one and print whole arrays into tracebacks and test ids. See
   {ref}`contract-repr`.
 
-### Constructors store; classmethods compute
+### Constructors compute eagerly and store the result
 
-The dataclass constructor **must only store and validate** — never
-factorize, never allocate more than trivially. Anything computed from the
-inputs (a Cholesky factor, an eigendecomposition, LU) is done in an
-alternate constructor (`DensePSD.from_matrix(A)`), which computes once and
-passes the results to the field-storing constructor.
+A constructor may compute from its arguments — `DensePSD(A)` runs the
+Cholesky, `DenseSquare(A)` the LU — but it computes **once, eagerly**, and
+everything the operator needs afterwards lands in its fields. A
+factorization the caller already has is passed by keyword instead
+(`DensePSD(L=L)`, `DenseSquare(A, lu=lu, piv=piv)`) and stored as given.
+Both classes do this in a hand-written `__init__`, which `@linop` keeps in
+place of the generated one.
 
-Two independent reasons, either sufficient:
+Two independent reasons for computing eagerly and storing, either
+sufficient:
 
 - Pytree reconstruction rebuilds instances **from their stored fields
   alone**, bypassing `__init__` — so the fields are the operator's whole
@@ -810,6 +813,11 @@ Two independent reasons, either sufficient:
 
 Corollary: what `factor()` and `solve()` need must already be sitting in
 the operator's fields when they are called.
+
+An alternate constructor — a classmethod — is for a *different kind of
+input* from what the constructor takes, such as `Gaussian.from_samples`,
+which fits a Gaussian to samples. The rule is the same either way: compute
+once, at construction, and store the result.
 
 ### Identity, hashing, and `static_argnums`
 

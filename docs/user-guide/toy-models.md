@@ -187,7 +187,7 @@ M = rng.normal(size=(8, 8))
 R = jnp.asarray(M @ M.T / 8 + 0.01 * np.eye(8))
 
 problem = toy.linear_gaussian(u_dim=4, v_dim=8)
-correlated = dataclasses.replace(problem, noise_cov=DensePSD.from_matrix(R))
+correlated = dataclasses.replace(problem, noise_cov=DensePSD(R))
 
 correlated.posterior().mean       # [-1.4093  0.8248  0.4646  0.0692]
 ```
