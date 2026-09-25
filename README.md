@@ -98,7 +98,7 @@ from pyeki.linalg import DensePSD, block_diag
 
 noise = block_diag(
     PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),   # independent errors
-    DensePSD.from_matrix(jnp.eye(2) + 0.3),    # correlated block
+    DensePSD(jnp.eye(2) + 0.3),                # correlated block
 )
 
 noise.shape          # (5, 5)

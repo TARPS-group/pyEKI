@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from pyeki.gauss import Gaussian, GaussianJoint, EmpiricalJoint
 from pyeki.linalg import PSDDiagonal, DensePSD, Dense, block_diag
 
-prior = Gaussian(jnp.zeros(12), DensePSD.from_matrix(C0))   # mean + covariance
+prior = Gaussian(jnp.zeros(12), DensePSD(C0))   # mean + covariance
 u = prior.sample(key, 40)                       # (40, 12) samples
 v = g(u)                                        # (40, N) paired values
 samples = EmpiricalJoint(u_samples=u, v_samples=v)
@@ -165,7 +165,7 @@ drives every update in this layer, with no `factor`, no `solve` and no
 ```python
 noise_cov = block_diag(
     PSDDiagonal(instrument_variances),   # independent errors
-    DensePSD.from_matrix(correlated),    # a correlated block
+    DensePSD(correlated),                # a correlated block
 )
 u_next = samples.pathwise_update(key, y, noise_cov)   # whiten only
 ```

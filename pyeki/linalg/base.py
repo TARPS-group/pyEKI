@@ -150,7 +150,7 @@ _debug_checks_enabled = False
 def set_debug_checks(enabled: bool) -> bool:
     """Enable or disable value-level validation; return the previous setting.
 
-    When enabled, constructors and ``from_matrix``-style classmethods assert
+    When enabled, operator constructors and alternate constructors assert
     value preconditions — positivity of diagonal entries, positive
     definiteness of factorized matrices — on concrete inputs. The checks are
     always skipped on tracers, so enabling them does not affect ``jit``-ed
@@ -189,9 +189,9 @@ def debug_checks(enabled: bool = True):
 def value_check(x, predicate, message: str) -> None:
     """Assert a value-level precondition when debug checks are enabled.
 
-    The helper operator authors use inside ``__post_init__`` and
-    ``from_matrix``-style classmethods for preconditions that are values
-    rather than shapes — positivity, finiteness, definiteness.
+    The helper operator authors use inside constructors and alternate
+    constructors for preconditions that are values rather than shapes —
+    positivity, finiteness, definiteness.
 
     Skipped when debug checks are off, when ``x`` is not array-like, and
     whenever the check cannot be evaluated concretely — value checks never
@@ -424,6 +424,47 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
             f"{cls_name}.{field_name}: core sizes must be positive, got shape "
             f"{value.shape}. Empty operators are rejected at construction."
         )
+
+
+def _check_finite(
+    cls_name: str, field_name: str, value, *, hint: str = ""
+) -> None:
+    """Debug check that an array field has only finite entries.
+
+    ``hint``, if given, is appended to the error message. A
+    :func:`value_check`, so it runs only when debug checks are enabled and
+    never under a trace.
+    """
+    message = f"{cls_name}.{field_name} must be finite"
+    value_check(
+        value,
+        lambda a: bool(jnp.all(jnp.isfinite(a))),
+        f"{message}. {hint}" if hint else message,
+    )
+
+
+def _check_triangular(
+    cls_name: str, field_name: str, value, *, lower: bool, hint: str = ""
+) -> None:
+    """Debug check that a stored square-matrix field is triangular.
+
+    ``lower`` selects the triangle that may be nonzero; entries outside it
+    must be zero to within ``jnp.allclose``. ``hint``, if given, is appended
+    to the error message. A :func:`value_check`, so it runs only when debug
+    checks are enabled and never under a trace.
+    """
+    side = "lower" if lower else "upper"
+    message = (
+        f"{cls_name}.{field_name} must be {side} triangular, but has nonzero "
+        f"entries outside that triangle"
+    )
+    value_check(
+        value,
+        lambda mat: bool(
+            jnp.allclose(mat, jnp.tril(mat) if lower else jnp.triu(mat))
+        ),
+        f"{message}. {hint}" if hint else message,
+    )
 
 
 def _construct_unchecked(cls: type, **fields):
@@ -1182,7 +1223,7 @@ def densify(op: LinOp, *, max_n: int = 4096) -> LinOp:
         )
     A = op.to_dense()
     if isinstance(op, PSDLinOp):
-        return DensePSD.from_matrix(A)
+        return DensePSD(A)
     if isinstance(op, SquareLinOp):
-        return DenseSquare.from_matrix(A)
+        return DenseSquare(A)
     return Dense(A)

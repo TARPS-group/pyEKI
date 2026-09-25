@@ -151,12 +151,19 @@ of those — never NumPy arrays.
 
 ## Two rules imposed by JAX
 
-**The dataclass constructor only stores.** Anything computed from the
-inputs — a Cholesky factor, an eigendecomposition — belongs in a
-`from_matrix`-style classmethod. Pytree reconstruction rebuilds operators
-from their stored fields alone, bypassing the constructor, so the fields
-must already hold everything the operator needs — and a factorization
-cached lazily inside a traced function is discarded when the trace ends.
+**Compute at construction, and store the result.** Anything computed from
+the inputs — a Cholesky factor, an eigendecomposition — is computed once,
+when the operator is built, and stored in a field. `DensePSD` does it in a
+hand-written `__init__`, which `@linop` keeps in place of the generated one.
+Such an `__init__` must set every field, and must set them with
+`object.__setattr__(self, name, value)`, because operators are frozen
+dataclasses and `self.name = value` raises. It also replaces
+`__post_init__`, which then no longer runs, so validate in `__init__`
+itself.
+Pytree reconstruction rebuilds operators from their stored fields alone,
+bypassing the constructor, so the fields must already hold everything the
+operator needs — and a factorization cached lazily inside a traced function
+is discarded when the trace ends.
 
 **Constructor validation is shape-only, and runs only at genuine
 construction.** A `__post_init__` may check ranks — exactly the field's

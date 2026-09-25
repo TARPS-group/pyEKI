@@ -164,11 +164,14 @@ linear algebra. Size guards raise before allocating.
 **Return JAX scalars, not Python floats.** Converting fails on a tracer under
 `jit`, and on any complex intermediate.
 
-**Factorize at construction time, in `from_matrix`-style classmethods.** The
-dataclass constructor only stores: pytree reconstruction rebuilds operators
-from their stored fields alone, bypassing the constructor. Never cache a
-factorization lazily — a cache written inside a traced function is discarded,
-so the operator silently re-factorizes on every call.
+**Factorize eagerly, at construction, and store the result.** A constructor
+may compute from its arguments — `DensePSD(A)` runs the Cholesky — but
+everything the operator needs must end up in its fields: pytree reconstruction
+rebuilds operators from their stored fields alone, bypassing the constructor.
+A factorization the caller already has is passed by keyword instead
+(`DensePSD(L=L)`). Never cache a factorization lazily — a cache written inside
+a traced function is discarded, so the operator silently re-factorizes on
+every call.
 
 **Every new operator gets `check_operator`.** The conformance suite in
 `pyeki.linalg.testing` catches the batch-rank and square-root bugs that

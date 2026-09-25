@@ -19,7 +19,7 @@ from pyeki.eki import AdaptiveESSSchedule, EKIState, run
 from pyeki.gauss import Gaussian
 from pyeki.linalg import PSDDiagonal, DensePSD
 
-prior = Gaussian(jnp.zeros(12), DensePSD.from_matrix(C0))
+prior = Gaussian(jnp.zeros(12), DensePSD(C0))
 noise_cov = PSDDiagonal(instrument_variances)          # side N
 
 state = EKIState.from_prior(jax.random.key(0), prior, n_members=64)

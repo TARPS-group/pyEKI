@@ -479,12 +479,10 @@ the warning below.
 **`EKIState.from_prior(key, prior, n_members)`** draws the initial ensemble
 from the prior — the layer's one piece of work that is neither storing a field
 nor validating one, and therefore the only reason the class has an alternate
-constructor at all. It is a classmethod rather than logic inside `EKIState`,
-per the operator layer's rule that constructors store and classmethods compute
-({ref}`contract-jax`): the dataclass constructor is what pytree unflattening
-bypasses, so anything it computed would silently vanish at a trace boundary.
-Sampling in particular must not live there, since it would redraw the ensemble
-on every reconstruction.
+constructor at all. It is a classmethod rather than logic inside `EKIState`
+because its input — a key and a prior — is a different kind of input from the
+fields the constructor takes, which is what the operator layer's rule reserves
+alternate constructors for ({ref}`contract-jax`).
 
 `prior` is a {class}`~pyeki.gauss.Gaussian`; the draw is pinned as
 

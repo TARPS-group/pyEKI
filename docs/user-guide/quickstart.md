@@ -79,7 +79,7 @@ from pyeki.linalg import block_diag
 
 noise = block_diag(
     PSDDiagonal(jnp.array([0.5, 0.5, 2.0])),
-    DensePSD.from_matrix(jnp.eye(2) + 0.3),
+    DensePSD(jnp.eye(2) + 0.3),
 )
 
 noise.shape        # (5, 5)

@@ -31,10 +31,8 @@ contract.
 .. autoclass:: pyeki.linalg.PSDDiagonal
 .. autoclass:: pyeki.linalg.Dense
 .. autoclass:: pyeki.linalg.DenseSquare
-   :members: from_matrix
 .. autoclass:: pyeki.linalg.Triangular
 .. autoclass:: pyeki.linalg.DensePSD
-   :members: from_matrix
 .. autoclass:: pyeki.linalg.PSDLowRank
 ```
 

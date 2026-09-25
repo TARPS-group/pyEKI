@@ -174,8 +174,8 @@ def _check_problem(
     if not isinstance(noise_cov, PSDLinOp):
         raise TypeError(
             f"{cls_name}.noise_cov: must be a pyeki.linalg.PSDLinOp, got "
-            f"{type(noise_cov).__name__}. Wrap a dense matrix with "
-            f"pyeki.linalg.DensePSD.from_matrix."
+            f"{type(noise_cov).__name__}. Wrap a dense matrix as "
+            f"pyeki.linalg.DensePSD(matrix)."
         )
     _check_not_family(cls_name, "prior", prior)
     _check_not_family(cls_name, "noise_cov", noise_cov)

@@ -7,6 +7,7 @@ redundant with conformance — they document why the contract's rules exist.
 """
 from __future__ import annotations
 
+import dataclasses
 import pickle
 
 import jax
@@ -68,7 +69,7 @@ def test_matvec_contracts_trailing_axis_when_square():
     """
     n = 4
     A = _psd(n)
-    op = DensePSD.from_matrix(jnp.asarray(A))
+    op = DensePSD(jnp.asarray(A))
     x = jnp.asarray(RNG.normal(size=(n, n)))  # n batched vectors of length n
     want = np.einsum("ij,bj->bi", A, np.asarray(x))
     np.testing.assert_allclose(np.asarray(op.matvec(x)), want, rtol=1e-9)
@@ -106,7 +107,7 @@ def test_factor_may_be_wider_than_the_operator():
     """No k >= n or k <= n constraint: [L U] is (n, n+r)."""
     A = _psd(4)
     U = RNG.normal(size=(4, 2))
-    L = hstack(DensePSD.from_matrix(jnp.asarray(A)).factor(), Dense(jnp.asarray(U)))
+    L = hstack(DensePSD(jnp.asarray(A)).factor(), Dense(jnp.asarray(U)))
     assert L.shape == (4, 6)
     Ld = np.asarray(L.to_dense())
     np.testing.assert_allclose(Ld @ Ld.T, A + U @ U.T, rtol=1e-8, atol=1e-8)
@@ -398,6 +399,125 @@ def test_psd_low_rank_factor_finiteness_is_a_debug_check():
         assert jax.jit(lambda F: PSDLowRank(F).diag())(nan_factor).shape == (4,)
 
 
+def test_dense_psd_takes_the_matrix_positionally_and_the_factor_by_keyword():
+    """DensePSD(A) factorizes the matrix; DensePSD(L=L) stores a factor.
+
+    Crossing the two is silently wrong without debug checks, and not even
+    consistently wrong. A matrix passed as L is multiplied out whole by
+    matvec, so the operator applies C @ C, while solve, whiten and logdet read
+    only its lower triangle — a third matrix. A factor passed positionally is
+    factorized again, as its symmetric part (L + L.T) / 2.
+
+    Only debug checks can catch either, since the checks are on values.
+    """
+    C = jnp.asarray(_psd(3))
+    L = jnp.linalg.cholesky(C)
+    x = jnp.asarray(RNG.normal(size=3))
+
+    np.testing.assert_allclose(DensePSD(C).to_dense(), C, rtol=1e-12)
+    np.testing.assert_allclose(DensePSD(L=L).to_dense(), C, rtol=1e-12)
+
+    with pytest.raises(TypeError, match="exactly one"):
+        DensePSD()
+    with pytest.raises(TypeError, match="exactly one"):
+        DensePSD(C, L=L)
+
+    # off by default: both crossings construct, and disagree with DensePSD(C)
+    wrong = DensePSD(L=C)
+    np.testing.assert_allclose(wrong.to_dense(), C @ C)
+    assert not np.allclose(wrong.solve(wrong.matvec(x)), x)
+    assert not np.isclose(wrong.logdet(), DensePSD(C).logdet())
+    assert not np.allclose(DensePSD(L).to_dense(), C)
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match=r"pass it positionally"):
+            DensePSD(L=C)
+        with pytest.raises(ValueError, match="symmetric"):
+            DensePSD(L)
+        # a triangular factor with a nonpositive diagonal is not a Cholesky
+        # factor, and makes logdet nan
+        with pytest.raises(ValueError, match="strictly positive diagonal"):
+            DensePSD(L=jnp.diag(jnp.asarray([1.0, -1.0, 1.0])))
+        DensePSD(C)
+        DensePSD(L=L)
+
+    # tracers are exempt, as everywhere in tier 4
+    with debug_checks(True):
+        assert jax.jit(lambda M: DensePSD(L=M).logdet())(C).shape == ()
+
+
+def test_dense_square_takes_a_given_lu_by_keyword():
+    """DenseSquare(A) computes the LU; lu= and piv= supply one instead, and
+    come as a pair."""
+    A = jnp.asarray(RNG.normal(size=(3, 3)) + 3.0 * np.eye(3))
+    lu, piv = jax.scipy.linalg.lu_factor(A)
+    lu_t, piv_t = jax.scipy.linalg.lu_factor(A.T)
+    b = jnp.asarray(RNG.normal(size=3))
+    want = np.linalg.solve(np.asarray(A), np.asarray(b))
+    np.testing.assert_allclose(DenseSquare(A).solve(b), want, rtol=1e-10)
+    np.testing.assert_allclose(
+        DenseSquare(A, lu=lu, piv=piv).solve(b), want, rtol=1e-10
+    )
+    # lu_t factorizes A.T, and the flag says so
+    np.testing.assert_allclose(
+        DenseSquare(A, lu=lu_t, piv=piv_t, lu_of_transpose=True).solve(b),
+        want,
+        rtol=1e-10,
+    )
+    with pytest.raises(TypeError, match="together"):
+        DenseSquare(A, lu=lu)
+    with pytest.raises(ValueError, match="lu_of_transpose"):
+        DenseSquare(A, lu_of_transpose=True)
+
+
+def test_dense_square_rejects_a_given_lu_that_does_not_factorize_a():
+    """Only matvec reads A; solve and logdet read the LU. A factorization of
+    another matrix therefore gives an operator that disagrees with itself.
+
+    A different size is a shape error, caught always: an identity LU of the
+    wrong size made logdet return 0.0. A same-size factorization of another
+    matrix — including the stale one dataclasses.replace carries over — is a
+    value error, caught in debug mode.
+    """
+    A = jnp.asarray(RNG.normal(size=(3, 3)) + 3.0 * np.eye(3))
+    lu, piv = jax.scipy.linalg.lu_factor(A)
+    lu4, piv4 = jax.scipy.linalg.lu_factor(jnp.eye(4))
+
+    with pytest.raises(ValueError, match=r"DenseSquare.lu: expected core shape"):
+        DenseSquare(A, lu=lu4, piv=piv)
+    with pytest.raises(ValueError, match=r"DenseSquare.piv: expected length"):
+        DenseSquare(A, lu=lu, piv=piv4)
+    with pytest.raises(TypeError, match="integer"):
+        DenseSquare(A, lu=lu, piv=piv.astype(jnp.float64))
+
+    # off by default: a same-size stale factorization constructs, and is wrong
+    stale = dataclasses.replace(DenseSquare(A), A=2.0 * A)
+    x = jnp.asarray(RNG.normal(size=3))
+    assert not np.allclose(stale.solve(stale.matvec(x)), x)
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="do not factorize A"):
+            dataclasses.replace(DenseSquare(A), A=2.0 * A)
+        with pytest.raises(ValueError, match=r"do not factorize A\.T"):
+            DenseSquare(A, lu=lu, piv=piv, lu_of_transpose=True)
+        with pytest.raises(ValueError, match="singular"):
+            DenseSquare(A, lu=lu.at[1, 1].set(0.0), piv=piv)
+        DenseSquare(A, lu=lu, piv=piv)  # a genuine factorization constructs
+
+
+def test_triangular_rejects_entries_outside_its_triangle():
+    """Triangular.solve reads only the declared triangle, so an entry outside
+    it is silently ignored by solve yet used by matvec."""
+    L = jnp.asarray(np.tril(RNG.normal(size=(3, 3))) + 3.0 * np.eye(3))
+    with debug_checks(True):
+        Triangular(L, lower=True)
+        Triangular(L.T, lower=False)
+        with pytest.raises(ValueError, match="Triangular.L must be lower"):
+            Triangular(L.T, lower=True)
+        with pytest.raises(ValueError, match="Triangular.L must be upper"):
+            Triangular(L, lower=False)
+
+
 # ---------------------------------------------------------------------------
 # operand and constructor validation
 # ---------------------------------------------------------------------------
@@ -427,13 +547,13 @@ def test_constructors_reject_batched_arrays():
     with pytest.raises(ValueError, match="rank"):
         PSDDiagonal(jnp.asarray(2.0))  # below core rank
     As = jnp.asarray(np.stack([_psd(3) for _ in range(4)]))
-    with pytest.raises(ValueError, match="from_matrix"):
-        DensePSD.from_matrix(As)
+    with pytest.raises(ValueError, match="vmap"):
+        DensePSD(As)
 
 
 def test_constructors_reject_empty_operators():
     """Shapes are strictly positive: an empty core axis is a construction
-    error everywhere, not just in from_matrix classmethods."""
+    error everywhere, including in the constructors that factorize."""
     with pytest.raises(ValueError, match="positive"):
         PSDDiagonal(jnp.zeros((0,)))
     with pytest.raises(ValueError, match="positive"):
@@ -473,7 +593,7 @@ def test_unflatten_bypasses_the_constructor():
 def test_inconsistently_stacked_leaves_are_diagnosed_at_batch_shape():
     """A hand-assembled pytree whose leaves disagree on the batch fails at
     the batch_shape property, not by downstream shape wreckage."""
-    op = DenseSquare.from_matrix(jnp.asarray(np.eye(3) * 2.0))
+    op = DenseSquare(jnp.asarray(np.eye(3) * 2.0))
     leaves, treedef = jax.tree_util.tree_flatten(op)
     bad = jax.tree_util.tree_unflatten(
         treedef, [jnp.stack([leaf] * (3 if i else 2)) for i, leaf in enumerate(leaves)]
@@ -487,7 +607,7 @@ def test_inconsistently_stacked_leaves_are_diagnosed_at_batch_shape():
 def test_vmap_over_scalars_builds_a_scaled_family():
     """The vmap exit boundary reconstructs a Scaled family whose base
     leaves are broadcast -- unconstructible when unflatten ran __init__."""
-    op = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    op = DensePSD(jnp.asarray(_psd(3)))
     cs = jnp.asarray([0.5, 1.0, 2.0])
     xs = jnp.asarray(RNG.normal(size=(3, 3)))
     got = jax.vmap(lambda c, x: (op * c).solve(x))(cs, xs)
@@ -529,7 +649,7 @@ def test_vmap_family_construct_and_return_roundtrips():
     """A batched family built inside vmap is reconstructed, outside any
     trace, through the storing constructor at the vmap exit boundary."""
     As = jnp.asarray(np.stack([_psd(3) for _ in range(4)]))
-    family = jax.vmap(DensePSD.from_matrix)(As)
+    family = jax.vmap(DensePSD)(As)
     xs = jnp.asarray(RNG.normal(size=(4, 3)))
     got = jax.vmap(lambda C, x: C.solve(x))(family, xs)
     want = np.stack(
@@ -541,7 +661,7 @@ def test_vmap_family_construct_and_return_roundtrips():
 def test_custom_vjp_sentinel_unflatten_survives_composites():
     """jax.custom_vjp unflattens arguments with bare object() leaves; a
     composite whose validation read a child's shape would crash there."""
-    op = block_diag(Identity(2), DensePSD.from_matrix(jnp.asarray(_psd(3))))
+    op = block_diag(Identity(2), DensePSD(jnp.asarray(_psd(3))))
 
     @jax.custom_vjp
     def f(o, x):
@@ -562,7 +682,7 @@ def test_operators_use_identity_equality_and_are_never_static():
 
 
 def test_logdet_is_a_real_jax_scalar_not_a_python_float():
-    op = DensePSD.from_matrix(jnp.asarray(_psd(4)))
+    op = DensePSD(jnp.asarray(_psd(4)))
     ld = op.logdet()
     assert isinstance(ld, jnp.ndarray) and not jnp.iscomplexobj(ld)
     jax.jit(lambda o: o.logdet())(op)  # would fail if float() were called
@@ -575,7 +695,7 @@ def test_x64_is_enabled():
 def test_dense_psd_factorizes_once_at_construction():
     """The Cholesky is stored, not recomputed per call (lazy caches do not
     survive tracing)."""
-    op = DensePSD.from_matrix(jnp.asarray(_psd(4)))
+    op = DensePSD(jnp.asarray(_psd(4)))
     leaves = jax.tree_util.tree_leaves(op)
     assert len(leaves) == 1 and leaves[0].shape == (4, 4)
 
@@ -621,7 +741,7 @@ def test_scaling_by_a_traced_scalar():
     """The Scaled consumer: ``A / c`` with ``c`` chosen inside a jit-ed
     computation. Whitening the scaled operator multiplies by sqrt(c),
     exactly."""
-    R = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    R = DensePSD(jnp.asarray(_psd(3)))
     r = jnp.asarray(RNG.normal(size=3))
 
     @jax.jit
@@ -639,7 +759,7 @@ def test_scaling_by_a_traced_scalar():
 
 
 def test_nested_scalings_fold_into_one_wrapper():
-    op = DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    op = DensePSD(jnp.asarray(_psd(3)))
     q = 2.0 * (op * 3.0) / 4.0
     assert isinstance(q, PSDScaled) and not isinstance(q.op, Scaled)
     np.testing.assert_allclose(
@@ -669,7 +789,7 @@ def test_structured_transposes_keep_their_capabilities():
         rtol=1e-9,
     )
 
-    sq = DenseSquare.from_matrix(jnp.asarray(RNG.normal(size=(4, 4)) + 4 * np.eye(4)))
+    sq = DenseSquare(jnp.asarray(RNG.normal(size=(4, 4)) + 4 * np.eye(4)))
     np.testing.assert_allclose(
         np.asarray(sq.T.solve(b)),
         np.linalg.solve(np.asarray(sq.to_dense()).T, np.asarray(b)),
@@ -687,13 +807,13 @@ def test_debug_checks_catch_value_violations_eagerly():
         with pytest.raises(ValueError, match="positive"):
             PSDDiagonal(jnp.asarray([1.0, -2.0]))
         with pytest.raises(ValueError, match="positive definite|finite"):
-            DensePSD.from_matrix(jnp.asarray(-np.eye(3)))
+            DensePSD(jnp.asarray(-np.eye(3)))
         with pytest.raises(ValueError, match="singular"):
-            DenseSquare.from_matrix(jnp.eye(3) * 0.0 + jnp.diag(jnp.zeros(3)))
+            DenseSquare(jnp.eye(3) * 0.0 + jnp.diag(jnp.zeros(3)))
         with pytest.raises(ValueError, match="symmetric"):
-            DensePSD.from_matrix(jnp.asarray([[4.0, 0.5], [1.5, 3.0]]))
+            DensePSD(jnp.asarray([[4.0, 0.5], [1.5, 3.0]]))
         with pytest.raises(ValueError, match="nonzero"):
-            0.0 * DenseSquare.from_matrix(jnp.eye(3) * 2.0)
+            0.0 * DenseSquare(jnp.eye(3) * 2.0)
         # ... and tracers are exempt, so jit-ed code is unaffected.
         jax.jit(lambda d: PSDDiagonal(d).logdet())(jnp.asarray([1.0, 2.0]))
 
@@ -724,7 +844,7 @@ def test_factories_unwrap_single_operands_and_reject_empty():
 
 def test_block_anatomy_is_exposed_for_localization():
     """Consumers align sub-vectors with blocks through blocks/block_shapes."""
-    a, b = PSDDiagonal(jnp.ones(2)), DensePSD.from_matrix(jnp.asarray(_psd(3)))
+    a, b = PSDDiagonal(jnp.ones(2)), DensePSD(jnp.asarray(_psd(3)))
     op = block_diag(a, b)
     assert op.blocks == (a, b)
     assert op.block_shapes == ((2, 2), (3, 3))
@@ -733,7 +853,7 @@ def test_block_anatomy_is_exposed_for_localization():
 def test_diag_congruence_is_taper_reciprocal_inflation():
     """Inflating noise by 1/taper is the congruence with s = 1/sqrt(taper),
     and its whitening stays as cheap as the original's."""
-    R = DensePSD.from_matrix(jnp.asarray(_psd(4)))
+    R = DensePSD(jnp.asarray(_psd(4)))
     taper = jnp.asarray(RNG.uniform(0.2, 1.0, 4))
     inflated = diag_congruence(R, 1.0 / jnp.sqrt(taper))
     assert isinstance(inflated, PSDDiagCongruence)
@@ -779,7 +899,7 @@ def test_structural_error_paths_raise_loudly():
     with pytest.raises(TypeError, match="SquareLinOp"):
         SquareScaled(Dense(A23), jnp.asarray(1.0))
     with pytest.raises(TypeError, match="PSDLinOp"):
-        PSDScaled(DenseSquare.from_matrix(jnp.eye(2) * 2), jnp.asarray(1.0))
+        PSDScaled(DenseSquare(jnp.eye(2) * 2), jnp.asarray(1.0))
     with pytest.raises(TypeError, match="PSDLinOp"):
         PSDDiagCongruence(Dense(A22), jnp.ones(2))
     with pytest.raises(ValueError, match="scale length"):
@@ -886,7 +1006,7 @@ def test_value_checks_do_not_raise_from_inside_a_trace():
 
         # constructors, with the array closed over rather than traced
         assert jax.jit(lambda: PSDDiagonal(d).diag()).__call__().shape == (3,)
-        assert jax.jit(lambda: DensePSD.from_matrix(A).logdet()).__call__().shape == ()
+        assert jax.jit(lambda: DensePSD(A).logdet()).__call__().shape == ()
         assert jax.jit(lambda: PSDLowRank(A).diag()).__call__().shape == (3,)
 
         # and inside lax control flow

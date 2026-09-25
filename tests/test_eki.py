@@ -125,7 +125,7 @@ class _AffineProblem:
             self.factor = self.factor[:, :prior_rank]
             self.C0 = self.factor @ self.factor.T
         self.members = _exact_moment_ensemble(J, self.m0, self.factor)
-        self.noise_cov = DensePSD.from_matrix(jnp.asarray(self.R))
+        self.noise_cov = DensePSD(jnp.asarray(self.R))
         self.calls: list[np.ndarray] = []
 
     def forward(self, u):
@@ -988,7 +988,7 @@ def test_10_multiplicative_inflation_stays_in_the_span_and_additive_leaves_it():
         problem.state(), problem.forward, y, noise,
         schedule=FixedSchedule.uniform(4),
         inflation=AdditiveInflation(
-            DensePSD.from_matrix(jnp.eye(problem.P) * 0.05)
+            DensePSD(jnp.eye(problem.P) * 0.05)
         ),
     )
     assert _leaves_span(additive.ensemble, problem.members, basis) > 1e-3
@@ -999,7 +999,7 @@ def test_10_additive_inflation_matches_its_pinned_elementwise_definition():
     rng = np.random.default_rng(29)
     J, P = 8, 3
     ensemble = jnp.asarray(rng.normal(size=(J, P)))
-    cov = DensePSD.from_matrix(jnp.asarray(_psd(P, seed=31) * 0.01))
+    cov = DensePSD(jnp.asarray(_psd(P, seed=31) * 0.01))
     key = jax.random.key(4)
 
     got = AdditiveInflation(cov)(key, ensemble=ensemble, step=0, beta=jnp.asarray(0.0))
@@ -1033,7 +1033,7 @@ def test_11_misfits_matches_a_dense_quadratic_form_at_every_batch_rank(batch):
     y = rng.normal(size=N)
     predictions = rng.normal(size=(*batch, N))
     got = misfits(
-        jnp.asarray(y), jnp.asarray(predictions), DensePSD.from_matrix(jnp.asarray(R))
+        jnp.asarray(y), jnp.asarray(predictions), DensePSD(jnp.asarray(R))
     )
     residual = y - predictions
     want = 0.5 * np.einsum(
@@ -1049,7 +1049,7 @@ def test_11_misfits_is_whitener_invariant_and_carries_the_half():
     y = jnp.asarray([1.0, 2.0, 3.0])
     predictions = jnp.asarray([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
     as_diagonal = PSDDiagonal(jnp.asarray(diagonal))
-    as_dense = DensePSD.from_matrix(jnp.diag(jnp.asarray(diagonal)))
+    as_dense = DensePSD(jnp.diag(jnp.asarray(diagonal)))
     got = misfits(y, predictions, as_diagonal)
     assert np.abs(
         np.asarray(got) - np.asarray(misfits(y, predictions, as_dense))
@@ -1065,11 +1065,11 @@ def _noise_operators() -> dict[str, object]:
     return {
         "identity": Identity(6),
         "diagonal": diagonal,
-        "dense": DensePSD.from_matrix(jnp.asarray(_psd(6, seed=47))),
+        "dense": DensePSD(jnp.asarray(_psd(6, seed=47))),
         "block_diag": block_diag(
             Identity(2),
             PSDDiagonal(jnp.asarray([2.0, 0.5])),
-            DensePSD.from_matrix(jnp.asarray(_psd(2, seed=53))),
+            DensePSD(jnp.asarray(_psd(2, seed=53))),
         ),
     }
 
@@ -1579,7 +1579,7 @@ def test_18_every_tier_two_and_tier_three_rule_raises_as_specified():
             update=lambda key, *, ensemble, **_: ensemble.astype(jnp.float32))
     with pytest.raises(ValueError, match="cov has side"):
         run(state, problem.forward, y, noise, schedule=ladder,
-            inflation=AdditiveInflation(DensePSD.from_matrix(jnp.eye(problem.P + 1))))
+            inflation=AdditiveInflation(DensePSD(jnp.eye(problem.P + 1))))
 
     class _NonPositive:
         n_steps, beta_target = 4, None
@@ -2045,7 +2045,7 @@ def test_25_the_three_axes_compose(schedule, update, inflation_kind, with_stop):
         "none": None,
         "multiplicative": MultiplicativeInflation(1.01),
         "additive": AdditiveInflation(
-            DensePSD.from_matrix(jnp.eye(problem.P) * 0.01)
+            DensePSD(jnp.eye(problem.P) * 0.01)
         ),
     }[inflation_kind]
     result = run(
@@ -2078,7 +2078,7 @@ def test_26_the_two_form_example_runs():
     problem = _AffineProblem()
     key = jax.random.key(0)
     prior = Gaussian(
-        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+        jnp.asarray(problem.m0), DensePSD(jnp.asarray(problem.C0))
     )
     forward, y, noise_cov = problem.forward, jnp.asarray(problem.y), problem.noise_cov
 
@@ -2103,7 +2103,7 @@ def test_26_the_pinned_prior_draw_and_restart_blocks_run():
     problem = _AffineProblem()
     key = jax.random.key(9)
     prior = Gaussian(
-        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+        jnp.asarray(problem.m0), DensePSD(jnp.asarray(problem.C0))
     )
 
     key_sample, key_state = jax.random.split(key)
@@ -2153,7 +2153,7 @@ def test_26_the_backtracking_loop_runs_and_costs_what_the_contract_says():
 def test_26_the_additive_inflation_definition_and_the_stacked_one_liner_run():
     problem = _AffineProblem()
     P, J = problem.P, problem.J
-    cov = DensePSD.from_matrix(jnp.eye(P) * 0.01)
+    cov = DensePSD(jnp.eye(P) * 0.01)
     key = jax.random.key(3)
     ensemble = jnp.asarray(problem.members)
 
@@ -2222,7 +2222,7 @@ def test_26_the_tikhonov_augmentation_needs_no_new_code_and_double_counts():
     forward, y = problem.forward, jnp.asarray(problem.y)
     noise_cov = problem.noise_cov
     prior = Gaussian(
-        jnp.asarray(problem.m0), DensePSD.from_matrix(jnp.asarray(problem.C0))
+        jnp.asarray(problem.m0), DensePSD(jnp.asarray(problem.C0))
     )
 
     forward_aug = lambda u: jnp.concatenate([forward(u), u], axis=-1)  # noqa: E731

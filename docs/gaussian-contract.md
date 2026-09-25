@@ -453,8 +453,9 @@ is a public field, so callers gate exactly as they do on operators:
 The Gaussian fit to a `(J, n)` array of samples, $J \ge 2$: mean the sample
 mean, covariance the empirical covariance with this layer's fixed $J-1$
 divisor, held as a {class}`~pyeki.linalg.PSDLowRank` whose factor is
-$A^\top/\sqrt{J-1}$. A classmethod rather than logic in the constructor, per
-{ref}`contract-jax`'s rule that constructors store and classmethods compute.
+$A^\top/\sqrt{J-1}$. A classmethod rather than logic in the constructor,
+because samples are a different kind of input from the mean and covariance
+the constructor takes ({ref}`contract-jax`).
 
 It is the **one-block counterpart of {class}`EmpiricalJoint`**, which fits a
 joint to two row-aligned blocks; the two agree on the $u$ block by
@@ -1063,7 +1064,7 @@ machinery as operators, and every rule of the operator contract's JAX section
   subsection below specifies.
 - **Identity semantics**: `eq=False`, hash by identity, never
   `static_argnums` — a joint is always a traced argument.
-- **Constructors store and validate; classmethods compute.**
+- **Constructors take the fields; classmethods take other inputs.**
   `GaussianJoint.from_samples` centres and scales, and `from_linear_map`
   materializes $GL$; the plain constructor only stores.
   {ref}`gauss-joint` records why the SVD cannot live at construction either

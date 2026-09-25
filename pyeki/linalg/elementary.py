@@ -22,13 +22,12 @@ these.
 
 Notes
 -----
-Anything computed from a matrix — a Cholesky or LU factorization — is done
-in a ``from_matrix`` classmethod, once, at construction time. The dataclass
-constructor itself only stores: pytree reconstruction rebuilds operators
-from their stored fields alone, bypassing the constructor, so the fields
-must already hold everything the operator needs — and a factorization
-cached lazily inside a traced function is written to a temporary copy and
-discarded.
+Anything computed from a matrix — a Cholesky or LU factorization — is
+computed by the constructor, once, and stored in a field. Pytree
+reconstruction rebuilds operators from their stored fields alone, bypassing
+the constructor, so the fields must already hold everything the operator
+needs — and a factorization cached lazily inside a traced function is
+written to a temporary copy and discarded.
 """
 from __future__ import annotations
 
@@ -42,6 +41,8 @@ from .base import (
     SquareLinOp,
     _broadcast_batch,
     _check_core_rank,
+    _check_finite,
+    _check_triangular,
     _construct_unchecked,
     dense_matvec,
     linop,
@@ -67,17 +68,6 @@ def _check_size(cls_name: str, size) -> None:
         raise TypeError(f"{cls_name}.size must be an int, got {type(size).__name__}")
     if size < 1:
         raise ValueError(f"{cls_name}.size must be positive, got {size}")
-
-
-def _strict_square_matrix(cls_name: str, A) -> Array:
-    """Validate a matrix passed to a ``from_matrix`` classmethod."""
-    A = jnp.asarray(A)
-    if A.ndim != 2 or A.shape[0] != A.shape[1] or A.shape[0] < 1:
-        raise ValueError(
-            f"{cls_name}.from_matrix: expected a square 2-D matrix with positive "
-            f"size, got shape {A.shape}"
-        )
-    return A
 
 
 def _check_square_field(cls_name: str, field_name: str, value) -> None:
@@ -241,30 +231,98 @@ class Dense(LinOp):
         return self.A
 
 
+def _check_given_lu(A: Array, lu: Array, piv: Array) -> None:
+    """Check the shapes and pivot dtype of an LU passed to :class:`DenseSquare`."""
+    n = A.shape[-1]
+    _check_core_rank("DenseSquare", "lu", lu, 2)
+    _check_core_rank("DenseSquare", "piv", piv, 1)
+    if lu.shape[-2:] != (n, n):
+        raise ValueError(
+            f"DenseSquare.lu: expected core shape ({n}, {n}) to match A, got "
+            f"{lu.shape[-2:]}"
+        )
+    if piv.shape[-1] != n:
+        raise ValueError(
+            f"DenseSquare.piv: expected length {n} to match A, got {piv.shape[-1]}"
+        )
+    if not jnp.issubdtype(piv.dtype, jnp.integer):
+        raise TypeError(
+            f"DenseSquare.piv must be an integer array, got dtype {piv.dtype}"
+        )
+
+
+def _check_lu_factorizes(
+    A: Array, lu: Array, piv: Array, lu_of_transpose: bool
+) -> None:
+    """Debug check that an LU passed to :class:`DenseSquare` factorizes ``A``.
+
+    Solves with it for one right-hand side and requires a backward-stable
+    residual, which any factorization of a different matrix misses.
+    """
+    n = A.shape[-1]
+
+    def factorizes(M):
+        x = jnp.linspace(1.0, 2.0, n)
+        b = dense_matvec(M, x)
+        y = jax.scipy.linalg.lu_solve((lu, piv), b, trans=int(lu_of_transpose))
+        residual = jnp.linalg.norm(dense_matvec(M, y) - b)
+        scale = jnp.linalg.norm(M) * jnp.linalg.norm(y) + jnp.linalg.norm(b)
+        return bool(residual <= 1e-8 * scale)
+
+    value_check(
+        A,
+        factorizes,
+        "DenseSquare: lu and piv do not factorize A"
+        + (".T" if lu_of_transpose else "")
+        + ". To factorize a new matrix, build DenseSquare(A).",
+    )
+
+
 @linop
 class DenseSquare(SquareLinOp):
     """A dense square matrix with no symmetry assumed, stored with its LU.
 
     What :func:`~pyeki.linalg.densify` returns for a square non-PSD operator.
-    Construct with :meth:`from_matrix` rather than directly; the LU
-    factorization runs once, there.
+    ``DenseSquare(A)`` computes the LU factorization once, at construction.
 
     Parameters
     ----------
     A
-        The matrix, of shape ``(n, n)``.
+        The matrix, of shape ``(n, n)``. It must be nonsingular; a singular
+        one yields ``inf`` or ``nan`` from ``solve`` and ``logdet``, without
+        raising unless debug checks are enabled.
     lu, piv
-        Its LU factorization, as returned by ``jax.scipy.linalg.lu_factor``.
+        Keyword-only: an LU factorization of ``A`` already computed, as
+        returned by ``jax.scipy.linalg.lu_factor`` — ``lu`` of shape
+        ``(n, n)``, ``piv`` an integer array of shape ``(n,)``. Pass both or
+        neither; when omitted, they are computed from ``A``.
     lu_of_transpose
-        Static flag: whether ``lu``/``piv`` factorize ``A.T`` rather than
-        ``A``. Set by ``T``, which reuses the factorization instead of
-        recomputing it.
+        Keyword-only, and only with ``lu`` and ``piv``: whether they
+        factorize ``A.T`` rather than ``A``. Set by ``T``, which reuses the
+        factorization instead of recomputing it.
+
+    Raises
+    ------
+    TypeError
+        If only one of ``lu`` and ``piv`` is given, if ``piv`` is not an
+        integer array, or if ``lu_of_transpose`` is not a ``bool``.
+    ValueError
+        If ``A`` is not a square matrix of rank exactly 2, if ``lu`` or
+        ``piv`` does not match its size, if ``lu_of_transpose`` is set
+        without ``lu`` and ``piv``, or — in debug mode — if the
+        factorization is singular or non-finite, or a given one does not
+        factorize ``A``.
 
     Notes
     -----
     ``piv`` is an integer array and is pytree data (it must batch under
     ``vmap``), so differentiating with respect to a pytree containing a
     ``DenseSquare`` requires ``jax.grad(..., allow_int=True)``.
+
+    :func:`dataclasses.replace` passes the stored ``lu`` and ``piv`` back
+    to the constructor, so replacing ``A`` alone pairs the new matrix with
+    the old factorization. Build a new ``DenseSquare(A)`` instead; debug
+    mode rejects the mismatch.
     """
 
     A: Array
@@ -272,28 +330,42 @@ class DenseSquare(SquareLinOp):
     piv: Array
     lu_of_transpose: bool = static_field(default=False)
 
-    def __post_init__(self) -> None:
-        _check_square_field("DenseSquare", "A", self.A)
-        _check_core_rank("DenseSquare", "lu", self.lu, 2)
-        _check_core_rank("DenseSquare", "piv", self.piv, 1)
-
-    @classmethod
-    def from_matrix(cls, A) -> DenseSquare:
-        """Build from a dense square matrix, factorizing once, here.
-
-        The matrix must be nonsingular; a singular one yields ``inf`` or
-        ``nan`` from ``solve`` and ``logdet`` (or an error in debug mode).
-        """
-        A = _strict_square_matrix("DenseSquare", A)
-        lu, piv = jax.scipy.linalg.lu_factor(A)
+    def __init__(
+        self, A, *, lu=None, piv=None, lu_of_transpose: bool = False
+    ) -> None:
+        A = jnp.asarray(A)
+        _check_square_field("DenseSquare", "A", A)
+        if not isinstance(lu_of_transpose, bool):
+            raise TypeError(
+                f"DenseSquare.lu_of_transpose must be a bool, got "
+                f"{type(lu_of_transpose).__name__}"
+            )
+        if (lu is None) != (piv is None):
+            raise TypeError("DenseSquare: pass lu and piv together, or neither")
+        given = lu is not None
+        if not given:
+            if lu_of_transpose:
+                raise ValueError(
+                    "DenseSquare: lu_of_transpose describes a given "
+                    "factorization, so it needs lu and piv"
+                )
+            lu, piv = jax.scipy.linalg.lu_factor(A)
+        else:
+            lu, piv = jnp.asarray(lu), jnp.asarray(piv)
+            _check_given_lu(A, lu, piv)
         value_check(
             lu,
             lambda f: bool(
                 jnp.all(jnp.isfinite(f)) & jnp.all(jnp.diagonal(f) != 0)
             ),
-            "DenseSquare.from_matrix: matrix is singular or non-finite",
+            "DenseSquare: matrix is singular or non-finite",
         )
-        return cls(A, lu, piv)
+        if given:
+            _check_lu_factorizes(A, lu, piv, lu_of_transpose)
+        object.__setattr__(self, "A", A)
+        object.__setattr__(self, "lu", lu)
+        object.__setattr__(self, "piv", piv)
+        object.__setattr__(self, "lu_of_transpose", lu_of_transpose)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -379,13 +451,7 @@ class Triangular(SquareLinOp):
             raise TypeError(
                 f"Triangular.lower must be a bool, got {type(self.lower).__name__}"
             )
-        value_check(
-            self.L,
-            lambda mat: bool(
-                jnp.allclose(mat, jnp.tril(mat) if self.lower else jnp.triu(mat))
-            ),
-            "Triangular.L has nonzero entries outside its declared triangle",
-        )
+        _check_triangular("Triangular", "L", self.L, lower=self.lower)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -438,42 +504,81 @@ class Triangular(SquareLinOp):
 class DensePSD(PSDLinOp):
     """A dense positive-definite matrix, stored as its Cholesky factor.
 
-    Construct with :meth:`from_matrix` rather than directly; the
-    factorization runs once, there.
+    Build from the matrix, ``DensePSD(A)``, which computes the Cholesky
+    factor once, at construction; or from a factor already computed,
+    ``DensePSD(L=L)``. Exactly one of the two must be given.
 
     Parameters
     ----------
+    A
+        The matrix, of shape ``(n, n)``: symmetric positive definite.
     L
-        Lower Cholesky factor, satisfying ``L @ L.T`` equals the matrix.
+        Keyword-only: the lower Cholesky factor of the matrix, lower
+        triangular with a strictly positive diagonal and ``L @ L.T`` equal
+        to the matrix. It is stored as given.
+
+    Raises
+    ------
+    TypeError
+        If both or neither of ``A`` and ``L`` are given.
+    ValueError
+        If the given array is not a square matrix of rank exactly 2, or — in
+        debug mode — if ``A`` is not symmetric positive definite or ``L`` is
+        not a Cholesky factor.
+
+    Notes
+    -----
+    Without debug checks, an invalid argument gives an operator for a
+    different matrix, silently. The Cholesky factorizes the symmetric part
+    ``(A + A.T) / 2``, so a non-symmetric matrix is replaced by it, and an
+    indefinite one gives a ``nan`` factor. A matrix passed as ``L`` is
+    multiplied out whole by ``matvec`` but read only in its lower triangle
+    by ``solve``, ``whiten`` and ``logdet``.
     """
 
     L: Array
 
-    def __post_init__(self) -> None:
-        _check_square_field("DensePSD", "L", self.L)
-        value_check(
-            self.L,
-            lambda mat: bool(jnp.all(jnp.isfinite(mat))),
-            "DensePSD.L must be finite; a nan factor means the matrix was not "
-            "positive definite",
-        )
-
-    @classmethod
-    def from_matrix(cls, A) -> DensePSD:
-        """Build from a dense positive-definite matrix, factorizing once, here.
-
-        The matrix must be symmetric positive definite. The Cholesky reads
-        only the lower triangle, so a non-symmetric matrix would silently
-        produce a different operator, and anything indefinite produces
-        ``nan`` without an exception; debug mode catches both.
-        """
-        A = _strict_square_matrix("DensePSD", A)
-        value_check(
-            A,
-            lambda M: bool(jnp.allclose(M, M.swapaxes(-1, -2))),
-            "DensePSD.from_matrix: matrix must be symmetric",
-        )
-        return cls(jnp.linalg.cholesky(A))
+    def __init__(self, A=None, *, L=None) -> None:
+        if (A is None) == (L is None):
+            raise TypeError(
+                "DensePSD takes exactly one of the matrix, positionally, or its "
+                "Cholesky factor, as L="
+            )
+        if L is None:
+            A = jnp.asarray(A)
+            _check_square_field("DensePSD", "A", A)
+            value_check(
+                A,
+                lambda M: bool(jnp.allclose(M, M.swapaxes(-1, -2))),
+                "DensePSD: matrix must be symmetric",
+            )
+            L = jnp.linalg.cholesky(A)
+            _check_finite(
+                "DensePSD",
+                "L",
+                L,
+                hint="A matrix that is not positive definite has a nan "
+                "Cholesky factor.",
+            )
+        else:
+            L = jnp.asarray(L)
+            _check_square_field("DensePSD", "L", L)
+            _check_finite("DensePSD", "L", L)
+            _check_triangular(
+                "DensePSD",
+                "L",
+                L,
+                lower=True,
+                hint="To build from the matrix itself, pass it positionally: "
+                "DensePSD(A).",
+            )
+            value_check(
+                L,
+                lambda mat: bool(jnp.all(jnp.diagonal(mat) > 0)),
+                "DensePSD.L must have a strictly positive diagonal, as a "
+                "Cholesky factor does",
+            )
+        object.__setattr__(self, "L", L)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -558,11 +663,7 @@ class PSDLowRank(PSDLinOp):
 
     def __post_init__(self) -> None:
         _check_core_rank("PSDLowRank", "F", self.F, 2)
-        value_check(
-            self.F,
-            lambda mat: bool(jnp.all(jnp.isfinite(mat))),
-            "PSDLowRank.F must be finite",
-        )
+        _check_finite("PSDLowRank", "F", self.F)
 
     @property
     def shape(self) -> tuple[int, int]:
