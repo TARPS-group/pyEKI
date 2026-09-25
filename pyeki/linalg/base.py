@@ -426,6 +426,23 @@ def _check_core_rank(cls_name: str, field_name: str, value, core_ndim: int) -> N
         )
 
 
+def _check_finite(
+    cls_name: str, field_name: str, value, *, hint: str = ""
+) -> None:
+    """Debug check that an array field has only finite entries.
+
+    ``hint``, if given, is appended to the error message. A
+    :func:`value_check`, so it runs only when debug checks are enabled and
+    never under a trace.
+    """
+    message = f"{cls_name}.{field_name} must be finite"
+    value_check(
+        value,
+        lambda a: bool(jnp.all(jnp.isfinite(a))),
+        f"{message}. {hint}" if hint else message,
+    )
+
+
 def _check_triangular(
     cls_name: str, field_name: str, value, *, lower: bool, hint: str = ""
 ) -> None:

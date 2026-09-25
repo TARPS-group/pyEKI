@@ -7,6 +7,7 @@ redundant with conformance — they document why the contract's rules exist.
 """
 from __future__ import annotations
 
+import dataclasses
 import pickle
 
 import jax
@@ -405,7 +406,7 @@ def test_dense_psd_takes_the_matrix_positionally_and_the_factor_by_keyword():
     consistently wrong. A matrix passed as L is multiplied out whole by
     matvec, so the operator applies C @ C, while solve, whiten and logdet read
     only its lower triangle — a third matrix. A factor passed positionally is
-    factorized again, as the symmetric matrix with its lower triangle.
+    factorized again, as its symmetric part (L + L.T) / 2.
 
     Only debug checks can catch either, since the checks are on values.
     """
@@ -450,16 +451,58 @@ def test_dense_square_takes_a_given_lu_by_keyword():
     come as a pair."""
     A = jnp.asarray(RNG.normal(size=(3, 3)) + 3.0 * np.eye(3))
     lu, piv = jax.scipy.linalg.lu_factor(A)
+    lu_t, piv_t = jax.scipy.linalg.lu_factor(A.T)
     b = jnp.asarray(RNG.normal(size=3))
     want = np.linalg.solve(np.asarray(A), np.asarray(b))
     np.testing.assert_allclose(DenseSquare(A).solve(b), want, rtol=1e-10)
     np.testing.assert_allclose(
         DenseSquare(A, lu=lu, piv=piv).solve(b), want, rtol=1e-10
     )
+    # lu_t factorizes A.T, and the flag says so
+    np.testing.assert_allclose(
+        DenseSquare(A, lu=lu_t, piv=piv_t, lu_of_transpose=True).solve(b),
+        want,
+        rtol=1e-10,
+    )
     with pytest.raises(TypeError, match="together"):
         DenseSquare(A, lu=lu)
     with pytest.raises(ValueError, match="lu_of_transpose"):
         DenseSquare(A, lu_of_transpose=True)
+
+
+def test_dense_square_rejects_a_given_lu_that_does_not_factorize_a():
+    """Only matvec reads A; solve and logdet read the LU. A factorization of
+    another matrix therefore gives an operator that disagrees with itself.
+
+    A different size is a shape error, caught always: an identity LU of the
+    wrong size made logdet return 0.0. A same-size factorization of another
+    matrix — including the stale one dataclasses.replace carries over — is a
+    value error, caught in debug mode.
+    """
+    A = jnp.asarray(RNG.normal(size=(3, 3)) + 3.0 * np.eye(3))
+    lu, piv = jax.scipy.linalg.lu_factor(A)
+    lu4, piv4 = jax.scipy.linalg.lu_factor(jnp.eye(4))
+
+    with pytest.raises(ValueError, match=r"DenseSquare.lu: expected core shape"):
+        DenseSquare(A, lu=lu4, piv=piv)
+    with pytest.raises(ValueError, match=r"DenseSquare.piv: expected length"):
+        DenseSquare(A, lu=lu, piv=piv4)
+    with pytest.raises(TypeError, match="integer"):
+        DenseSquare(A, lu=lu, piv=piv.astype(jnp.float64))
+
+    # off by default: a same-size stale factorization constructs, and is wrong
+    stale = dataclasses.replace(DenseSquare(A), A=2.0 * A)
+    x = jnp.asarray(RNG.normal(size=3))
+    assert not np.allclose(stale.solve(stale.matvec(x)), x)
+
+    with debug_checks(True):
+        with pytest.raises(ValueError, match="do not factorize A"):
+            dataclasses.replace(DenseSquare(A), A=2.0 * A)
+        with pytest.raises(ValueError, match=r"do not factorize A\.T"):
+            DenseSquare(A, lu=lu, piv=piv, lu_of_transpose=True)
+        with pytest.raises(ValueError, match="singular"):
+            DenseSquare(A, lu=lu.at[1, 1].set(0.0), piv=piv)
+        DenseSquare(A, lu=lu, piv=piv)  # a genuine factorization constructs
 
 
 def test_triangular_rejects_entries_outside_its_triangle():

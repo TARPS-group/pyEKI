@@ -10,6 +10,7 @@ through.
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -69,6 +70,28 @@ def _instances() -> list[LinOp]:
         Triangular(jnp.linalg.cholesky(_psd(5)), lower=True),
         Triangular(jnp.linalg.cholesky(_psd(4)).T, lower=False),
         DensePSD(_psd(5)),
+        DensePSD(L=jnp.linalg.cholesky(_psd(4))),
+        # negative pivots, so a logdet that drops the absolute value fails;
+        # the triangular factor of a PSD matrix never has one
+        Triangular(
+            jnp.asarray(
+                np.tril(RNG.normal(size=(4, 4)), -1) + np.diag([2.0, -3.0, 1.5, -1.0])
+            ),
+            lower=True,
+        ),
+        Triangular(
+            jnp.asarray(
+                np.triu(RNG.normal(size=(3, 3)), 1) + np.diag([-2.0, 1.0, 1.5])
+            ),
+            lower=False,
+        ),
+        DenseSquare(well_conditioned.at[0].multiply(-1.0)),
+        DenseSquare(
+            well_conditioned,
+            lu=jax.scipy.linalg.lu_factor(well_conditioned.T)[0],
+            piv=jax.scipy.linalg.lu_factor(well_conditioned.T)[1],
+            lu_of_transpose=True,
+        ),
         # a low-rank PSD operator at each width: thin (singular), square,
         # and wide (generically nonsingular, yet still no solve/whiten)
         PSDLowRank(jnp.asarray(RNG.normal(size=(5, 2)))),
