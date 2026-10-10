@@ -241,9 +241,11 @@ coordinates:
   returns the $A$ that is zero off that span: the linearization an EKI run
   with fewer particles than parameters implicitly uses;
 - if $d_x < J - 1$, the residuals measure how far $f$ is from affine over
-  the particles. $\Omega$ uses the divisor $J - 1$; for a linear model with
+  the particles. $\Omega$ uses the divisor $J - 1$ by default; for a linear model with
   independent errors it underestimates their covariance by the factor
-  $(J - 1 - d_x)/(J - 1)$.
+  $(J - 1 - d_x)/(J - 1)$. When the particles are the points of a
+  deterministic rule rather than samples, pass `unbiased=False` for the
+  divisor $J$ ({ref}`guide-divisor`); $A$ and $b$ are the same either way.
 
 To shrink the fit toward zero, regress a Gaussian with a term on the inputs,
 `maps.statistical_linearization(ens.project().add_noise(x=Lam), ...)`, which

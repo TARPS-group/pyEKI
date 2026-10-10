@@ -13,7 +13,9 @@ from ._structured import Linear
 __all__ = ["statistical_linearization", "Linearization"]
 
 
-def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
+def statistical_linearization(
+    dist, *, inputs, output, min_norm: bool = False, unbiased: bool = True
+):
     r"""The affine map that best predicts block ``output`` from ``inputs``.
 
     For :math:`(x, y)` distributed as ``dist``, with :math:`x` the input
@@ -42,9 +44,11 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
         fit = maps.statistical_linearization(ens, inputs="x", output="y")
 
     An :class:`~enskit.distribution.Ensemble` is replaced by its projection,
-    :meth:`~enskit.distribution.Ensemble.project`, so :math:`C` and :math:`m`
-    are the particles' sample moments and the fit is the least-squares
-    regression of the particles' outputs on their inputs. A
+    :meth:`~enskit.distribution.Ensemble.project` with the given
+    ``unbiased``, so :math:`C` and :math:`m` are the particles' moments and
+    the fit is the least-squares regression of the particles' outputs on
+    their inputs. :math:`A` and :math:`b` do not depend on the divisor;
+    :math:`\Omega` is proportional to its reciprocal. A
     :class:`~enskit.distribution.Gaussian` is regressed as it is; this is
     how a ridge regression is computed (see Notes). The computation is
     :meth:`~enskit.distribution.Gaussian.regression`, whose three cases
@@ -63,6 +67,14 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
         Keyword-only. Whether to return the minimum-norm solution when the
         least-squares solution is not unique: for an unweighted ensemble,
         when the inputs' total dimension exceeds ``n_particles - 1``.
+    unbiased : bool
+        Keyword-only. For an ensemble, the divisor of its projection:
+        ``True`` (the default) for :math:`J - 1` or :math:`1 - \sum_j
+        w_j^2`, ``False`` for :math:`J` or :math:`1`, the moments of the
+        particles' empirical distribution itself. A Gaussian's covariance
+        is used as it is (an :class:`~enskit.distribution.EnsembleGaussian`
+        keeps the divisor it was projected with), so a Gaussian accepts only
+        the default.
 
     Returns
     -------
@@ -76,14 +88,15 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
     ------
     TypeError
         If ``dist`` is not a distribution, a name is not a ``str``, or
-        ``min_norm`` is not a ``bool``.
+        ``min_norm`` or ``unbiased`` is not a ``bool``.
     KeyError
         If an input or the output is not a block.
     ValueError
         If no input is given, a name is repeated, the output is an input,
         ``dist`` is a vmapped family, the solution is not unique and
-        ``min_norm`` is ``False``, or ``dist`` is a weighted ensemble whose
-        inputs' total dimension exceeds ``n_particles - 1``. Otherwise as
+        ``min_norm`` is ``False``, ``dist`` is a weighted ensemble whose
+        inputs' total dimension exceeds ``n_particles - 1``, or
+        ``unbiased`` is ``False`` for a Gaussian. Otherwise as
         :meth:`~enskit.distribution.Gaussian.regression`.
 
     Notes
@@ -96,11 +109,12 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
       :math:`f` is, and say nothing about its nonlinearity. Every
       interpolating :math:`A` agrees on the span of the input anomalies;
       ``min_norm=True`` sets it to zero off that span;
-    - when :math:`d_x < J - 1`, :math:`\Omega` uses the divisor
-      :math:`J - 1`, as every sample covariance in this package does. For a
-      linear model with independent errors of covariance :math:`\Sigma`,
-      :math:`\mathbb E\,\Omega = \frac{J - 1 - d_x}{J - 1}\,\Sigma`; scale by
-      the inverse factor for an unbiased estimate.
+    - when :math:`d_x < J - 1`, :math:`\Omega` uses the projection's
+      divisor :math:`\delta`, :math:`J - 1` by default or :math:`J` with
+      ``unbiased=False``. For a linear model with independent errors of
+      covariance :math:`\Sigma`,
+      :math:`\mathbb E\,\Omega = \frac{J - 1 - d_x}{\delta}\,\Sigma`; scale by
+      the inverse factor for an unbiased estimate of :math:`\Sigma`.
 
     Without regularization, pushing the inputs' projection through ``map``
     and then :class:`AdditiveNoise` of :math:`\Omega` reproduces the
@@ -154,9 +168,21 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
         raise ValueError(f"{where}: block {output!r} is both an input and the output")
     if not isinstance(min_norm, bool):
         raise TypeError(
-            f"{where}: min_norm must be a bool, got {type(min_norm).__name__}"
+            f"{where}: min_norm must be a Python bool, got "
+            f"{type(min_norm).__module__}.{type(min_norm).__name__}"
+        )
+    if not isinstance(unbiased, bool):
+        raise TypeError(
+            f"{where}: unbiased must be a Python bool, got "
+            f"{type(unbiased).__module__}.{type(unbiased).__name__}"
         )
     ensemble = dist if isinstance(dist, Ensemble) else None
+    if ensemble is None and not unbiased:
+        raise ValueError(
+            f"{where}: unbiased=False selects the divisor of an ensemble's "
+            f"projection; {dist!r} is a Gaussian, whose covariance is used as it "
+            f"is"
+        )
     if ensemble is not None and ensemble.is_weighted:
         N, J = sum(ensemble.dims[n] for n in inputs), ensemble.n_particles
         if N > J - 1:
@@ -168,7 +194,7 @@ def statistical_linearization(dist, *, inputs, output, min_norm: bool = False):
                 f"first (distribution.resample), or pass "
                 f"ens.project().add_noise(...) for a ridge regression."
             )
-    g = ensemble.project() if ensemble is not None else dist
+    g = ensemble.project(unbiased=unbiased) if ensemble is not None else dist
     reg = g.regression(output, given=inputs, min_norm=min_norm)
     coefs = reg.coefficients
     op = coefs[inputs[0]] if len(inputs) == 1 else {n: coefs[n] for n in inputs}

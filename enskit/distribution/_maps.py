@@ -84,8 +84,9 @@ class MatheronMap:
     means, and the targets' factor rows. A :class:`ConditionalMap`. Its
     static attributes are ``given`` and ``targets``, the given and target
     blocks in block order; ``latent_dim``, the latent width :math:`k` of the
-    Gaussian it was built from; and ``n_particles``, :math:`J` when built from
-    an :class:`EnsembleGaussian`, which enables :meth:`particle_coefficients`,
+    Gaussian it was built from; and ``n_particles`` and ``divisor``,
+    :math:`J` and the stored divisor :math:`\delta` when built from an
+    :class:`EnsembleGaussian`, which enable :meth:`particle_coefficients`,
     and ``None`` otherwise.
 
     Notes
@@ -95,11 +96,12 @@ class MatheronMap:
     particles with perturbed values it is the stochastic ensemble Kalman
     update (Burgers et al., 1998).
 
-    Applied to particles fitted by the Gaussian rather than to its own
-    samples, the output's sample mean and covariance (divisor :math:`J - 1`)
-    are unbiased for the conditional's moments under the noise draw, but
-    individual images are not conditional samples: given the particles,
-    image :math:`j` is distributed
+    Applied to particles fitted by the Gaussian with the divisor
+    :math:`J - 1`, rather than to its own samples, the output's sample mean
+    and covariance (divisor :math:`J - 1`) are unbiased for the
+    conditional's moments under the noise draw, but individual images are
+    not conditional samples: given the particles, image :math:`j` is
+    distributed
     :math:`\mathcal N\big(x_j + K(y^* - y_j),\ K D_c K^\top\big)`.
 
     The map never accepts or returns its perturbations. A perturbation used
@@ -126,6 +128,7 @@ class MatheronMap:
     targets: tuple[str, ...] = static_field()
     latent_dim: int = static_field()
     n_particles: int | None = static_field()
+    divisor: int | None = static_field()
     target_dims: tuple[int, ...] = static_field()
     gram: IdentityPlusGram | None
     _given_covs: tuple[PSDLinOp, ...]
@@ -240,14 +243,16 @@ class MatheronMap:
 
         .. math::
 
-            b_j = W(y^* - m_c) - \sqrt{J-1}\,S_{j\cdot}^\top - \varepsilon_j,
+            b_j = W(y^* - m_c) - \sqrt{\delta}\,S_{j\cdot}^\top - \varepsilon_j,
             \qquad w_j = A^{-1} S\, b_j ,
 
-        with :math:`\varepsilon` the same pinned ``normal(key, (J, N))`` draw
-        as :meth:`__call__`. It whitens one vector per given block, so
-        transporting :math:`J` particles costs :math:`J + 1` whitened vectors
-        with the map's build, against :math:`2J` through :meth:`__call__`.
-        It agrees with
+        with :math:`\delta` the Gaussian's divisor, so that
+        :math:`\sqrt{\delta}\,S_{j\cdot}^\top` is particle :math:`j`'s
+        whitened given anomaly, and :math:`\varepsilon` the same pinned
+        ``normal(key, (J, N))`` draw as :meth:`__call__`. It whitens one
+        vector per given block, so transporting :math:`J` particles costs
+        :math:`J + 1` whitened vectors with the map's build, against
+        :math:`2J` through :meth:`__call__`. It agrees with
         ``coefficients(g.realize_particles(exclude_block_covs=given), values,
         key=key)`` to round-off, not bit-exactly.
 
@@ -307,7 +312,7 @@ class MatheronMap:
         )
         J = self.n_particles
         eps = jax.random.normal(key, (J, rw.shape[-1]), self._dtype)
-        b = rw - math.sqrt(J - 1) * self.gram.S - eps
+        b = rw - math.sqrt(self.divisor) * self.gram.S - eps
         w = self.gram.solve_factor(b)
         c.result_check(where, "coefficients", w)
         return w
@@ -387,10 +392,11 @@ class SquareRootMap:
 
     .. math::
 
-        x_j' = m_x + F_x\, A^{-1}S\,W(y^* - m_c) + \sqrt{J-1}\,F_x T e_j
+        x_j' = m_x + F_x\, A^{-1}S\,W(y^* - m_c) + \sqrt{\delta}\,F_x T e_j
         \;\big[+\, L_x\,\eta^{(x)}_j\big], \qquad j = 1, \dots, J,
 
-    with :math:`A = I_k + SS^\top` and :math:`T = A^{-1/2}`: the value of
+    with :math:`A = I_k + SS^\top`, :math:`T = A^{-1/2}` and :math:`\delta`
+    the Gaussian's divisor (:attr:`EnsembleGaussian.divisor`): the value of
     ``g.condition(values).realize_particles(key=key)``, with everything that
     does not depend on :math:`y^*` computed once, at build. A call whitens
     one vector per given block. A target with no factor row realizes as its
@@ -412,7 +418,7 @@ class SquareRootMap:
     which is what makes the update preserve the particles' mean (Wang et
     al., 2004). For a linear-Gaussian joint whose particles' moments equal
     the joint's, and whose targets have no independent terms, the output's
-    sample mean and covariance (divisor :math:`J - 1`) equal the exact
+    sample mean and covariance (divisor :math:`\delta`) equal the exact
     conditional's.
 
     References

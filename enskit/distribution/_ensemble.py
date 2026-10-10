@@ -318,17 +318,33 @@ class Ensemble:
         diffs = x - self._reference(x)
         return diffs - self._mean_of_differences(x)
 
-    def cov(self, a: str, b: str | None = None) -> LinOp:
-        r"""The sample covariance of block ``a`` (with ``b``, if given), as an operator.
+    def cov(self, a: str, b: str | None = None, *, unbiased: bool = True) -> LinOp:
+        r"""The covariance of block ``a`` (with ``b``, if given), as an operator.
 
         .. math::
 
-            \hat C_{ab} = \frac{1}{1 - \sum_j w_j^2}
+            \hat C_{ab} = \frac{1}{\delta_w}
                 \sum_{j=1}^{J} w_j\, a_j^{(a)} \big(a_j^{(b)}\big)^\top,
+            \qquad
+            \delta_w = \begin{cases}
+                1 - \sum_j w_j^2 & \text{unbiased (the default)},\\
+                1 & \text{otherwise},
+            \end{cases}
 
-        which with :math:`w_j = 1/J` is
-        :math:`\frac{1}{J-1}\sum_j a_j a_j^\top`. Nothing of size
+        which with :math:`w_j = 1/J` is :math:`\frac{1}{\delta}\sum_j a_j
+        a_j^\top` with :math:`\delta = J - 1` or :math:`J`. The unbiased
+        divisor treats the particles as samples; the other gives the
+        covariance of :math:`\hat p` itself. Nothing of size
         ``(d_a, d_b)`` is formed: the result applies the scaled anomalies.
+
+        Parameters
+        ----------
+        a, b : str
+            Block names; ``b`` defaults to ``a``.
+        unbiased : bool
+            Keyword-only. ``True`` (the default) for the divisor
+            :math:`J - 1` or :math:`1 - \sum_j w_j^2`, ``False`` for
+            :math:`J` or :math:`1`.
 
         Returns
         -------
@@ -343,36 +359,43 @@ class Ensemble:
         ------
         KeyError
             If a name is not a block.
+        TypeError
+            If ``unbiased`` is not a ``bool``.
         ValueError
             In debug mode, if a particle of positive weight is not finite in
             block ``a`` or ``b``. Otherwise the result is then ``nan``.
         """
         where = f"{self!r}.cov"
         c.guard(self, "cov")
+        c.check_unbiased(where, unbiased)
         c.check_known(where, self.names, (a,) if b is None else (a, b))
         self._check_failed_particles(where, (a,) if b is None else (a, b))
-        F_a = self._factor_row(a)
+        F_a = self._factor_row(a, unbiased)
         if b is None or b == a:
             return PSDLowRank(F_a)
-        return product(Dense(F_a), Dense(self._factor_row(b).T))
+        return product(Dense(F_a), Dense(self._factor_row(b, unbiased).T))
 
-    def project(self):
+    def project(self, *, unbiased: bool = True):
         r"""The moment-matching Gaussian: this ensemble's mean and covariance.
 
+        The covariance is :meth:`cov`'s, with the same ``unbiased``.
+
         For an unweighted ensemble the result is an
-        :class:`~enskit.distribution.EnsembleGaussian` with :math:`k = J`
-        and no independent terms:
+        :class:`~enskit.distribution.EnsembleGaussian` with :math:`k = J`,
+        no independent terms, and divisor :math:`\delta = J - 1` (unbiased)
+        or :math:`J`:
 
         .. math::
 
             m_b = \bar x^{(b)}, \qquad
-            F_b = \frac{1}{\sqrt{J-1}} \big[a_1^{(b)}, \dots, a_J^{(b)}\big]
+            F_b = \frac{1}{\sqrt{\delta}} \big[a_1^{(b)}, \dots, a_J^{(b)}\big]
             \in \mathbb R^{d_b \times J},
 
         each row a :class:`~enskit.linalg.Dense`. Its latent coordinate
         :math:`j` belongs to particle :math:`j`, which is what lets
         :meth:`~enskit.distribution.EnsembleGaussian.realize_particles`
-        return these particles.
+        return these particles; the result carries :math:`\delta` for that
+        purpose.
 
         For a weighted ensemble the result is a plain
         :class:`~enskit.distribution.Gaussian` with :math:`k = J` and
@@ -380,29 +403,39 @@ class Ensemble:
         .. math::
 
             m_b = \sum_j w_j x_j^{(b)}, \qquad
-            (F_b)_{:,j} = \frac{\sqrt{w_j}\,a_j^{(b)}}{\sqrt{1 - \sum_i w_i^2}},
+            (F_b)_{:,j} = \frac{\sqrt{w_j}\,a_j^{(b)}}{\sqrt{\delta_w}},
 
-        with :math:`\sqrt{w_j} = \exp\big((\ell_j - \operatorname{lse}(\ell))/2\big)`
+        with :math:`\delta_w = 1 - \sum_i w_i^2` (unbiased) or :math:`1`,
+        :math:`\sqrt{w_j} = \exp\big((\ell_j - \operatorname{lse}(\ell))/2\big)`
         and :math:`1 - \sum_i w_i^2 = -\operatorname{expm1}\big(
         \operatorname{lse}(2\ell) - 2\operatorname{lse}(\ell)\big)`,
         so a particle of weight zero contributes an exact zero column and
         the divisor stays accurate when one weight dominates.
+
+        Parameters
+        ----------
+        unbiased : bool
+            Keyword-only. ``True`` (the default) for the divisor
+            :math:`J - 1` or :math:`1 - \sum_j w_j^2`, ``False`` for the
+            moments of :math:`\hat p` itself, divisor :math:`J` or :math:`1`.
 
         Returns
         -------
         EnsembleGaussian or Gaussian
             Over the same blocks, in the same order; an
             :class:`~enskit.distribution.EnsembleGaussian` exactly when the
-            ensemble is unweighted.
+            ensemble is unweighted, whichever the divisor.
 
         Raises
         ------
+        TypeError
+            If ``unbiased`` is not a ``bool``.
         ValueError
             In debug mode, if the weights are concentrated on one particle to
-            working precision (:math:`1 - \sum_i w_i^2` rounds to zero),
-            where the weighted covariance is undefined; and if a particle of
-            positive weight is not finite. Otherwise the means or factor rows
-            are then ``inf`` or ``nan``.
+            working precision (:math:`1 - \sum_i w_i^2` rounds to zero) and
+            ``unbiased`` is true, where the weighted covariance is undefined;
+            and if a particle of positive weight is not finite. Otherwise the
+            means or factor rows are then ``inf`` or ``nan``.
 
         Notes
         -----
@@ -412,21 +445,24 @@ class Ensemble:
         """
         from ._gaussian import EnsembleGaussian, Gaussian
 
+        where = f"{self!r}.project"
         c.guard(self, "project")
-        self._check_failed_particles(f"{self!r}.project", self.names)
-        if self.is_weighted:
+        c.check_unbiased(where, unbiased)
+        self._check_failed_particles(where, self.names)
+        if self.is_weighted and unbiased:
             c.lazy_value_check(
                 self._weight_pieces()[2],
                 lambda d: d > 0,
                 lambda: (
-                    f"{self!r}.project: the weights are concentrated on one "
-                    f"particle to working precision (effective sample size "
-                    f"{float(_ess(self._log_weights)):.17g}), so the weighted "
-                    f"covariance is undefined"
+                    f"{where}: the weights are concentrated on one particle to "
+                    f"working precision (effective sample size "
+                    f"{float(_ess(self._log_weights)):.17g}), so the unbiased "
+                    f"weighted covariance is undefined; unbiased=False gives the "
+                    f"empirical distribution's covariance"
                 ),
             )
         means = tuple(self.mean(n) for n in self.names)
-        factors = tuple(Dense(self._factor_row(n)) for n in self.names)
+        factors = tuple(Dense(self._factor_row(n, unbiased)) for n in self.names)
         covs = (None,) * len(self.names)
         J = self.n_particles
         if self.is_weighted:
@@ -436,7 +472,7 @@ class Ensemble:
             )
         return c.build(
             EnsembleGaussian, names=self.names, latent_dim=J, n_particles=J,
-            _means=means, _factors=factors, _block_covs=covs,
+            unbiased=unbiased, _means=means, _factors=factors, _block_covs=covs,
         )
 
     def __repr__(self) -> str:
@@ -504,14 +540,15 @@ class Ensemble:
         divisor = -jnp.expm1(_lse(2 * lw) - 2 * lse)
         return w, sqrt_w, divisor
 
-    def _factor_row(self, name: str) -> Array:
+    def _factor_row(self, name: str, unbiased: bool) -> Array:
         """The projected factor row of block ``name``, ``(d, J)``."""
         a = self.anomalies(name)
         if self._log_weights is None:
-            return a.T / math.sqrt(self.n_particles - 1)
+            return a.T / math.sqrt(c.particle_divisor(self.n_particles, unbiased))
         _, sqrt_w, divisor = self._weight_pieces()
         a = jnp.where(self._positive_weight()[:, None], a, 0)
-        return (sqrt_w[:, None] * a).T / jnp.sqrt(divisor)
+        row = (sqrt_w[:, None] * a).T
+        return row / jnp.sqrt(divisor) if unbiased else row
 
     def _check_failed_particles(self, where: str, names) -> None:
         """Debug-mode check that every particle of positive weight is finite

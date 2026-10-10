@@ -56,9 +56,14 @@ Conventions shared by everything in the module:
 - **Samples and particles.** A *sample* is a draw from any distribution; a
   *particle* is an element of an :class:`Ensemble`. An ensemble's particles
   are treated as samples wherever a function asks for samples.
-- **Anomalies are raw deviations from the mean**; empirical covariances use
-  the divisor :math:`J - 1` (unweighted) or :math:`1 - \sum_j w_j^2`
-  (weighted).
+- **Anomalies are raw deviations from the mean.** A covariance computed from
+  particles divides by :math:`J - 1` (unweighted) or
+  :math:`1 - \sum_j w_j^2` (weighted) by default, which treats them as
+  samples. ``unbiased=False``, accepted by :meth:`Ensemble.cov` and
+  :meth:`Ensemble.project`, divides by :math:`J` or :math:`1` instead,
+  giving the moments of the empirical distribution itself. An
+  :class:`EnsembleGaussian` stores its divisor, and every operation that
+  reads particles out of it uses that divisor.
 - **Randomness enters through an explicit typed key**
   (:func:`jax.random.key`), consumed whole. Nothing stores or advances a key,
   and every draw is pinned.

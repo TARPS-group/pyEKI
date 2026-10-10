@@ -54,19 +54,47 @@ approx = ens.project()            # an EnsembleGaussian: k = J, no terms
 
 Conditioning particles means conditioning a Gaussian fitted to them, and
 `project()` is where that fit happens. It is the moment-matching Gaussian, with
-the ensemble's mean and covariance jointly over all blocks (divisor $J-1$, or
-$1 - \sum_j w_j^2$ for a weighted ensemble), and
-it is always written by you, at the call site: there is no `condition` on an
-`Ensemble`.
+the ensemble's mean and covariance jointly over all blocks (with the divisor
+below), and it is always written by you, at the call site: there is no
+`condition` on an `Ensemble`.
 
 For an unweighted ensemble the result is an **`EnsembleGaussian`**: its factor
-row is $F_b = A_b^\top/\sqrt{J-1}$ for the anomalies $A_b$, so latent
+row is $F_b = A_b^\top/\sqrt{\delta}$ for the anomalies $A_b$, so latent
 coordinate $j$ belongs to particle $j$. That correspondence is what lets it do
 two things no other Gaussian can: read its particles back out
 (`realize_particles()`) and move them as a set (`square_root_map`). Every
 operation that keeps the latent space keeps the type. A weighted ensemble
 projects to a plain `Gaussian`: dividing out $\sqrt{w_j}$ to read particles
 back would be meaningless at a zero weight.
+
+(guide-divisor)=
+### The divisor
+
+Every covariance computed from particles, by `cov`, `project` or
+`maps.statistical_linearization`, divides by the same thing:
+
+| | unweighted | weighted |
+| --- | --- | --- |
+| `unbiased=True`, the default | $J - 1$ | $1 - \sum_j w_j^2$ |
+| `unbiased=False` | $J$ | $1$ |
+
+The default treats the particles as samples, and gives an unbiased estimate
+of their distribution's covariance; it is what every update and algorithm in
+EnsKit uses. `unbiased=False` gives the covariance of the empirical
+distribution $\hat p = \sum_j w_j\delta_{x_j}$ itself. Use it when the
+particles are not samples but the points of a deterministic rule, such as
+a quadrature or sigma-point rule with nonnegative weights, whose weights
+reproduce a mean and covariance exactly:
+
+```python
+approx = ens.project(unbiased=False)   # an EnsembleGaussian, divisor J
+assert approx.divisor == ens.n_particles
+```
+
+An `EnsembleGaussian` remembers its divisor $\delta$, and every operation
+that reads particles out of it uses it. So `realize_particles()` returns the
+particles whichever divisor projected them, and conditioning moves them
+consistently.
 
 ## Adding known noise: `add_noise` and `absorb`
 

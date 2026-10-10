@@ -11,13 +11,82 @@ Kronecker operators, PR 4's `enskit.distribution`, the fix for #60, PR 5's
 `enskit.maps`, PR 6's `enskit.kalman`, PR 9's localization and PR 7's
 `enskit.algorithms.eki`, and 2026-10-05 after PR 8's `enskit.algorithms.enkf`,
 PR 11's documentation and PR 12's release, and 2026-10-09 after
-statistical linearization (#85).
+statistical linearization (#85) and the divisor rule (#91).
 Read
 `CLAUDE.md` first for conventions, including the layer rules, which the
 redesign replaced; then the two sections below; then the rest of this file,
 which describes the code as it stands before the redesign lands. That
 description is historical: where it names `pyeki.<module>`, the module is now
 `enskit.<module>`.
+
+## 2026-10-09: one divisor rule for particle covariances (#91)
+
+**What landed.** A keyword-only `unbiased: bool = True` on `Ensemble.cov`,
+`Ensemble.project` and `maps.statistical_linearization`. `False` divides by
+$J$, or $1$ when weighted: the empirical distribution's own moments, for
+particles that are a deterministic rule's points rather than samples. The
+default, and every number, is unchanged. `EnsembleGaussian` gains the static
+field `unbiased` (a constructor keyword) and the property `divisor`, and
+`MatheronMap` gains the static attribute `divisor`. The rule is stated once,
+in the new section `(dist-divisor)` of the distribution contract and the
+user guide's `(guide-divisor)`; the rest refers to it. The contract's
+*Deliberately excluded* entry "a configurable anomaly divisor" is gone.
+Tests: `tests/test_divisor.py`, which is distribution obligation 24 and
+kalman obligation 27.
+
+**Decided with the maintainer** (comment on #91): the default stays
+unbiased; the flag is named `unbiased`; it is offered only at those three
+functions, and `kalman.gaussian_approximation`, `exact_moment_ensemble` and
+the algorithms' diagnostics stay at $J - 1$. **An unweighted projection is
+always an `EnsembleGaussian`, and carries its divisor**: a plain-`Gaussian`
+result for the empirical divisor was rejected as unintuitive. Weighted
+projections stay plain `Gaussian`s; whether they should be aligned too is
+#93.
+
+**Every reader of an `EnsembleGaussian`'s factor rows uses `divisor`.**
+That covers `realize_particles`, `square_root_map`,
+`MatheronMap.particle_coefficients`, and localization's three
+$\sqrt{J-1}$s. The rules are public and accept any approximation, so they
+honor an empirical approximation passed through `approximation=`. Each
+seam's regression test was checked by reverting that seam to $J - 1$: every
+reversion fails at least one test.
+
+**Things the implementation found.**
+
+- **`maps` rebuilds an aligned Gaussian through the public constructor**
+  (`maps/_common.py::with_block`), which would have dropped the divisor
+  silently. It passes `unbiased` now. A new place that builds an
+  `EnsembleGaussian` must pass it too. `c.build` bypasses the constructor,
+  so the field deliberately has no class-level default: a build that forgets
+  it raises `AttributeError` at the first read of `divisor`, rather than
+  silently reading $J - 1$.
+- **Third-party rules are not checked against the divisor (#94).** The
+  protocol's alignment clause now says $\sqrt{\delta}$, but
+  `check_update_rule` builds only through `gaussian_approximation`
+  ($\delta = J - 1$). A user rule that hard-codes $\sqrt{J-1}$ passes
+  conformance. The adversarial review found it; #94 has the options.
+- **The adversarial review's trivial findings were fixed here.** The
+  Matheron "unbiased over the key" claims now say they need $\delta = J - 1$
+  (with $\delta = J$, the noise term comes out $(J-1)/J$ short). The
+  weighted unbiased claim is limited to fixed weights. "Sigma points" became
+  rules with nonnegative weights, since the unscented transform's negative
+  $W_0$ does not fit `log_weights`. The `particle_coefficients` test now
+  compares against the actual particles rather than the realized ones. jit
+  and vmap tests were added. The bool messages now say "Python bool", since
+  NumPy 2's `np.bool_` is also named `bool`.
+- **`statistical_linearization` needed no special case.** A and b do not
+  depend on the divisor, and an empirical projection is still aligned, so
+  minimum norm works for both divisors.
+- **The square-root update is invariant to a consistent rescaling.** The
+  divisor $J$ with noise $cR$, $c = (J-1)/J$, gives exactly the particles
+  that $J - 1$ with $R$ does. This is the test that pins the square-root
+  paths to an independent reference.
+
+**For #88.** Its step 6 (`residual_cov * (J - 1) / J`) becomes
+`statistical_linearization(..., unbiased=False)`, and D3 is settled.
+`sigma_points` can say that `project(unbiased=False)` reproduces the
+Gaussian's covariance exactly, and the "$\frac{J}{J-1}$ caveat" in its user
+guide plan becomes a pointer to `(guide-divisor)`.
 
 ## 2026-10-09: statistical linearization (#85)
 

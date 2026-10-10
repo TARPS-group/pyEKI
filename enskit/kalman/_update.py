@@ -176,7 +176,8 @@ def gaussian_approximation(
     ~enskit.distribution.EnsembleGaussian or ~enskit.distribution.Gaussian
         For an unweighted ensemble, an
         :class:`~enskit.distribution.EnsembleGaussian` aligned with the
-        particles: latent coordinate :math:`j` is particle :math:`j`. A
+        particles: latent coordinate :math:`j` is particle :math:`j`. Its
+        covariance always uses the unbiased divisor :math:`J - 1`. A
         weighted ensemble gives a plain
         :class:`~enskit.distribution.Gaussian`, which no shipped rule accepts.
 
@@ -237,7 +238,10 @@ class UpdateRule(Protocol):
 
       .. math::
 
-          m_b + \sqrt{J-1}\, F_b e_j = x^{(b)}_j, \qquad j = 1, \dots, J .
+          m_b + \sqrt{\delta}\, F_b e_j = x^{(b)}_j, \qquad j = 1, \dots, J ,
+
+      with :math:`\delta` its
+      :attr:`~enskit.distribution.EnsembleGaussian.divisor`.
 
       A rule may rely on that for a faster path. A modified approximation is
       generally a plain :class:`~enskit.distribution.Gaussian`, and a rule

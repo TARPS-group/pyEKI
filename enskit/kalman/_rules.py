@@ -22,14 +22,17 @@ class SymmetricSquareRoot:
 
     .. math::
 
-        x_j' = m_x + F_x w + \sqrt{J-1}\, F_x T e_j \;\big[+\, L_x \eta^{(x)}_j\big],
+        x_j' = m_x + F_x w + \sqrt{\delta}\, F_x T e_j \;\big[+\, L_x \eta^{(x)}_j\big],
         \qquad w = A^{-1} S\, W(y^* - m_c), \qquad T = A^{-1/2},
 
     with :math:`S = (WF_c)^\top`, :math:`A = I_k + SS^\top`, :math:`W` a
     whitener of the given blocks' noise, :math:`e_j` the :math:`j`-th unit
-    vector, and the bracketed draw from a target's independent term
-    :math:`D_x = L_xL_x^\top` present only when it has one. :math:`T` and the
-    conditional anomalies do not depend on :math:`y^*` and are built once.
+    vector, :math:`\delta` the approximation's divisor
+    (:attr:`~enskit.distribution.EnsembleGaussian.divisor`, :math:`J - 1`
+    from :func:`gaussian_approximation`), and the bracketed draw from a
+    target's independent term :math:`D_x = L_xL_x^\top` present only when it
+    has one. :math:`T` and the conditional anomalies do not depend on
+    :math:`y^*` and are built once.
 
     When no given block has an independent term (exact values), the built
     update returns ``approximation.condition(values).realize_particles(key=key)``,
@@ -37,8 +40,8 @@ class SymmetricSquareRoot:
     blocks of total dimension :math:`N`.
 
     For particles whose sample moments equal a linear-Gaussian joint's, and
-    targets without independent terms, the updated particles' sample mean and
-    covariance (divisor :math:`J - 1`) equal the exact conditional's. The
+    targets without independent terms, the updated particles' mean and
+    covariance (divisor :math:`\delta`) equal the exact conditional's. The
     call needs a key only if a target block has an independent term, which is
     then sampled.
 
@@ -158,7 +161,8 @@ class Matheron:
     - **aligned** (an :class:`~enskit.distribution.EnsembleGaussian` with the
       particles' count): the whitened residuals are read off the
       approximation's factor,
-      :math:`W(y^* - g_j) = W(y^* - m_c) - \sqrt{J-1}\, S_{j\cdot}^\top`
+      :math:`W(y^* - g_j) = W(y^* - m_c) - \sqrt{\delta}\, S_{j\cdot}^\top`,
+      with :math:`\delta` the approximation's divisor
       (:meth:`~enskit.distribution.MatheronMap.particle_coefficients`), for
       :math:`J + 1` whitened vectors per update;
     - **general** (any other :class:`~enskit.distribution.Gaussian`, such as a
@@ -173,9 +177,11 @@ class Matheron:
     with a term, in block order, and the given blocks' noise is the map's
     ``normal(k_noise, (J, N))``.
 
-    For a linear-Gaussian problem the updated particles' sample mean and
-    covariance (divisor :math:`J - 1`) are unbiased, over the key, for the
-    conditional moments of the fitted Gaussian; their sampling error is of
+    For a linear-Gaussian problem and an approximation with divisor
+    :math:`J - 1`, as :func:`gaussian_approximation` builds, the updated
+    particles' sample mean and covariance (divisor :math:`J - 1`) are
+    unbiased, over the key, for the conditional moments of the fitted
+    Gaussian; their sampling error is of
     order :math:`1/\sqrt{J}`.
 
     Raises

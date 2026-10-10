@@ -173,6 +173,20 @@ def check_n_particles(where: str, n_particles, name: str = "n_particles") -> Non
         )
 
 
+def check_unbiased(where: str, unbiased) -> None:
+    """A Python ``bool``: it selects a divisor, and so a static structure."""
+    if not isinstance(unbiased, bool):
+        raise TypeError(
+            f"{where}: unbiased must be a Python bool, got "
+            f"{type(unbiased).__module__}.{type(unbiased).__name__}"
+        )
+
+
+def particle_divisor(n_particles: int, unbiased: bool) -> int:
+    """The divisor of an unweighted covariance: ``J - 1`` if unbiased, else ``J``."""
+    return n_particles - 1 if unbiased else n_particles
+
+
 def check_value(where: str, name: str, value, dim: int, dtype):
     """A block value: exactly ``(dim,)``, real, converted to ``dtype``."""
     arr = jnp.asarray(value)

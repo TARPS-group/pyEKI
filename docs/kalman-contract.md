@@ -220,10 +220,11 @@ and its realized particles without independent terms are those particles:
 for every block $b$,
 
 $$
-m_b + \sqrt{J-1}\,F_b e_j = x^{(b)}_j \qquad (j = 1, \dots, J),
+m_b + \sqrt{\delta}\,F_b e_j = x^{(b)}_j \qquad (j = 1, \dots, J),
 $$
 
-with $e_j$ the $j$-th unit vector and a block without a factor row realizing
+with $\delta$ the approximation's stored divisor (`divisor`,
+{ref}`dist-divisor`), $e_j$ the $j$-th unit vector, and a block without a factor row realizing
 as its mean (`realize_particles(exclude_block_covs=...)` with every block that
 has a term excluded; {ref}`dist-realize`). `Ensemble.project()` returns such a
 Gaussian to round-off, and `add_noise` on blocks without terms keeps it one.
@@ -272,7 +273,10 @@ the Gaussian with the particles' sample mean $\bar z$ and sample covariance
 $\hat C$ jointly over every block, with each known noise covariance $R_c$ =
 `noise[c]` added to its block *as a covariance*, never as samples. It is
 `ensemble.project().add_noise(noise)`, or `ensemble.project()` when `noise`
-is `None` or empty.
+is `None` or empty, and so always uses the unbiased divisor
+({ref}`dist-divisor`); it takes no `unbiased` argument. An approximation
+projected with the empirical divisor is passed through the `approximation=`
+hook, and every shipped rule honors its divisor.
 
 - `noise` is a mapping from block name to `PSDLinOp` (`TypeError` otherwise),
   each of its block's side (`ValueError`), naming blocks of the ensemble
@@ -337,11 +341,12 @@ and returns that map as the particle update. Called with $y^*$ it returns,
 for each target block $x$,
 
 $$
-x_j' = m_x + F_x w + \sqrt{J-1}\,F_x T e_j \;\big[+\, L_x \eta^{(x)}_j\big],
+x_j' = m_x + F_x w + \sqrt{\delta}\,F_x T e_j \;\big[+\, L_x \eta^{(x)}_j\big],
 \qquad w = A^{-1} S\, W(y^* - m_c), \qquad T = A^{-1/2},
 $$
 
-with the bracketed draw present for a target with an independent term. $T$
+with $\delta$ the approximation's divisor and the bracketed draw present
+for a target with an independent term. $T$
 and the realized conditional anomalies do not depend on $y^*$ and are
 computed at build. For particles whose moments equal a linear-Gaussian
 joint's and targets without independent terms, the output's sample mean and
@@ -409,7 +414,7 @@ approximation's type, never from values:
 - **aligned** (an `EnsembleGaussian` with the particles' count): the
   coefficients come from `MatheronMap.particle_coefficients`, which reads the
   whitened residuals off the approximation's own factor,
-  $W(y^* - g_j) = W(y^* - m_c) - \sqrt{J-1}\,S_{j\cdot}^\top$, and the rule
+  $W(y^* - g_j) = W(y^* - m_c) - \sqrt{\delta}\,S_{j\cdot}^\top$, and the rule
   adds $F_x w_j$, with $F_x$ = `approximation.factor(x)`, to its own
   particles. The build whitens $k = J$ vectors per given block and the call
   one: $J + 1$ in all.
@@ -423,7 +428,8 @@ aligned approximation. Particles whose given anomalies are exactly zero come
 back from the aligned path bit-identical (plus any target draw), since the
 coefficients are exact zeros and are added to the particles themselves.
 
-For a linear-Gaussian problem the updated particles' sample mean and
+For a linear-Gaussian problem and an approximation with divisor $J - 1$, as
+`gaussian_approximation` builds, the updated particles' sample mean and
 covariance (divisor $J - 1$) are unbiased, over the key, for the conditional
 moments of the *fitted* Gaussian; their sampling error is of order
 $1/\sqrt{J}$. Given the particles, the sample mean's variance over the key is
@@ -593,7 +599,7 @@ $\mathcal N_p$ and multiplied by $\sqrt{\rho_{pk}}$. Then, for particle $j$:
 
   $$
   x'_{jp} = m_{x,p} + f_p^\top A_p^{-1} S_p\, b_p
-    + \sqrt{J-1}\,\big(A_p^{-1/2} f_p\big)_j ,
+    + \sqrt{\delta}\,\big(A_p^{-1/2} f_p\big)_j ,
   \qquad (b_p)_k = \sqrt{\rho_{pk}}\,\big(W(y^* - m_c)\big)_{i_k} ;
   $$
 
@@ -604,7 +610,8 @@ $\mathcal N_p$ and multiplied by $\sqrt{\rho_{pk}}$. Then, for particle $j$:
   \qquad (b_{pj})_k = \sqrt{\rho_{pk}}\,\big(W(y^* - g_j)\big)_{i_k} - \varepsilon_{j i_k},
   $$
 
-  with $W(y^* - g_j) = W(y^* - m_c) - \sqrt{J-1}\,S_{j\cdot}^\top$ and
+  with $W(y^* - g_j) = W(y^* - m_c) - \sqrt{\delta}\,S_{j\cdot}^\top$,
+  $\delta$ the approximation's divisor, and
   $\varepsilon$ the one `normal(k_noise, (J, N))` draw of `Matheron`
   ({ref}`kalman-prng`). In the local problem's whitened coordinates
   $\varepsilon_{ji_k}$ is a draw of noise of variance $r_{i_k}/\rho_{pk}$, so
@@ -617,7 +624,7 @@ aligned approximation refuses a block with neither a row nor a term, and a
 target with a term is refused.) Neither $A_p$ nor anything else here depends on
 $y^*$, so the build computes, for each located coordinate, the **local gain
 row** $\kappa_p = S_p^\top A_p^{-1} f_p \in \mathbb R^K$ and, around
-`SymmetricSquareRoot`, the **local anomalies** $\sqrt{J-1}\,A_p^{-1/2} f_p$;
+`SymmetricSquareRoot`, the **local anomalies** $\sqrt{\delta}\,A_p^{-1/2} f_p$;
 a call only gathers and contracts.
 
 Two consequences, both tested:
@@ -1208,6 +1215,12 @@ with the dense reference for a local problem written out in Hunt et al.'s
     agreeing with finite differences, in the values, the particles and the
     radius; pytree round trips, `jit`, `vmap` over values, a refused family;
     float32 kept; the reprs of {ref}`kalman-repr`.
+27. **The divisor** (`tests/test_divisor.py`). With an approximation
+    projected with the empirical divisor $J$: `SymmetricSquareRoot` with
+    noise $cR$, $c = (J-1)/J$, equals the default approximation's update with
+    $R$; `Matheron`'s aligned path equals its general path; both localized
+    rules without tapering equal their wrapped rule. Each fails when the
+    rule reads $J - 1$ instead of the stored divisor.
 
 ### Ported regression tests
 
@@ -1372,8 +1385,8 @@ defining alignment by the first $J$ latent columns.
 have the same neighborhood and weights, and so the same $A_p$; the layer
 still computes one SVD per coordinate.
 
-**A configurable divisor** in the relaxations' spreads: $J - 1$, as
-everywhere.
+**A configurable divisor** in the relaxations' spreads: $J - 1$, as in
+every computation of this layer.
 
 ## References
 

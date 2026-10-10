@@ -107,11 +107,10 @@ Conventions, each normative:
 - **Factors are column-wise.** A factor of a $d$-dimensional covariance is a
   $(d, k)$ operator, as `PSDLinOp.factor()` returns it. Where particles become
   a factor, the conversion carries a transpose and the divisor's square root:
-  $F_b = A_b^\top / \sqrt{J - 1}$ for the $(J, d_b)$ anomalies $A_b$.
+  $F_b = A_b^\top / \sqrt{\delta}$ for the $(J, d_b)$ anomalies $A_b$.
 - **Anomalies are raw deviations from the mean.** No normalization is folded
-  into them. Empirical covariances use the divisor $J - 1$ when unweighted
-  and $1 - \sum_j w_j^2$ when weighted ({ref}`dist-ensemble`). The divisors
-  are fixed, not configurable ({ref}`dist-excluded`).
+  into them. The divisor of a covariance computed from particles is
+  specified once, in {ref}`dist-divisor`.
 - **Samples and particles.** A *sample* is a draw from any distribution. A
   *particle* is an element of an `Ensemble`. Where a function asks for
   samples, an ensemble's particles are those samples.
@@ -123,6 +122,51 @@ Conventions, each normative:
   values of `Gaussian.log_density`, so that one density is evaluated at many
   points in one call.
 - **Scalars are returned as 0-d JAX arrays**, never Python floats.
+
+(dist-divisor)=
+### The divisor
+
+Every covariance computed from particles has the form
+
+$$
+\hat C_{ab} = \frac{1}{\delta_w}\sum_{j=1}^J w_j\, a^{(a)}_j \big(a^{(b)}_j\big)^\top ,
+\qquad
+\delta_w = \begin{cases}
+1 - \sum_j w_j^2 & \text{unbiased (the default)},\\
+1 & \text{empirical},
+\end{cases}
+$$
+
+with $a_j$ the anomalies and $w_j$ the normalized weights. Unweighted,
+$w_j = 1/J$, and this is $\frac{1}{\delta}\sum_j a_j a_j^\top$ with
+
+$$
+\delta = J\,\delta_w = \begin{cases} J - 1 & \text{unbiased},\\ J & \text{empirical}. \end{cases}
+$$
+
+- **The unbiased divisor is the default everywhere.** It treats the
+  particles as independent samples: unweighted, $\hat C$ is unbiased for
+  their covariance; weighted, $1 - \sum_j w_j^2$ is the same correction for
+  fixed weights (self-normalized importance weights make $\hat C$ only
+  consistent). Uniform weights give the unweighted divisor,
+  $J(1 - 1/J) = J - 1$.
+- **The empirical divisor** gives the moments of the empirical distribution
+  $\hat p = \sum_j w_j\delta_{x_j}$ itself. It is the right one when the
+  particles are the atoms of a deterministic rule rather than samples, such
+  as a quadrature or sigma-point rule with nonnegative weights (one set of
+  weights for both moments) that reproduces a mean and covariance exactly.
+- **The override** is a keyword-only `unbiased: bool = True`, taken by
+  `Ensemble.cov` and `Ensemble.project`, and in the layer above by
+  `enskit.maps.statistical_linearization`. Nothing else takes it: the
+  Kalman layer's approximation, `exact_moment_ensemble` and the algorithms'
+  diagnostics always use the unbiased divisor. Any other value than a
+  `bool` raises `TypeError`.
+- **An `EnsembleGaussian` carries its divisor** ({ref}`dist-ensemble-gaussian`):
+  its factor rows are $A_b^\top/\sqrt\delta$, and every operation that
+  reads particles out of them, $a^{(b)}_j = \sqrt\delta\,F_b e_j$, uses the
+  stored $\delta$. A reader that assumed $J - 1$ of a projection formed with
+  $J$ would return particles scaled by $\sqrt{(J-1)/J}$ about their mean,
+  without raising.
 
 (dist-block-arguments)=
 ### Block arguments
@@ -353,10 +397,11 @@ Where an `EnsembleGaussian`'s particles' own residuals are needed (by
 rather than whitened again:
 
 $$
-W(y^* - g_j) = W(y^* - m_c) - \sqrt{J-1}\, S_{j\cdot}^\top ,
+W(y^* - g_j) = W(y^* - m_c) - \sqrt{\delta}\, S_{j\cdot}^\top ,
 $$
 
-for $g_j = m_c + \sqrt{J-1}\,F_c e_j$ the particle's noise-free given value.
+for $g_j = m_c + \sqrt{\delta}\,F_c e_j$ the particle's noise-free given
+value and $\delta$ the stored divisor ({ref}`dist-divisor`).
 This is exact in exact arithmetic and agrees with whitening $y^* - g_j$
 directly to round-off, not bit-exactly ({ref}`dist-matheron`).
 
@@ -617,13 +662,8 @@ reads values, so it is an array, never a Python `bool`.
   reference of weight zero far from the others made every difference
   inaccurate (a particle at $10^{12}$ cost $10^{-4}$ in the mean), and a
   particle of largest weight does not.
-- `cov(a, b=None)`: the sample covariance
-
-  $$
-  \hat C_{ab} = \frac{1}{1 - \sum_j w_j^2}\sum_j w_j\, a_j^{(a)} \big(a_j^{(b)}\big)^\top ,
-  $$
-
-  which for $w_j = 1/J$ is $\frac{1}{J-1}\sum_j a_j a_j^\top$. `cov(a)` is a
+- `cov(a, b=None, *, unbiased=True)`: the covariance $\hat C_{ab}$ of
+  {ref}`dist-divisor`, with the divisor `unbiased` selects. `cov(a)` is a
   {class}`~enskit.linalg.PSDLowRank` of the projected factor row
   ({ref}`dist-project`), width $J$; `cov(a, b)` for $a \ne b$ is the product
   operator $F_a F_b^\top$, shape `(d_a, d_b)`. Neither forms a
@@ -637,12 +677,15 @@ covariance, jointly over all blocks. It is the one place a Gaussian
 approximation enters, and it is always written by the caller (or inside
 `enskit.kalman.gaussian_approximation`, which says so).
 
-**Unweighted**, the result is an `EnsembleGaussian` with $k = J$, no
-independent terms, and
+`project(*, unbiased=True)` uses the divisor `unbiased` selects
+({ref}`dist-divisor`), so its covariance is `cov`'s.
+
+**Unweighted**, whichever the divisor, the result is an `EnsembleGaussian`
+with $k = J$, no independent terms, the divisor $\delta$ stored, and
 
 $$
 m_b = \bar x^{(b)}, \qquad
-F_b = \frac{1}{\sqrt{J-1}}\big[a^{(b)}_1, \dots, a^{(b)}_J\big]
+F_b = \frac{1}{\sqrt{\delta}}\big[a^{(b)}_1, \dots, a^{(b)}_J\big]
 \in \mathbb R^{d_b \times J},
 $$
 
@@ -654,7 +697,7 @@ nothing: `realize_particles()` returns these particles to round-off.
 
 $$
 m_b = \sum_j w_j x^{(b)}_j, \qquad
-(F_b)_{:,j} = \frac{\sqrt{w_j}\,a^{(b)}_j}{\sqrt{1 - \sum_i w_i^2}} .
+(F_b)_{:,j} = \frac{\sqrt{w_j}\,a^{(b)}_j}{\sqrt{\delta_w}} .
 $$
 
 $\sqrt{w_j}$ is computed in log space, $\exp\big((\ell_j - \operatorname{lse}(\ell))/2\big)$,
@@ -671,9 +714,11 @@ reading particles back would divide by $\sqrt{w_j}$. So it is a plain
 `Gaussian`, and the rules that need alignment refuse it.
 
 When the weights are concentrated on one particle to working precision, the
-divisor rounds to zero and the weighted covariance is undefined. That is a
-value precondition: in debug mode `project` raises `ValueError` naming the
-effective sample size; otherwise the factor rows are `inf` or `nan`.
+unbiased divisor rounds to zero and the weighted covariance is undefined.
+That is a value precondition of the unbiased projection: in debug mode
+`project` raises `ValueError` naming the effective sample size and
+`unbiased=False`; otherwise the factor rows are `inf` or `nan`. The
+empirical divisor is $1$, and has no such precondition.
 
 Every particle of positive weight must be finite. That too is a value
 precondition, of `project` and of `cov`: in debug mode they raise
@@ -1079,17 +1124,20 @@ A `Gaussian` whose latent coordinates are an ensemble's particles: $k = J$
 and
 
 $$
-F_b = \frac{1}{\sqrt{J-1}}\big[a^{(b)}_1, \dots, a^{(b)}_J\big], \qquad
+F_b = \frac{1}{\sqrt{\delta}}\big[a^{(b)}_1, \dots, a^{(b)}_J\big], \qquad
 F_b \mathbf 1 = 0 ,
 $$
 
-so latent coordinate $j$ belongs to particle $j$. Two operations need that
+with $\delta$ its divisor, $J - 1$ or $J$ ({ref}`dist-divisor`), so latent
+coordinate $j$ belongs to particle $j$. Two operations need that
 correspondence and exist only here: reading the particles back out
 (`realize_particles`) and moving them as a set (`square_root_map`).
 
-**Construction.** `EnsembleGaussian(means, *, factors=None, block_covs=None, n_particles)`,
-with the `Gaussian` arguments, keyword-only for the same reason, and
-`n_particles` a Python `int` $\ge 2$ equal to the factor rows' width. The normal route is `Ensemble.project()`, which
+**Construction.** `EnsembleGaussian(means, *, factors=None, block_covs=None, n_particles, unbiased=True)`,
+with the `Gaussian` arguments, keyword-only for the same reason,
+`n_particles` a Python `int` $\ge 2$ equal to the factor rows' width, and
+`unbiased` a `bool` saying which divisor the factor rows were formed with
+(`TypeError` otherwise). The normal route is `Ensemble.project()`, which
 centers by construction. Centering is a value precondition, checked in debug
 mode only: for each factor row,
 $\lVert F_b\mathbf 1\rVert_\infty \le 10\,J\,\varepsilon\,\max_{ij}|(F_b)_{ij}|$,
@@ -1104,7 +1152,7 @@ covariance's own scale. Carried by the type, the precondition is checked by
 construction rather than by value.
 
 **What keeps the type.** Every method that keeps the latent space returns an
-`EnsembleGaussian` with the same `n_particles`: `marginal`, `drop`,
+`EnsembleGaussian` with the same `n_particles` and `unbiased`: `marginal`, `drop`,
 `rename`, `condition` (both cases), and `add_noise` on blocks with no
 independent term. `absorb`, `compress`, and `add_noise` on a block that
 already has one return a plain `Gaussian`. So does
@@ -1112,6 +1160,11 @@ already has one return a plain `Gaussian`. So does
 layer's contract says when.
 
 `n_particles` is a static `int`, and `latent_dim == n_particles` always.
+`unbiased` is a static `bool`, so the two divisors are two tree structures,
+and `divisor` is the property $\delta$: `n_particles - 1` when `unbiased`,
+`n_particles` otherwise. Every reading of particles out of the factor rows
+uses `divisor`: `realize_particles`, `square_root_map`,
+`MatheronMap.particle_coefficients`, and the Kalman layer's aligned paths.
 
 (dist-realize)=
 ### `realize_particles(*, key=None, exclude_block_covs=())`
@@ -1120,12 +1173,12 @@ The particles this Gaussian's latent coordinates belong to, as an unweighted
 `Ensemble` over every block:
 
 $$
-x_j^{(b)} = m_b + \sqrt{J-1}\,F_b e_j \;\big[+\, L_b\,\eta^{(b)}_j\big],
+x_j^{(b)} = m_b + \sqrt{\delta}\,F_b e_j \;\big[+\, L_b\,\eta^{(b)}_j\big],
 \qquad j = 1, \dots, J,
 $$
 
-with $e_j$ the $j$-th unit vector, computed as $m_b$ plus the rows of
-$\sqrt{J-1}\,F_b^\top$ (`F_b.to_dense()`, transposed). A block with no factor
+with $e_j$ the $j$-th unit vector and $\delta$ the stored divisor, computed
+as $m_b$ plus the rows of $\sqrt{\delta}\,F_b^\top$ (`F_b.to_dense()`, transposed). A block with no factor
 row realizes as its mean. The bracketed draw from $D_b = L_bL_b^\top$ is added
 for each block that has an independent term and is not named in
 `exclude_block_covs`, a sequence of block names.
@@ -1263,10 +1316,13 @@ returns the same coefficients for the particles of the `EnsembleGaussian` the
 map was built from, reading their residuals off the whitened factor:
 
 $$
-b_j = W(y^* - m_c) - \sqrt{J-1}\,S_{j\cdot}^\top - \varepsilon_j ,
+b_j = W(y^* - m_c) - \sqrt{\delta}\,S_{j\cdot}^\top - \varepsilon_j ,
 $$
 
-with $\varepsilon$ the same pinned `(J, N)` draw. The key is required
+with $\delta$ the Gaussian's divisor and $\varepsilon$ the same pinned
+`(J, N)` draw. The map stores $J$ and $\delta$ as its static attributes
+`n_particles` and `divisor`, both `None` when built from a plain
+`Gaussian`. The key is required
 (`ValueError` when missing): the particles' given blocks are noise-free by
 construction, and without the draw the result would be the unperturbed
 transport, whose sample covariance falls short of the conditional's by
@@ -1284,7 +1340,7 @@ back bit-identical rather than re-realized to round-off.
 
 A `MatheronMap` applied to samples of the joint, with their noise, returns
 exact samples of the conditional. Applied to particles fitted by the
-Gaussian, its output's sample mean and covariance
+Gaussian with the divisor $J - 1$, its output's sample mean and covariance
 (divisor $J-1$) are unbiased for the conditional's moments under the noise
 draw; individual images are not conditional samples, since given the
 particles, image $j$ is distributed
@@ -1298,14 +1354,15 @@ Moves the particle set of the `EnsembleGaussian` it was built from, as a
 whole. Called with $y^*$, for each target block $x$,
 
 $$
-x_j' = m_x + F_x\, A^{-1}S\,W(y^* - m_c) + \sqrt{J-1}\,F_x T e_j
+x_j' = m_x + F_x\, A^{-1}S\,W(y^* - m_c) + \sqrt{\delta}\,F_x T e_j
 \;\big[+\, L_x\,\eta^{(x)}_j\big], \qquad j = 1, \dots, J,
 $$
 
-which is `g.condition(values).realize_particles(key=key)` with everything that
+with $\delta$ the Gaussian's divisor. This is
+`g.condition(values).realize_particles(key=key)` with everything that
 does not depend on $y^*$ computed once, at build: the `IdentityPlusGram` of
 $S$, and each target's realized conditional anomalies
-$\sqrt{J-1}\,(F_xT)^\top$ as a `(J, d_x)` array. A call whitens one vector
+$\sqrt{\delta}\,(F_xT)^\top$ as a `(J, d_x)` array. A call whitens one vector
 per given block, computes $w$ by `solve_factor`, and adds $F_x w$ to the
 target means and stored anomalies. A target with no factor row realizes as
 its mean. A target with an independent term is sampled, which needs `key`
@@ -1324,9 +1381,9 @@ This is the symmetric square-root update of the ensemble transform Kalman
 filter (Bishop et al., 2001; Hunt et al., 2007), written in the latent
 coordinates of the projected Gaussian. For a linear-Gaussian joint whose
 particles' moments equal the joint's, and whose targets have no
-independent terms (a sampled term adds sampling error), the output's sample
-mean and covariance (divisor $J-1$) equal the exact conditional's, in exact
-arithmetic.
+independent terms (a sampled term adds sampling error), the output's
+mean and covariance (divisor $\delta$) equal the exact conditional's, in
+exact arithmetic.
 
 (dist-weights)=
 ## Weights
@@ -1599,6 +1656,7 @@ Type name and static sizes, never array contents:
 Ensemble(n_particles=100, blocks={'x': 40, 'theta': 1}, weighted=False)
 Gaussian(blocks={'u': 4, 'g': 6}, latent_dim=104, block_covs=('g',))
 EnsembleGaussian(n_particles=100, blocks={'u': 4, 'g': 6}, block_covs=('g',))
+EnsembleGaussian(n_particles=100, blocks={'u': 4}, block_covs=(), unbiased=False)
 MatheronMap(given=('g',), targets=('u',), latent_dim=100)
 SquareRootMap(given=('g',), targets=('u',), n_particles=100)
 ```
@@ -1792,6 +1850,16 @@ output. The suite must verify at least:
     checks raise. Two regressions: square, non-symmetric coefficients are
     recovered untransposed, and the minimum-norm intercept is not penalized
     (`pinv([1, X])` differs).
+24. **The divisor** (`tests/test_divisor.py`). `cov` and `project` against
+    the closed forms of {ref}`dist-divisor` for both divisors, unweighted
+    and weighted; uniform weights give the unweighted divisor; the two differ
+    by exactly $(J-1)/J$ or $1 - \sum_j w_j^2$; concentrated weights have an
+    empirical covariance. No path mixes divisors: every method that keeps the
+    latent space keeps `unbiased`; `realize_particles` returns the particles;
+    the square-root update with $\delta = J$ and noise $cR$ equals the one with
+    $J - 1$ and $R$, $c = (J-1)/J$; `particle_coefficients` equals
+    `coefficients` of the realized particles. Each of these fails when any
+    one reading of the divisor is replaced by $J - 1$.
 
 ### Ported regression tests
 
@@ -1963,9 +2031,6 @@ adaptive search over noise scalings that wants one SVD across candidate
 scalings would need more ($S(D/\delta) = \sqrt\delta\,S(D)$, with weight
 multipliers $\delta\sigma_i/(1 + \delta\sigma_i^2)$), and waits for that
 consumer.
-
-**A configurable anomaly divisor.** $J - 1$ unweighted and
-$1 - \sum_j w_j^2$ weighted, everywhere.
 
 **Weighted square roots and alignment.** A weighted projection is not
 aligned, and a weighted square-root reading is a different estimator with

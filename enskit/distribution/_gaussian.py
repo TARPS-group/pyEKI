@@ -62,17 +62,18 @@ class Gaussian:
 
     This one representation covers every Gaussian an ensemble method meets:
 
-    =================================  ===========================  ==================
-    distribution                       shared factor                independent terms
-    =================================  ===========================  ==================
-    a prior :math:`\mathcal N(m, C)`   none (:math:`k = 0`)         :math:`C`
-    an ensemble's moment match         :math:`A^\top/\sqrt{J-1}`    none
-    the same, plus known noise on y    :math:`A^\top/\sqrt{J-1}`    :math:`R` on ``y``
-    a linear-Gaussian joint (u, y)     :math:`[L;\ HL]`             :math:`R` on ``y``
-    =================================  ===========================  ==================
+    =================================  =============================  ==================
+    distribution                       shared factor                  independent terms
+    =================================  =============================  ==================
+    a prior :math:`\mathcal N(m, C)`   none (:math:`k = 0`)           :math:`C`
+    an ensemble's moment match         :math:`A^\top/\sqrt{\delta}`   none
+    the same, plus known noise on y    :math:`A^\top/\sqrt{\delta}`   :math:`R` on ``y``
+    a linear-Gaussian joint (u, y)     :math:`[L;\ HL]`               :math:`R` on ``y``
+    =================================  =============================  ==================
 
-    where :math:`A` holds an ensemble's anomalies row-wise, :math:`LL^\top = C`
-    and :math:`H` is a linear map. The moment match
+    where :math:`A` holds an ensemble's anomalies row-wise, :math:`\delta` is
+    the divisor of :meth:`Ensemble.project`, :math:`LL^\top = C` and
+    :math:`H` is a linear map. The moment match
     is an :class:`EnsembleGaussian`, the subclass whose latent coordinates
     are an ensemble's particles.
 
@@ -717,6 +718,7 @@ class Gaussian:
             targets=targets,
             latent_dim=self.latent_dim,
             n_particles=getattr(self, "n_particles", None),
+            divisor=getattr(self, "divisor", None),
             target_dims=tuple(self.dims[n] for n in targets),
             gram=gram,
             _given_covs=tuple(self._term(n) for n in given),
@@ -1063,7 +1065,12 @@ class Gaussian:
             _block_covs=tuple(covs),
         )
         if isinstance(self, EnsembleGaussian) and not plain:
-            return c.build(EnsembleGaussian, n_particles=self.n_particles, **fields)
+            return c.build(
+                EnsembleGaussian,
+                n_particles=self.n_particles,
+                unbiased=self.unbiased,
+                **fields,
+            )
         return c.build(Gaussian, **fields)
 
     def _select(self, names) -> Gaussian:
@@ -1320,10 +1327,16 @@ class EnsembleGaussian(Gaussian):
 
     .. math::
 
-        F_b = \frac{1}{\sqrt{J-1}}\big[a_1^{(b)}, \dots, a_J^{(b)}\big],
-        \qquad F_b \mathbf 1 = 0,
+        F_b = \frac{1}{\sqrt{\delta}}\big[a_1^{(b)}, \dots, a_J^{(b)}\big],
+        \qquad F_b \mathbf 1 = 0, \qquad
+        \delta = \begin{cases} J - 1 & \text{unbiased},\\ J & \text{otherwise,}
+        \end{cases}
 
-    so latent coordinate :math:`j` belongs to particle :math:`j`.
+    so latent coordinate :math:`j` belongs to particle :math:`j`, and
+    :math:`\delta` is the divisor its covariance was formed with (see
+    :meth:`Ensemble.project`). The Gaussian stores :math:`\delta`, and every
+    operation that reads particles out of its factor rows,
+    :math:`a_j^{(b)} = \sqrt{\delta}\,F_b e_j`, uses it.
     :meth:`Ensemble.project` returns one for an unweighted ensemble. Two
     operations need that correspondence and exist only here: reading the
     particles back out (:meth:`realize_particles`), and moving them as a set
@@ -1331,7 +1344,7 @@ class EnsembleGaussian(Gaussian):
     :class:`Gaussian` and has neither.
 
     Every :class:`Gaussian` method that keeps the latent space returns an
-    :class:`EnsembleGaussian` with the same ``n_particles``:
+    :class:`EnsembleGaussian` with the same ``n_particles`` and ``unbiased``:
     :meth:`~Gaussian.marginal`, :meth:`~Gaussian.drop`,
     :meth:`~Gaussian.rename`, :meth:`~Gaussian.condition` (both cases) and
     :meth:`~Gaussian.add_noise` on blocks with no independent term.
@@ -1347,6 +1360,9 @@ class EnsembleGaussian(Gaussian):
     n_particles : int
         Keyword-only. :math:`J`, a Python ``int >= 2``; the latent width,
         which the factor rows' width must equal.
+    unbiased : bool
+        Keyword-only. Whether the factor rows were formed with
+        :math:`\delta = J - 1` (``True``, the default) or :math:`\delta = J`.
 
     Raises
     ------
@@ -1356,7 +1372,8 @@ class EnsembleGaussian(Gaussian):
         :math:`\lVert F_b\mathbf 1\rVert_\infty
         \le 10\,J\,\varepsilon\max_{ij}|(F_b)_{ij}|` fails, computed densely.
     TypeError
-        As for :class:`Gaussian`, and if ``n_particles`` is not an ``int``.
+        As for :class:`Gaussian`, and if ``n_particles`` is not an ``int`` or
+        ``unbiased`` is not a ``bool``.
 
     Notes
     -----
@@ -1366,15 +1383,24 @@ class EnsembleGaussian(Gaussian):
     whose sample covariance falls short of the conditional's by a rank-one
     term. :meth:`Ensemble.project` centers by construction and is the normal
     way to make one.
+
+    The divisor is stored for the same reason: reading particles out with
+    :math:`\sqrt{J-1}` from factor rows formed with :math:`J` returns them
+    scaled by :math:`\sqrt{(J-1)/J}` about the mean, without raising.
     """
 
     n_particles: int = static_field()
+    unbiased: bool = static_field()
 
-    def __init__(self, means, *, factors=None, block_covs=None, n_particles) -> None:
+    def __init__(
+        self, means, *, factors=None, block_covs=None, n_particles, unbiased=True
+    ) -> None:
         where = "EnsembleGaussian"
         c.check_n_particles(where, n_particles)
+        c.check_unbiased(where, unbiased)
         _init(self, where, means, factors, block_covs, n_particles, "n_particles")
         object.__setattr__(self, "n_particles", n_particles)
+        object.__setattr__(self, "unbiased", unbiased)
         dtype = self._dtype
         eps = float(jnp.finfo(dtype).eps) if jnp.issubdtype(dtype, jnp.floating) else 0.0
         for name, m, F in zip(self.names, self._means, self._factors, strict=True):
@@ -1390,16 +1416,23 @@ class EnsembleGaussian(Gaussian):
                 f"with Ensemble.project().",
             )
 
+    @property
+    def divisor(self) -> int:
+        r""":math:`\delta`: ``n_particles - 1`` if :attr:`unbiased`, else
+        ``n_particles``."""
+        return c.particle_divisor(self.n_particles, self.unbiased)
+
     def realize_particles(self, *, key=None, exclude_block_covs=()) -> Ensemble:
         r"""The particles this Gaussian's latent coordinates belong to.
 
         .. math::
 
-            x_j^{(b)} = m_b + \sqrt{J-1}\,F_b e_j \;\big[\, + L_b \eta_j^{(b)} \big],
+            x_j^{(b)} = m_b + \sqrt{\delta}\,F_b e_j \;\big[\, + L_b \eta_j^{(b)} \big],
             \qquad j = 1, \dots, J,
 
-        with :math:`e_j` the :math:`j`-th unit vector, computed as
-        :math:`m_b` plus the rows of :math:`\sqrt{J-1}\,F_b^\top`
+        with :math:`e_j` the :math:`j`-th unit vector and :math:`\delta` the
+        stored :attr:`divisor`, computed as
+        :math:`m_b` plus the rows of :math:`\sqrt{\delta}\,F_b^\top`
         (``F_b.to_dense()``, transposed). A block with no factor row realizes
         as its mean. The bracketed draw from :math:`D_b = L_b L_b^\top` is
         added for each block that has an independent term and is not named
@@ -1461,7 +1494,7 @@ class EnsembleGaussian(Gaussian):
             c.require(self._term(name), "factor")
         keys = jax.random.split(key, len(sampled)) if sampled else None
         J, dtype = self.n_particles, self._dtype
-        scale = math.sqrt(J - 1)
+        scale = math.sqrt(self.divisor)
         blocks, i = [], 0
         for name, m, F, D in zip(
             self.names, self._means, self._factors, self._block_covs, strict=True
@@ -1488,7 +1521,8 @@ class EnsembleGaussian(Gaussian):
         everything that does not depend on the value computed here, once:
         :math:`S = (W F_c)^\top`, its
         :class:`~enskit.linalg.IdentityPlusGram`, and each target's
-        conditional anomalies :math:`\sqrt{J-1}\,(F_xT)^\top`.
+        conditional anomalies :math:`\sqrt{\delta}\,(F_xT)^\top`, with
+        :math:`\delta` the stored :attr:`divisor`.
 
         Parameters
         ----------
@@ -1528,7 +1562,7 @@ class EnsembleGaussian(Gaussian):
         S, _ = self._whiten_given(where, given, None)
         gram = IdentityPlusGram(S)
         T = gram.inverse_sqrt()
-        scale = math.sqrt(self.n_particles - 1)
+        scale = math.sqrt(self.divisor)
         rows, anomalies = [], []
         for name in targets:
             F = self._factors[self.names.index(name)]
@@ -1553,7 +1587,9 @@ class EnsembleGaussian(Gaussian):
         return c.safe_repr(
             lambda: (
                 f"EnsembleGaussian(n_particles={self.n_particles}, blocks={self.dims}, "
-                f"block_covs={self._term_names()})"
+                f"block_covs={self._term_names()}"
+                + ("" if self.unbiased else ", unbiased=False")
+                + ")"
             ),
             "EnsembleGaussian",
             lambda: self.batch_shape,

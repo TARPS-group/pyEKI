@@ -159,8 +159,8 @@ def with_block(g: Gaussian, name: str, mean, factor, cov, *, aligned: bool) -> G
 
     Built through the public constructor.
 
-    ``aligned`` keeps an :class:`EnsembleGaussian` one; the caller decides,
-    since only it knows whether the latent space changed.
+    ``aligned`` keeps an :class:`EnsembleGaussian` one, with its divisor;
+    the caller decides, since only it knows whether the latent space changed.
     """
     means = {n: g.mean(n) for n in g.names}
     factors = {n: g.factor(n) for n in g.names}
@@ -170,7 +170,11 @@ def with_block(g: Gaussian, name: str, mean, factor, cov, *, aligned: bool) -> G
     covs = {n: D for n, D in covs.items() if D is not None}
     if aligned:
         return EnsembleGaussian(
-            means, factors=factors, block_covs=covs, n_particles=g.n_particles
+            means,
+            factors=factors,
+            block_covs=covs,
+            n_particles=g.n_particles,
+            unbiased=g.unbiased,
         )
     return Gaussian(means, factors=factors, block_covs=covs, latent_dim=g.latent_dim)
 

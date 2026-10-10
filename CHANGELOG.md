@@ -18,6 +18,15 @@ them.
   rank. `maps.statistical_linearization(dist, inputs=..., output=...)`
   packages it as a `Linear` map with the particles' residuals, a
   `Linearization`. Example 16 works it through.
+- **A choice of divisor for covariances computed from particles.**
+  `Ensemble.cov`, `Ensemble.project` and `maps.statistical_linearization`
+  take `unbiased=True`, the default and the previous behavior ($J - 1$, or
+  $1 - \sum_j w_j^2$ weighted); `unbiased=False` divides by $J$, or $1$,
+  giving the moments of the empirical distribution itself, as the points of
+  a quadrature rule with nonnegative weights need. An `EnsembleGaussian` stores its divisor
+  (`unbiased`, and the property `divisor`), and every operation that reads
+  particles out of it, the Kalman rules' included, uses that divisor.
+  `MatheronMap` gains the attribute `divisor`.
 
 ## 0.1.0
 

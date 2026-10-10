@@ -57,7 +57,7 @@ class LocalizedUpdateRule:
     .. math::
 
         x'_{jp} &= m_{x,p} + f_p^\top A_p^{-1} S_p\, b_p
-                   + \sqrt{J-1}\,\big(A_p^{-1/2} f_p\big)_j,
+                   + \sqrt{\delta}\,\big(A_p^{-1/2} f_p\big)_j,
         &\quad (b_p)_k &= \sqrt{\rho_{pk}}\,\big(W(y^* - m_c)\big)_{i_k}
         &\quad &\text{(square root)},\\
         x'_{jp} &= x_{jp} + f_p^\top A_p^{-1} S_p\, b_{pj},
@@ -65,7 +65,9 @@ class LocalizedUpdateRule:
                              - \varepsilon_{j i_k}
         &\quad &\text{(stochastic)},
 
-    with :math:`m_{x,p}` the target's mean, :math:`g_j` particle :math:`j`'s
+    with :math:`\delta` the approximation's divisor
+    (:attr:`~enskit.distribution.EnsembleGaussian.divisor`),
+    :math:`m_{x,p}` the target's mean, :math:`g_j` particle :math:`j`'s
     given values and :math:`\varepsilon` one standard normal ``(J, N)`` draw
     shared by every local update. A target block whose locations are
     ``None`` gets the wrapped rule's global update, with the same draw.
@@ -198,6 +200,7 @@ class LocalizedUpdateRule:
         c.check_alignment(where, particles, approximation)
 
         J = particles.n_particles
+        scale = math.sqrt(approximation.divisor)
         dtype = particles[particles.names[0]].dtype
         stochastic = isinstance(self.update_rule, Matheron)
         eye = jnp.eye(J, dtype=dtype)
@@ -257,7 +260,7 @@ class LocalizedUpdateRule:
                 if stochastic:
                     entry["noise"] = gain
                 else:
-                    entry["anom"] = math.sqrt(J - 1) * anom.T
+                    entry["anom"] = scale * anom.T
             elif kind == "global":
                 entry["row"] = F
             neighbors.append(entry["idx"])
@@ -273,7 +276,7 @@ class LocalizedUpdateRule:
                 T = gram.inverse_sqrt().matvec(eye)
                 for i, kind in enumerate(kinds):
                     if kind == "global":
-                        anomalies[i] = math.sqrt(J - 1) * rows[i].matvec(T)
+                        anomalies[i] = scale * rows[i].matvec(T)
 
         return c.build(
             _LocalizedUpdate,
@@ -295,6 +298,7 @@ class LocalizedUpdateRule:
             targets=targets,
             given_dims=tuple(dims[n] for n in given),
             n_particles=J,
+            divisor=approximation.divisor,
             dtype=jnp.dtype(dtype),
             kinds=tuple(kinds),
         )
@@ -681,7 +685,10 @@ def gaspari_cohn(r) -> Array:
         "gram",
         "target_rows",
     ),
-    meta=("rule", "given", "targets", "given_dims", "n_particles", "dtype", "kinds"),
+    meta=(
+        "rule", "given", "targets", "given_dims", "n_particles", "divisor", "dtype",
+        "kinds",
+    ),
 )
 class _LocalizedUpdate:
     """The particle update :class:`LocalizedUpdateRule` builds."""
@@ -712,7 +719,7 @@ class _LocalizedUpdate:
             required=stochastic,
             why=": the stochastic rule draws the given blocks' noise",
         )
-        J, dtype = self.n_particles, self.dtype
+        dtype = self.dtype
         whitened = []
         for name, d, D, m in zip(
             self.given, self.given_dims, self.given_covs, self.given_means, strict=True
@@ -744,7 +751,7 @@ class _LocalizedUpdate:
         if stochastic:
             _, k_noise = jax.random.split(key)
             eps = jax.random.normal(k_noise, self.S.shape, dtype)
-            resid = b - math.sqrt(J - 1) * self.S
+            resid = b - math.sqrt(self.divisor) * self.S
 
         blocks = []
         for i, (name, kind) in enumerate(zip(self.targets, self.kinds, strict=True)):

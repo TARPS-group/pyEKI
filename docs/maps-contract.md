@@ -87,7 +87,7 @@ are 0-d arrays.
 | `Linear(op, shift=None)` | $x \mapsto Ax + c$, or $\sum_b A_bx_b + c$ | both; also a simulator |
 | `AdditiveNoise(cov)` | $x \mapsto x + e$, $e \sim \mathcal N(0, R)$ independent of everything | both; not a simulator |
 | `BlackBox(f, output_dim, *, dtype=None, needs_key=False)` | a host-side simulator, traceable, with a zero derivative | `Ensemble`; a simulator |
-| `statistical_linearization(dist, *, inputs, output, min_norm=False)` | the affine map $x \mapsto Ax + b$ that best predicts `output` from `inputs`, with its residuals, as a `Linearization` | `Ensemble`, `Gaussian` |
+| `statistical_linearization(dist, *, inputs, output, min_norm=False, unbiased=True)` | the affine map $x \mapsto Ax + b$ that best predicts `output` from `inputs`, with its residuals, as a `Linearization` | `Ensemble`, `Gaussian` |
 | `enskit.testing.check_simulator` | checks a simulator against the contract | — |
 
 Three rules govern the set:
@@ -393,8 +393,10 @@ the product operator `product(A, F_x)` for one input, and
 `product(hstack(A_1, ..., A_m), hstack(F_1.T, ..., F_m.T).T)` for several:
 a structured $A_b$ or $F_b$ is never densified. When nothing was absorbed,
 the latent space is unchanged, and an `EnsembleGaussian` stays one with the
-same `n_particles`: $F_y\mathbf 1 = \sum_b A_bF_b\mathbf 1 = 0$, so the
-factor stays centered.
+same `n_particles` and divisor ({ref}`dist-divisor`):
+$F_y\mathbf 1 = \sum_b A_bF_b\mathbf 1 = 0$, so the factor stays centered,
+and $\sqrt\delta\,F_ye_j = \sum_b A_b x^{(b)}_j$ minus the mean, so the
+particles it realizes are the mapped particles.
 
 On a prior with $k = 0$, `pushforward(prior, Linear(A), inputs="u",
 output="g")` is the linear-Gaussian joint of $u$ and $g = Au + c$, with
@@ -522,7 +524,7 @@ the simulator's outputs are data; it is not the derivative of the
 simulator.
 
 (maps-linearization)=
-## `statistical_linearization(dist, *, inputs, output, min_norm=False)`
+## `statistical_linearization(dist, *, inputs, output, min_norm=False, unbiased=True)`
 
 The statistical linear regression of block $y$ = `output` on the blocks
 $x$ = `inputs` under `dist`:
@@ -548,8 +550,14 @@ and an ensemble whose outputs a run already computed is linearized without
 calling the simulator again.
 
 **The computation** is `g.regression(output, given=inputs,
-min_norm=min_norm)` ({ref}`dist-regression`), with `g = dist.project()` for
-an `Ensemble` and `g = dist` for a `Gaussian`. Its three cases, its
+min_norm=min_norm)` ({ref}`dist-regression`), with
+`g = dist.project(unbiased=unbiased)` for an `Ensemble` and `g = dist` for a
+`Gaussian`. `unbiased` selects the divisor of {ref}`dist-divisor`: $A$ and
+$b$ do not depend on it, and $\Omega$ is proportional to its reciprocal, so
+`unbiased=False` gives $\Omega$ times $(J - 1)/J$ unweighted, or
+$1 - \sum_j w_j^2$ weighted. A `Gaussian`'s covariance is used as it is (an
+`EnsembleGaussian` keeps the divisor it was projected with), so
+`unbiased=False` with a `Gaussian` raises `ValueError`. Its three cases, its
 validation and its accuracy apply unchanged. A ridge regression is a
 `Gaussian` argument, `ens.project().add_noise(x=Lam)`; there is no
 regularization argument.
@@ -566,16 +574,16 @@ regularization argument.
 
 - `inputs` is required (a `str` or a sequence of `str`, at least one,
   distinct); `output` is a `str` naming a block that is not an input;
-  `min_norm` is a `bool`. A vmapped family raises, as in `pushforward`.
+  `min_norm` and `unbiased` are `bool`s. A vmapped family raises, as in `pushforward`.
 - **A weighted ensemble whose inputs' total dimension exceeds $J - 1$
   raises `ValueError`** before projecting, naming `resample` and ridge. Its
   projection's null vector is $\sqrt w$, not $\mathbf 1$, so the
   minimum-norm computation of the distribution layer does not apply to it.
 - **The residuals depend on the regime**, which the docstring states: when
   the inputs' dimension is at least $J - 1$, the fit interpolates and the
-  residuals and $\Omega$ vanish to round-off; below it, $\Omega$ has divisor
-  $J - 1$ and underestimates the error covariance of a linear model by the
-  factor $(J - 1 - d_x)/(J - 1)$.
+  residuals and $\Omega$ vanish to round-off; below it, $\Omega$ has the
+  projection's divisor $\delta$ and, for a linear model, has expectation
+  $(J - 1 - d_x)/\delta$ times the error covariance.
 - **Consistency.** Without regularization, pushing the inputs' projection
   through `map` and then `AdditiveNoise(residual_cov)` reproduces the
   projected joint. $\Omega$ is singular in general and has no `whiten`: as
